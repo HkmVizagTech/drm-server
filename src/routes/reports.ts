@@ -66,20 +66,157 @@ router.get('/seva/summary', async (_req, res) => {
   res.json(result.rows);
 });
 
-// Dashboard overview
+// Dashboard overview.
+//
+// One endpoint, many small aggregates, all issued in parallel - the dashboard
+// is the first screen staff see, so it should be one round trip rather than a
+// waterfall of a dozen requests.
+//
+// Postgres returns NUMERIC as a string to avoid float precision loss, so every
+// money/count value is explicitly Number()-ed on the way out. Skipping that is
+// how you end up with "₹12" + "₹5" rendering as "₹125" in the UI.
 router.get('/dashboard', async (_req, res) => {
-  const [totalPeople, totalDonations, upcomingEvents, pendingTriggers] = await Promise.all([
-    pool.query('SELECT COUNT(*) FROM people'),
-    pool.query('SELECT SUM(amount) as total, COUNT(*) as count FROM donations'),
-    pool.query("SELECT COUNT(*) FROM events WHERE date_end >= NOW()"),
-    pool.query("SELECT COUNT(*) FROM triggers WHERE status = 'pending'"),
+  const [
+    people,
+    giving,
+    thisMonth,
+    lastMonth,
+    recurring,
+    operations,
+    monthlyTrend,
+    byPurpose,
+    topDonors,
+    recentDonations,
+  ] = await Promise.all([
+    pool.query(`
+      SELECT COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE 'donor' = ANY(roles)) AS donors,
+             COUNT(*) FILTER (WHERE created_at >= date_trunc('month', NOW())) AS new_this_month
+      FROM people
+    `),
+    pool.query(`
+      SELECT COALESCE(SUM(amount), 0) AS total,
+             COUNT(*) AS count,
+             COALESCE(AVG(amount), 0) AS avg_gift
+      FROM donations
+    `),
+    pool.query(`
+      SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
+      FROM donations WHERE created_at >= date_trunc('month', NOW())
+    `),
+    pool.query(`
+      SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
+      FROM donations
+      WHERE created_at >= date_trunc('month', NOW()) - INTERVAL '1 month'
+        AND created_at <  date_trunc('month', NOW())
+    `),
+    pool.query(`
+      SELECT COUNT(*) FILTER (WHERE status = 'active') AS active_count,
+             COALESCE(SUM(amount) FILTER (WHERE status = 'active' AND frequency = 'monthly'), 0) AS monthly_value,
+             COUNT(*) FILTER (WHERE status = 'paused') AS paused_count
+      FROM subscriptions
+    `),
+    pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM prasadam_deliveries WHERE status IN ('pending', 'packed')) AS prasadam_pending,
+        (SELECT COUNT(*) FROM donations WHERE receipt_generated = false) AS receipts_pending,
+        (SELECT COUNT(*) FROM events WHERE date_end >= NOW()) AS upcoming_events,
+        (SELECT COUNT(*) FROM triggers WHERE status = 'pending') AS pending_triggers
+    `),
+    // generate_series so months with no giving still appear as zero - a trend
+    // chart that silently drops empty months misreads as "no gap".
+    pool.query(`
+      SELECT to_char(m.month, 'YYYY-MM') AS month,
+             COALESCE(SUM(d.amount), 0) AS total,
+             COUNT(d.id) AS count
+      FROM generate_series(
+             date_trunc('month', NOW()) - INTERVAL '11 months',
+             date_trunc('month', NOW()),
+             INTERVAL '1 month'
+           ) AS m(month)
+      LEFT JOIN donations d ON date_trunc('month', d.created_at) = m.month
+      GROUP BY m.month
+      ORDER BY m.month
+    `),
+    // Grouped case-insensitively: purposes synced from hkmsite2.0 are free-text
+    // seva names, so "General" and "general" both occur and would otherwise
+    // render as two identical-looking rows that don't add up. The UI title-cases
+    // the lowered value back for display.
+    pool.query(`
+      SELECT lower(purpose) AS purpose, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
+      FROM donations GROUP BY lower(purpose) ORDER BY total DESC LIMIT 8
+    `),
+    pool.query(`
+      SELECT p.id, p.name, p.phone,
+             SUM(d.amount) AS total, COUNT(d.id) AS count
+      FROM people p JOIN donations d ON d.person_id = p.id
+      GROUP BY p.id ORDER BY total DESC LIMIT 8
+    `),
+    pool.query(`
+      SELECT d.id, d.amount, d.purpose, d.created_at, d.receipt_number,
+             p.id AS person_id, p.name AS donor_name, p.phone AS donor_phone
+      FROM donations d JOIN people p ON d.person_id = p.id
+      ORDER BY d.created_at DESC LIMIT 8
+    `),
   ]);
 
+  const pr = people.rows[0];
+  const gr = giving.rows[0];
+  const rr = recurring.rows[0];
+  const or = operations.rows[0];
+
   res.json({
-    totalPeople: Number(totalPeople.rows[0].count),
-    totalDonations: { total: Number(totalDonations.rows[0].total) || 0, count: Number(totalDonations.rows[0].count) },
-    upcomingEvents: Number(upcomingEvents.rows[0].count),
-    pendingTriggers: Number(pendingTriggers.rows[0].count),
+    people: {
+      total: Number(pr.total),
+      donors: Number(pr.donors),
+      newThisMonth: Number(pr.new_this_month),
+    },
+    giving: {
+      lifetimeTotal: Number(gr.total),
+      lifetimeCount: Number(gr.count),
+      avgGift: Number(gr.avg_gift),
+      thisMonth: Number(thisMonth.rows[0].total),
+      thisMonthCount: Number(thisMonth.rows[0].count),
+      lastMonth: Number(lastMonth.rows[0].total),
+    },
+    recurring: {
+      activeCount: Number(rr.active_count),
+      monthlyValue: Number(rr.monthly_value),
+      pausedCount: Number(rr.paused_count),
+    },
+    operations: {
+      prasadamPending: Number(or.prasadam_pending),
+      receiptsPending: Number(or.receipts_pending),
+      upcomingEvents: Number(or.upcoming_events),
+      pendingTriggers: Number(or.pending_triggers),
+    },
+    monthlyTrend: monthlyTrend.rows.map((r) => ({
+      month: r.month,
+      total: Number(r.total),
+      count: Number(r.count),
+    })),
+    byPurpose: byPurpose.rows.map((r) => ({
+      purpose: r.purpose,
+      total: Number(r.total),
+      count: Number(r.count),
+    })),
+    topDonors: topDonors.rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      phone: r.phone,
+      total: Number(r.total),
+      count: Number(r.count),
+    })),
+    recentDonations: recentDonations.rows.map((r) => ({
+      id: r.id,
+      personId: r.person_id,
+      donorName: r.donor_name,
+      donorPhone: r.donor_phone,
+      amount: Number(r.amount),
+      purpose: r.purpose,
+      createdAt: r.created_at,
+      receiptNumber: r.receipt_number,
+    })),
   });
 });
 

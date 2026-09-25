@@ -7,34 +7,87 @@ import { upsertDonorSnapshot } from '../services/hkmvSync';
 const router = Router();
 router.use(authenticate);
 
-// List people with filters
+// Sort options are whitelisted rather than interpolated from the query string -
+// ORDER BY can't be parameterised, so accepting raw input here would be a SQL
+// injection hole.
+const PEOPLE_SORTS: Record<string, string> = {
+  recent: 'p.created_at DESC',
+  name: 'p.name ASC',
+  lifetime: 'lifetime_total DESC NULLS LAST',
+  donations: 'donation_count DESC',
+  last_gift: 'last_donation_at DESC NULLS LAST',
+};
+
+// List people with filters, giving aggregates and pagination.
+//
+// The aggregates are the answer to "one phone number, many donations": people
+// are keyed by phone, so every gift that donor ever made rolls up to the single
+// person row - this endpoint surfaces how many and how much, so the list can
+// show it without N+1 follow-up requests.
 router.get('/', async (req, res) => {
-  const { role, search, page = '1', limit = '20' } = req.query;
-  const offset = (Number(page) - 1) * Number(limit);
+  const { role, search, sort = 'recent' } = req.query;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+  const offset = (page - 1) * limit;
+
   const conditions: string[] = [];
   const values: unknown[] = [];
   let idx = 1;
 
   if (role) {
-    conditions.push(`$${idx} = ANY(roles)`);
+    conditions.push(`$${idx} = ANY(p.roles)`);
     values.push(role);
     idx++;
   }
   if (search) {
-    conditions.push(`(name ILIKE $${idx} OR phone ILIKE $${idx})`);
+    conditions.push(`(p.name ILIKE $${idx} OR p.phone ILIKE $${idx} OR p.email ILIKE $${idx})`);
     values.push(`%${search}%`);
     idx++;
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  values.push(Number(limit), offset);
+  const orderBy = PEOPLE_SORTS[String(sort)] || PEOPLE_SORTS.recent;
 
   const [data, count] = await Promise.all([
-    pool.query(`SELECT * FROM people ${where} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`, values),
-    pool.query(`SELECT COUNT(*) FROM people ${where}`, values.slice(0, -2)),
+    pool.query(
+      `SELECT p.*,
+              COALESCE(g.donation_count, 0)  AS donation_count,
+              COALESCE(g.lifetime_total, 0)  AS lifetime_total,
+              g.last_donation_at,
+              COALESCE(s.active_subscriptions, 0) AS active_subscriptions
+       FROM people p
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) AS donation_count,
+                SUM(amount) AS lifetime_total,
+                MAX(created_at) AS last_donation_at
+         FROM donations WHERE person_id = p.id
+       ) g ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) AS active_subscriptions
+         FROM subscriptions WHERE person_id = p.id AND status = 'active'
+       ) s ON TRUE
+       ${where}
+       ORDER BY ${orderBy}
+       LIMIT $${idx} OFFSET $${idx + 1}`,
+      [...values, limit, offset]
+    ),
+    pool.query(`SELECT COUNT(*) FROM people p ${where}`, values),
   ]);
 
-  res.json({ people: data.rows, total: Number(count.rows[0].count) });
+  const total = Number(count.rows[0].count);
+
+  res.json({
+    people: data.rows.map((r) => ({
+      ...r,
+      donation_count: Number(r.donation_count),
+      lifetime_total: Number(r.lifetime_total),
+      active_subscriptions: Number(r.active_subscriptions),
+    })),
+    total,
+    page,
+    limit,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+  });
 });
 
 // Get person by id (with donation history)

@@ -8,36 +8,74 @@ router.use(authenticate);
 
 // List donations with filters
 router.get('/', async (req, res) => {
-  const { purpose, source, from_date, to_date, receipt_generated, page = '1', limit = '50' } = req.query;
-  const offset = (Number(page) - 1) * Number(limit);
+  const { purpose, source, from_date, to_date, receipt_generated, search } = req.query;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+  const offset = (page - 1) * limit;
+
   const conditions: string[] = [];
   const values: unknown[] = [];
   let idx = 1;
 
-  if (purpose) { conditions.push(`d.purpose = $${idx}`); values.push(purpose); idx++; }
+  // lower() on both sides so the filter matches regardless of how the seva name
+  // was cased upstream - the dropdown is populated from lowered values.
+  if (purpose) { conditions.push(`lower(d.purpose) = lower($${idx})`); values.push(purpose); idx++; }
   if (source) { conditions.push(`d.source = $${idx}`); values.push(source); idx++; }
   if (from_date) { conditions.push(`d.created_at >= $${idx}`); values.push(from_date); idx++; }
   if (to_date) { conditions.push(`d.created_at <= $${idx}`); values.push(to_date); idx++; }
-  if (receipt_generated !== undefined) {
+  if (receipt_generated !== undefined && receipt_generated !== '') {
     conditions.push(`d.receipt_generated = $${idx}`);
     values.push(receipt_generated === 'true');
     idx++;
   }
+  if (search) {
+    conditions.push(`(p.name ILIKE $${idx} OR p.phone ILIKE $${idx} OR d.receipt_number ILIKE $${idx})`);
+    values.push(`%${search}%`);
+    idx++;
+  }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  values.push(Number(limit), offset);
 
-  const [data, count] = await Promise.all([
+  // The filtered total is returned alongside the page so the UI can show
+  // "showing 1-25 of 4,004" and render real pagination instead of silently
+  // truncating at the page limit.
+  const [data, count, sum] = await Promise.all([
     pool.query(
       `SELECT d.*, p.name as donor_name, p.phone as donor_phone
        FROM donations d JOIN people p ON d.person_id = p.id
        ${where} ORDER BY d.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
-      values
+      [...values, limit, offset]
     ),
-    pool.query(`SELECT COUNT(*) FROM donations d ${where}`, values.slice(0, -2)),
+    pool.query(`SELECT COUNT(*) FROM donations d JOIN people p ON d.person_id = p.id ${where}`, values),
+    pool.query(`SELECT COALESCE(SUM(d.amount), 0) AS total FROM donations d JOIN people p ON d.person_id = p.id ${where}`, values),
   ]);
 
-  res.json({ donations: data.rows, total: Number(count.rows[0].count) });
+  const total = Number(count.rows[0].count);
+
+  res.json({
+    donations: data.rows.map((r) => ({ ...r, amount: Number(r.amount) })),
+    total,
+    page,
+    limit,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+    filteredAmount: Number(sum.rows[0].total),
+  });
+});
+
+// Distinct purposes actually present in the data, for the filter dropdown.
+//
+// A hardcoded list of four purposes was fine when every donation was entered
+// here by hand, but purposes synced from hkmsite2.0 are free-text seva names -
+// so a fixed dropdown can't filter most of the real data. Matching is
+// case-insensitive for the same reason the dashboard groups that way.
+router.get('/purposes', async (_req, res) => {
+  const result = await pool.query(`
+    SELECT lower(purpose) AS purpose, COUNT(*) AS count
+    FROM donations
+    GROUP BY lower(purpose)
+    ORDER BY count DESC
+  `);
+  res.json(result.rows.map((r) => ({ purpose: r.purpose, count: Number(r.count) })));
 });
 
 // Summary stats
