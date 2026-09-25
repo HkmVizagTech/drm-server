@@ -9,7 +9,18 @@
 // HKMV_API_URL / HKMV_INTERNAL_SECRET must be set to matching values in
 // both apps' env for this to work - see server/.env.
 
-const HKMV_API_URL = process.env.HKMV_API_URL || '';
+// Normalize whatever is in the env var into a usable absolute base URL.
+// A value pasted without a scheme (e.g. "example.up.railway.app") makes
+// fetch() throw "Failed to parse URL" rather than doing anything useful, and
+// a trailing slash produces a double slash in every request path - so fix
+// both here instead of depending on the env var being typed perfectly.
+function normalizeBaseUrl(raw: string): string {
+  const trimmed = (raw || '').trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
+const HKMV_API_URL = normalizeBaseUrl(process.env.HKMV_API_URL || '');
 const HKMV_INTERNAL_SECRET = process.env.HKMV_INTERNAL_SECRET || '';
 
 export interface HkmvPrasadam {
