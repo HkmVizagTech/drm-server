@@ -1,17 +1,24 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
+import {
+  GROUP_LABELS,
+  canonPageSql,
+  pageGroupSql,
+  type PageGroup,
+} from '../utils/pageGroups';
 
 const router = Router();
 router.use(authenticate);
 
-// Pages singled out on the dashboard with their own figures.
-//
-// /donate and /donations are DIFFERENT pages on the main site and must never
-// be added together - they are separate asks with separate performance. They
-// are matched exactly (not by prefix) for that reason: a prefix match on
-// "/donate" would swallow "/donations" and silently merge the two.
-const SPOTLIGHT_PAGES = ['/donations', '/donate'];
+// Page attribution lives in utils/pageGroups.ts so the dashboard, the page
+// breakdown and the donations filter all classify a row the same way. See that
+// file for the taxonomy and how to add a page.
+const CANON_PAGE = canonPageSql('source_page');
+const PAGE_GROUP = pageGroupSql('source_page', 'source_site');
+
+// The order the buckets are presented in, everywhere.
+const GROUP_ORDER: PageGroup[] = ['donations', 'donate', 'other', 'unattributed'];
 
 // Donation summary by period
 router.get('/donations/period', async (req, res) => {
@@ -97,7 +104,7 @@ router.get('/dashboard', async (_req, res) => {
     recentDonations,
     bySite,
     bySourcePage,
-    pageSpotlight,
+    groupTotals,
   ] = await Promise.all([
     pool.query(`
       SELECT COUNT(*) AS total,
@@ -186,30 +193,31 @@ router.get('/dashboard', async (_req, res) => {
     // before attribution existed, so it's labelled rather than dropped.
     pool.query(`
       SELECT source_site,
-             COALESCE(source_page, '(not recorded)') AS source_page,
+             COALESCE(${CANON_PAGE}, '(not recorded)') AS source_page,
              COALESCE(SUM(amount), 0) AS total,
-             COUNT(*) AS count
+             COUNT(*) AS count,
+             COALESCE(SUM(amount) FILTER (WHERE created_at >= date_trunc('month', NOW())), 0) AS this_month
       FROM donations
-      GROUP BY source_site, COALESCE(source_page, '(not recorded)')
+      GROUP BY source_site, COALESCE(${CANON_PAGE}, '(not recorded)')
       ORDER BY total DESC
-      LIMIT 12
+      LIMIT 40
     `),
-    // Exact-match figures for the spotlight pages. A LEFT JOIN from the page
-    // list means a page with no giving yet still returns a zero row rather
-    // than vanishing from the dashboard.
-    pool.query(
-      `SELECT pages.page AS source_page,
-              COALESCE(SUM(d.amount), 0) AS total,
-              COUNT(d.id) AS count,
-              COALESCE(SUM(d.amount) FILTER (WHERE d.created_at >= date_trunc('month', NOW())), 0) AS this_month,
-              COALESCE(SUM(d.amount) FILTER (WHERE d.created_at >= date_trunc('month', NOW()) - INTERVAL '1 month'
-                                               AND d.created_at <  date_trunc('month', NOW())), 0) AS last_month,
-              MAX(d.created_at) AS last_gift_at
-       FROM unnest($1::text[]) AS pages(page)
-       LEFT JOIN donations d ON d.source_page = pages.page
-       GROUP BY pages.page`,
-      [SPOTLIGHT_PAGES]
-    ),
+    // Bucket totals for the main site: the donations family, the donate seva
+    // campaigns, and everything else. Grouped in SQL rather than summed in JS
+    // so the figure on the dashboard is the database's own answer.
+    pool.query(`
+      SELECT ${PAGE_GROUP} AS grp,
+             COALESCE(SUM(amount), 0) AS total,
+             COUNT(*) AS count,
+             COUNT(DISTINCT ${CANON_PAGE}) AS page_count,
+             COALESCE(SUM(amount) FILTER (WHERE created_at >= date_trunc('month', NOW())), 0) AS this_month,
+             COALESCE(SUM(amount) FILTER (WHERE created_at >= date_trunc('month', NOW()) - INTERVAL '1 month'
+                                            AND created_at <  date_trunc('month', NOW())), 0) AS last_month,
+             MAX(created_at) AS last_gift_at
+      FROM donations
+      WHERE source_site = 'hkmv'
+      GROUP BY ${PAGE_GROUP}
+    `),
   ]);
 
   const pr = people.rows[0];
@@ -278,23 +286,112 @@ router.get('/dashboard', async (_req, res) => {
       count: Number(r.count),
       thisMonth: Number(r.this_month),
     })),
-    pageSpotlight: SPOTLIGHT_PAGES.map((page) => {
-      const row = pageSpotlight.rows.find((r) => r.source_page === page);
+    // Main-site giving split into its three buckets, always in the same order
+    // and always all present - a bucket with nothing in it yet returns a zero
+    // row rather than disappearing, so the dashboard never silently loses a
+    // section. "unattributed" is included only when it actually has money in
+    // it, because an empty "No page recorded" card is just noise.
+    pageGroups: GROUP_ORDER.map((key) => {
+      const row = groupTotals.rows.find((r) => r.grp === key);
       return {
-        page,
+        key,
+        label: GROUP_LABELS[key],
         total: Number(row?.total ?? 0),
         count: Number(row?.count ?? 0),
+        pageCount: Number(row?.page_count ?? 0),
         thisMonth: Number(row?.this_month ?? 0),
         lastMonth: Number(row?.last_month ?? 0),
         lastGiftAt: row?.last_gift_at ?? null,
       };
-    }),
+    }).filter((g) => g.key !== 'unattributed' || g.count > 0),
     bySourcePage: bySourcePage.rows.map((r) => ({
       site: r.source_site,
       sourcePage: r.source_page,
       total: Number(r.total),
       count: Number(r.count),
+      thisMonth: Number(r.this_month),
     })),
+  });
+});
+
+// Full page breakdown, one bucket at a time, for the "Donation pages" screen.
+//
+// Separate from /dashboard on purpose: the dashboard wants headline figures and
+// should stay a single fast round trip, while this screen wants every page with
+// its own numbers and is only loaded when someone asks for it.
+//
+// It also returns a reconciliation block. Classification bugs are the quiet
+// kind - a page slips into the wrong bucket and every total still LOOKS
+// plausible - so the endpoint states what the buckets add up to alongside what
+// the site actually took, and the UI shows a warning if they ever disagree.
+router.get('/pages', async (_req, res) => {
+  const [pages, siteTotal] = await Promise.all([
+    pool.query(`
+      SELECT ${PAGE_GROUP} AS grp,
+             COALESCE(${CANON_PAGE}, '(not recorded)') AS page,
+             source_site,
+             COALESCE(SUM(amount), 0) AS total,
+             COUNT(*) AS count,
+             COALESCE(SUM(amount) FILTER (WHERE created_at >= date_trunc('month', NOW())), 0) AS this_month,
+             COALESCE(SUM(amount) FILTER (WHERE created_at >= date_trunc('month', NOW()) - INTERVAL '1 month'
+                                            AND created_at <  date_trunc('month', NOW())), 0) AS last_month,
+             MIN(created_at) AS first_gift_at,
+             MAX(created_at) AS last_gift_at
+      FROM donations
+      GROUP BY ${PAGE_GROUP}, COALESCE(${CANON_PAGE}, '(not recorded)'), source_site
+      ORDER BY total DESC
+    `),
+    pool.query(`
+      SELECT source_site, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
+      FROM donations GROUP BY source_site
+    `),
+  ]);
+
+  const rows = pages.rows.map((r) => ({
+    group: r.grp as PageGroup,
+    page: r.page as string,
+    site: r.source_site as string,
+    total: Number(r.total),
+    count: Number(r.count),
+    thisMonth: Number(r.this_month),
+    lastMonth: Number(r.last_month),
+    firstGiftAt: r.first_gift_at,
+    lastGiftAt: r.last_gift_at,
+  }));
+
+  const hkmvRows = rows.filter((r) => r.site === 'hkmv');
+  const hkmvSite = siteTotal.rows.find((r) => r.source_site === 'hkmv');
+  const hkmvTotal = Number(hkmvSite?.total ?? 0);
+  const bucketSum = hkmvRows.reduce((sum, r) => sum + r.total, 0);
+
+  res.json({
+    groups: GROUP_ORDER.map((key) => {
+      const own = hkmvRows.filter((r) => r.group === key);
+      return {
+        key,
+        label: GROUP_LABELS[key],
+        total: own.reduce((s, r) => s + r.total, 0),
+        count: own.reduce((s, r) => s + r.count, 0),
+        thisMonth: own.reduce((s, r) => s + r.thisMonth, 0),
+        lastMonth: own.reduce((s, r) => s + r.lastMonth, 0),
+        pages: own,
+      };
+    }).filter((g) => g.key !== 'unattributed' || g.count > 0),
+    otherSites: siteTotal.rows
+      .filter((r) => r.source_site !== 'hkmv')
+      .map((r) => ({
+        site: r.source_site,
+        total: Number(r.total),
+        count: Number(r.count),
+        pages: rows.filter((p) => p.site === r.source_site),
+      })),
+    reconciliation: {
+      // These must be equal. If they are not, a row is being classified into a
+      // bucket the UI does not render, and the page totals are understating.
+      siteTotal: hkmvTotal,
+      bucketSum,
+      balanced: Math.abs(hkmvTotal - bucketSum) < 0.01,
+    },
   });
 });
 

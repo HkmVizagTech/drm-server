@@ -2,13 +2,14 @@ import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import { fetchReceiptPdf, resendReceipt, SiteKey } from '../services/hkmvClient';
+import { canonPage, canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 
 const router = Router();
 router.use(authenticate);
 
 // List donations with filters
 router.get('/', async (req, res) => {
-  const { purpose, source, from_date, to_date, receipt_generated, search, source_site, source_page, campaign } = req.query;
+  const { purpose, source, from_date, to_date, receipt_generated, search, source_site, source_page, campaign, group } = req.query;
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
   const offset = (page - 1) * limit;
@@ -34,7 +35,23 @@ router.get('/', async (req, res) => {
     idx++;
   }
   if (source_site) { conditions.push(`d.source_site = $${idx}`); values.push(source_site); idx++; }
-  if (source_page) { conditions.push(`d.source_page = $${idx}`); values.push(source_page); idx++; }
+  // Compared in the same canonical shape the dashboard groups by (lower-case,
+  // one leading slash, no trailing slash) - the sites spell the same page as
+  // "donations", "/donations" and "/Donations/", so a raw equality check here
+  // would send the dashboard's own links to an empty list.
+  if (source_page) {
+    conditions.push(`(${canonPageSql('d.source_page')}) = $${idx}`);
+    values.push(canonPage(String(source_page)));
+    idx++;
+  }
+  // Whole bucket rather than one page: ?group=donations returns /donations AND
+  // everything nested under it, ?group=donate the seva campaign pages. The
+  // predicate comes from utils/pageGroups so this list and the dashboard can
+  // never disagree about what belongs where. Not parameterised because it is a
+  // fixed fragment chosen by an allowlist - `group` itself never reaches SQL.
+  if (isPageGroup(group)) {
+    conditions.push(groupPredicateSql(group, 'd.source_page', 'd.source_site'));
+  }
   if (campaign)    { conditions.push(`d.campaign = $${idx}`);    values.push(campaign);    idx++; }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -90,11 +107,16 @@ router.get('/sources', async (_req, res) => {
       SELECT source_site, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS total
       FROM donations GROUP BY source_site ORDER BY total DESC
     `),
+    // Canonicalised, so the dropdown offers "/donations" once rather than
+    // "donations" and "/donations" as two entries that each show half the rows.
     pool.query(`
-      SELECT source_site, source_page, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS total
+      SELECT source_site,
+             '/' || btrim(lower(btrim(source_page)), '/') AS source_page,
+             COUNT(*) AS count,
+             COALESCE(SUM(amount), 0) AS total
       FROM donations
-      WHERE source_page IS NOT NULL AND source_page <> ''
-      GROUP BY source_site, source_page
+      WHERE source_page IS NOT NULL AND btrim(source_page) <> ''
+      GROUP BY source_site, '/' || btrim(lower(btrim(source_page)), '/')
       ORDER BY count DESC
       LIMIT 60
     `),
