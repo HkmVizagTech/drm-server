@@ -80,6 +80,6 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 // Start cron jobs
 scheduleBirthdayAnniversaryCheck();
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`DRM Server running on port ${PORT}`);
 });
