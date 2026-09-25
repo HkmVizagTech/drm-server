@@ -15,6 +15,24 @@ import { scheduleBirthdayAnniversaryCheck } from './utils/cron';
 
 dotenv.config();
 
+// Diagnostic safety net: if the process is about to die, log WHY before it
+// goes, so the next crash (if there is one) shows up in Railway's logs
+// instead of a bare "SIGTERM" with no context.
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled promise rejection:', reason);
+});
+process.on('SIGTERM', () => {
+  const mem = process.memoryUsage();
+  console.error(
+    `[SIGTERM] Received shutdown signal. Memory at time of signal: ` +
+    `rss=${Math.round(mem.rss / 1024 / 1024)}MB heapUsed=${Math.round(mem.heapUsed / 1024 / 1024)}MB heapTotal=${Math.round(mem.heapTotal / 1024 / 1024)}MB`
+  );
+  process.exit(0);
+});
+
 const app = express();
 const PORT = process.env.PORT || 4000;
 
