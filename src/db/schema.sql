@@ -164,3 +164,34 @@ CREATE TABLE IF NOT EXISTS person_notes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_person_notes_person ON person_notes(person_id);
+
+-- ---------------------------------------------------------------------------
+-- Multi-site attribution
+--
+-- Donations reach DRM from more than one place: the main site
+-- (harekrishnavizag.org), the separate annadan site
+-- (annadan.harekrishnavizag.org), and manual entry here. Within a site, a gift
+-- also comes from a specific page or campaign - /donate, /janmashtami,
+-- /govardhan and so on - which the source sites already record. Keeping these
+-- as three separate columns means totals can be split by site, by page, or by
+-- campaign without parsing a blob.
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS source_site  VARCHAR(20) NOT NULL DEFAULT 'drm';
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS source_page  VARCHAR(120);
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS campaign     VARCHAR(120);
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS utm_source   VARCHAR(80);
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS utm_medium   VARCHAR(80);
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS utm_campaign VARCHAR(120);
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS payment_ref  VARCHAR(80);
+
+CREATE INDEX IF NOT EXISTS idx_donations_source_site ON donations(source_site);
+CREATE INDEX IF NOT EXISTS idx_donations_source_page ON donations(source_page);
+CREATE INDEX IF NOT EXISTS idx_donations_campaign    ON donations(campaign);
+
+-- Which site a person's donor record originated from, so staff can tell an
+-- annadan-only donor from a main-site donor at a glance.
+ALTER TABLE people ADD COLUMN IF NOT EXISTS source_sites TEXT[] NOT NULL DEFAULT '{}';
+
+-- Subscriptions and prasadam carry the site too - annadan runs its own
+-- recurring gifts and its own prasadam dispatch, separate from the main site's.
+ALTER TABLE subscriptions        ADD COLUMN IF NOT EXISTS source_site VARCHAR(20) NOT NULL DEFAULT 'drm';
+ALTER TABLE prasadam_deliveries  ADD COLUMN IF NOT EXISTS source_site VARCHAR(20) NOT NULL DEFAULT 'drm';

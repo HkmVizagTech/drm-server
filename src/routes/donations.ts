@@ -1,14 +1,14 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
-import { fetchReceiptPdf } from '../services/hkmvClient';
+import { fetchReceiptPdf, resendReceipt, SiteKey } from '../services/hkmvClient';
 
 const router = Router();
 router.use(authenticate);
 
 // List donations with filters
 router.get('/', async (req, res) => {
-  const { purpose, source, from_date, to_date, receipt_generated, search } = req.query;
+  const { purpose, source, from_date, to_date, receipt_generated, search, source_site, source_page, campaign } = req.query;
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
   const offset = (page - 1) * limit;
@@ -33,6 +33,9 @@ router.get('/', async (req, res) => {
     values.push(`%${search}%`);
     idx++;
   }
+  if (source_site) { conditions.push(`d.source_site = $${idx}`); values.push(source_site); idx++; }
+  if (source_page) { conditions.push(`d.source_page = $${idx}`); values.push(source_page); idx++; }
+  if (campaign)    { conditions.push(`d.campaign = $${idx}`);    values.push(campaign);    idx++; }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
@@ -76,6 +79,35 @@ router.get('/purposes', async (_req, res) => {
     ORDER BY count DESC
   `);
   res.json(result.rows.map((r) => ({ purpose: r.purpose, count: Number(r.count) })));
+});
+
+// Distinct source sites and pages present in the data, for the filters.
+// Derived from the rows rather than hardcoded, because each site adds campaign
+// pages (/janmashtami, /govardhan, ...) without DRM knowing in advance.
+router.get('/sources', async (_req, res) => {
+  const [sites, pages] = await Promise.all([
+    pool.query(`
+      SELECT source_site, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS total
+      FROM donations GROUP BY source_site ORDER BY total DESC
+    `),
+    pool.query(`
+      SELECT source_site, source_page, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS total
+      FROM donations
+      WHERE source_page IS NOT NULL AND source_page <> ''
+      GROUP BY source_site, source_page
+      ORDER BY count DESC
+      LIMIT 60
+    `),
+  ]);
+  res.json({
+    sites: sites.rows.map((r) => ({ site: r.source_site, count: Number(r.count), total: Number(r.total) })),
+    pages: pages.rows.map((r) => ({
+      site: r.source_site,
+      page: r.source_page,
+      count: Number(r.count),
+      total: Number(r.total),
+    })),
+  });
 });
 
 // Summary stats
@@ -164,18 +196,60 @@ router.patch('/:id/receipt', async (req, res) => {
 // synced in from there (external_ref = its Mongo _id). A donation created
 // natively in DRM has no external_ref and no receipt file to proxy - use
 // PATCH /:id/receipt for those instead.
+// Ask the originating site to re-send its WhatsApp receipt for this donation.
+//
+// DRM deliberately does not compose or send the receipt itself: the template,
+// the receipt numbering and the PDF all live on the site that issued it, and
+// duplicating any of that here would produce receipts that differ from the
+// originals a donor already has.
+router.post('/:id/resend-receipt', async (req, res) => {
+  const result = await pool.query(
+    'SELECT external_ref, source_site, receipt_number, receipt_generated FROM donations WHERE id = $1',
+    [req.params.id]
+  );
+  if (!result.rows.length) return res.status(404).json({ error: 'Donation not found' });
+
+  const { external_ref, source_site, receipt_generated } = result.rows[0];
+
+  if (!external_ref) {
+    return res.status(400).json({
+      error: 'This donation was recorded directly in DRM, so there is no site receipt to resend.',
+    });
+  }
+  if (!receipt_generated) {
+    return res.status(400).json({ error: 'No receipt has been issued for this donation yet.' });
+  }
+
+  try {
+    const outcome = await resendReceipt((source_site || 'hkmv') as SiteKey, external_ref);
+    res.json({
+      resent: true,
+      sentTo: outcome.sentTo ?? null,
+      receiptNumber: outcome.receiptNumber ?? result.rows[0].receipt_number ?? null,
+      site: source_site || 'hkmv',
+    });
+  } catch (err) {
+    // Preserve the site's own status. 409 (no receipt issued yet) and 429
+    // (just sent) are deliberate refusals, not outages - reporting them as 502
+    // makes a correct safety guard look like a broken server.
+    const e = err as Error & { status?: number; alreadySent?: boolean };
+    const status = e.status === 409 || e.status === 429 ? e.status : 502;
+    res.status(status).json({ error: e.message, alreadySent: Boolean(e.alreadySent) });
+  }
+});
+
 router.get('/:id/receipt-file', async (req, res) => {
   const { id } = req.params;
   const result = await pool.query('SELECT external_ref, receipt_number FROM donations WHERE id = $1', [id]);
   if (!result.rows.length) return res.status(404).json({ error: 'Donation not found' });
 
-  const { external_ref, receipt_number } = result.rows[0];
+  const { external_ref, receipt_number, source_site } = result.rows[0];
   if (!external_ref) {
     return res.status(400).json({ error: 'This donation has no linked hkmsite2.0 record to fetch a receipt file from.' });
   }
 
   try {
-    const upstream = await fetchReceiptPdf(external_ref);
+    const upstream = await fetchReceiptPdf((source_site || 'hkmv') as SiteKey, external_ref);
     if (!upstream.ok) {
       const text = await upstream.text().catch(() => '');
       return res.status(upstream.status).json({ error: text || 'Could not fetch the receipt from hkmsite2.0' });

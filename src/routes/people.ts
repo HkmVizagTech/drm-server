@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
-import { fetchDonorSnapshot, fetchDonorPage } from '../services/hkmvClient';
-import { upsertDonorSnapshot } from '../services/hkmvSync';
+import { fetchDonorSnapshot, fetchDonorPage, fetchTransactionPage, configuredSites, SITE_KEYS, SiteKey, isSiteConfigured, SITE_IMPORT_MODE } from '../services/hkmvClient';
+import { upsertDonorSnapshot, upsertTransactionBatch } from '../services/hkmvSync';
 
 const router = Router();
 router.use(authenticate);
@@ -87,6 +87,18 @@ router.get('/', async (req, res) => {
     page,
     limit,
     totalPages: Math.max(1, Math.ceil(total / limit)),
+  });
+});
+
+// Which donation sites this server can import from.
+//
+// Registered BEFORE the '/:id' route below - Express matches in order, so
+// '/import-sites' would otherwise be captured as a person id and 404 while
+// looking like a database problem.
+router.get('/import-sites', async (_req, res) => {
+  res.json({
+    sites: configuredSites().map((s) => ({ key: s.key, label: s.label, mode: SITE_IMPORT_MODE[s.key] })),
+    unconfigured: SITE_KEYS.filter((k) => !isSiteConfigured(k)),
   });
 });
 
@@ -209,23 +221,41 @@ router.post('/:id/sync-hkmv', async (req, res) => {
   if (!personResult.rows.length) return res.status(404).json({ error: 'Person not found' });
   const person = personResult.rows[0];
 
-  let snapshot;
-  try {
-    snapshot = await fetchDonorSnapshot(person.phone);
-  } catch (err) {
-    return res.status(502).json({ error: `Could not reach hkmsite2.0: ${(err as Error).message}` });
+  const sites = configuredSites();
+  if (!sites.length) {
+    return res.status(503).json({ error: 'No donation site is configured to sync from.' });
   }
 
-  if (!snapshot.found || !snapshot.donor) {
-    return res.status(404).json({ error: 'No matching donor found on hkmsite2.0 for this phone number' });
+  // The same phone number can exist on BOTH sites, so sync every configured
+  // one rather than stopping at the first hit. A site being down must not
+  // block the site that is up, so failures are collected and reported.
+  const results: Record<string, unknown> = {};
+  const errors: { site: string; error: string }[] = [];
+  let matched = 0;
+
+  for (const site of sites) {
+    try {
+      const snapshot = await fetchDonorSnapshot(site.key, person.phone);
+      if (!snapshot.found || !snapshot.donor) {
+        results[site.key] = { found: false };
+        continue;
+      }
+      const counts = await upsertDonorSnapshot(snapshot, site.key);
+      results[site.key] = { found: true, ...counts };
+      matched++;
+    } catch (err) {
+      errors.push({ site: site.key, error: (err as Error).message });
+    }
   }
 
-  try {
-    const counts = await upsertDonorSnapshot(snapshot);
-    return res.json({ synced: true, ...counts });
-  } catch (err) {
-    return res.status(500).json({ error: `Sync failed: ${(err as Error).message}` });
+  if (!matched && errors.length === sites.length) {
+    return res.status(502).json({ error: `Could not reach any donation site: ${errors[0].error}`, errors });
   }
+  if (!matched) {
+    return res.status(404).json({ error: 'No matching donor found on any site for this phone number', errors });
+  }
+
+  res.json({ synced: true, sites: results, errors });
 });
 
 // Bulk backfill: pull EVERY donor from hkmsite2.0 into DRM. This is what
@@ -240,8 +270,22 @@ router.post('/:id/sync-hkmv', async (req, res) => {
 // than aborting the whole import - a single malformed record shouldn't cost
 // you the other several thousand.
 router.post('/import-hkmv', authorize('admin'), async (req, res) => {
-  const pageSize = Math.min(200, Math.max(1, Number(req.body?.pageSize) || 50));
+  const pageSize = Math.min(500, Math.max(1, Number(req.body?.pageSize) || 100));
   const maxPages = Number(req.body?.maxPages) || Infinity;
+
+  const requested = req.body?.site as SiteKey | undefined;
+  const sites = requested
+    ? (isSiteConfigured(requested) ? [requested] : [])
+    : configuredSites().map((s) => s.key);
+
+  if (!sites.length) {
+    return res.status(503).json({
+      error: requested
+        ? `Site "${requested}" is not configured on this server.`
+        : 'No donation site is configured to import from.',
+      configured: SITE_KEYS.filter(isSiteConfigured),
+    });
+  }
 
   const totals = {
     donorsProcessed: 0,
@@ -250,57 +294,95 @@ router.post('/import-hkmv', authorize('admin'), async (req, res) => {
     subscriptionsSynced: 0,
     deliveriesSynced: 0,
   };
-  const failures: Array<{ mobile?: string; name?: string; error: string }> = [];
+  const perSite: Record<string, { mode: string; totalRecords: number; donorsProcessed: number; failureCount: number; error?: string }> = {};
+  // Distinct people across the whole import. A donor whose transactions span a
+  // page boundary is upserted once per page, so counting upserts would report
+  // more donors than exist.
+  const uniqueDonors = new Set<string>();
+  const failures: Array<{ site: string; mobile?: string; name?: string; error: string }> = [];
 
-  try {
-    let page = 1;
-    let hasMore = true;
-    let totalDonors = 0;
+  for (const siteKey of sites) {
+    const mode = SITE_IMPORT_MODE[siteKey];
+    const siteTotals = { mode, totalRecords: 0, donorsProcessed: 0, failureCount: 0 };
 
-    while (hasMore && page <= maxPages) {
-      const result = await fetchDonorPage(page, pageSize);
-      totalDonors = result.total;
+    try {
+      if (mode === 'transactions') {
+        // Sites that store transactions hand over flat rows; DRM groups them
+        // by normalised phone. Cursor-paged so the source database only ever
+        // does an indexed range scan, never an aggregation over everything.
+        let cursor: string | null = null;
+        let pages = 0;
 
-      for (const snapshot of result.donors) {
-        try {
-          const counts = await upsertDonorSnapshot(snapshot);
-          totals.donorsProcessed++;
-          if (counts.created) totals.peopleCreated++;
-          totals.donationsSynced += counts.donationsSynced;
-          totals.subscriptionsSynced += counts.subscriptionsSynced;
-          totals.deliveriesSynced += counts.deliveriesSynced;
-        } catch (err) {
-          failures.push({
-            mobile: snapshot.donor?.mobile,
-            name: snapshot.donor?.name,
-            error: (err as Error).message,
-          });
+        for (;;) {
+          const feed = await fetchTransactionPage(siteKey, cursor, pageSize);
+          siteTotals.totalRecords = feed.total;
+
+          const batch = await upsertTransactionBatch(feed.transactions, siteKey);
+          for (const m of batch.mobiles || []) uniqueDonors.add(`${siteKey}:${m}`);
+          siteTotals.donorsProcessed = uniqueDonors.size;
+          totals.peopleCreated += batch.peopleCreated;
+          totals.donationsSynced += batch.donationsSynced;
+          totals.subscriptionsSynced += batch.subscriptionsSynced;
+          totals.deliveriesSynced += batch.deliveriesSynced;
+          siteTotals.failureCount += batch.failures.length;
+          for (const f of batch.failures) failures.push({ site: siteKey, ...f });
+
+          pages++;
+          if (!feed.hasMore || !feed.nextCursor || pages >= maxPages) break;
+          cursor = feed.nextCursor;
+        }
+      } else {
+        // Sites with a real donor collection page by donor directly.
+        let page = 1;
+        let hasMore = true;
+
+        while (hasMore && page <= maxPages) {
+          const result = await fetchDonorPage(siteKey, page, Math.min(200, pageSize));
+          siteTotals.totalRecords = result.total;
+
+          for (const snapshot of result.donors) {
+            try {
+              const counts = await upsertDonorSnapshot(snapshot, siteKey);
+              uniqueDonors.add(`${siteKey}:${snapshot.donor?.mobile}`);
+              siteTotals.donorsProcessed++;
+              if (counts.created) totals.peopleCreated++;
+              totals.donationsSynced += counts.donationsSynced;
+              totals.subscriptionsSynced += counts.subscriptionsSynced;
+              totals.deliveriesSynced += counts.deliveriesSynced;
+            } catch (err) {
+              siteTotals.failureCount++;
+              failures.push({
+                site: siteKey,
+                mobile: snapshot.donor?.mobile,
+                name: snapshot.donor?.name,
+                error: (err as Error).message,
+              });
+            }
+          }
+
+          hasMore = result.hasMore;
+          page++;
         }
       }
 
-      hasMore = result.hasMore;
-      page++;
+      perSite[siteKey] = siteTotals;
+    } catch (err) {
+      // A site being unreachable stops THAT site only; whatever already
+      // imported stays put, since each donor commits its own transaction.
+      perSite[siteKey] = { ...siteTotals, error: (err as Error).message };
     }
-
-    res.json({
-      imported: true,
-      totalDonorsOnHkmv: totalDonors,
-      ...totals,
-      failureCount: failures.length,
-      // Cap the detail list so one systemic problem can't produce a
-      // multi-megabyte response.
-      failures: failures.slice(0, 50),
-    });
-  } catch (err) {
-    // A transport-level failure part-way through still leaves everything
-    // already imported in place (each donor commits its own transaction),
-    // so report progress rather than pretending nothing happened.
-    res.status(502).json({
-      error: `Import stopped: ${(err as Error).message}`,
-      ...totals,
-      failureCount: failures.length,
-    });
   }
+
+  totals.donorsProcessed = uniqueDonors.size;
+
+  res.json({
+    imported: true,
+    sites: perSite,
+    totalDonorsOnHkmv: Object.values(perSite).reduce((sum, s) => sum + s.totalRecords, 0),
+    ...totals,
+    failureCount: failures.length,
+    failures: failures.slice(0, 50),
+  });
 });
 
 

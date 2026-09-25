@@ -5,6 +5,14 @@ import { authenticate } from '../middleware/auth';
 const router = Router();
 router.use(authenticate);
 
+// Pages singled out on the dashboard with their own figures.
+//
+// /donate and /donations are DIFFERENT pages on the main site and must never
+// be added together - they are separate asks with separate performance. They
+// are matched exactly (not by prefix) for that reason: a prefix match on
+// "/donate" would swallow "/donations" and silently merge the two.
+const SPOTLIGHT_PAGES = ['/donations', '/donate'];
+
 // Donation summary by period
 router.get('/donations/period', async (req, res) => {
   const { period = 'month', purpose } = req.query;
@@ -87,6 +95,9 @@ router.get('/dashboard', async (_req, res) => {
     byPurpose,
     topDonors,
     recentDonations,
+    bySite,
+    bySourcePage,
+    pageSpotlight,
   ] = await Promise.all([
     pool.query(`
       SELECT COUNT(*) AS total,
@@ -154,10 +165,51 @@ router.get('/dashboard', async (_req, res) => {
     `),
     pool.query(`
       SELECT d.id, d.amount, d.purpose, d.created_at, d.receipt_number,
+             d.source_site, d.source_page, d.campaign,
              p.id AS person_id, p.name AS donor_name, p.phone AS donor_phone
       FROM donations d JOIN people p ON d.person_id = p.id
       ORDER BY d.created_at DESC LIMIT 8
     `),
+    // Totals per donation site - the main site and the annadan site are
+    // reported separately because they're run and budgeted separately.
+    pool.query(`
+      SELECT source_site,
+             COALESCE(SUM(amount), 0) AS total,
+             COUNT(*) AS count,
+             COALESCE(SUM(amount) FILTER (WHERE created_at >= date_trunc('month', NOW())), 0) AS this_month
+      FROM donations
+      GROUP BY source_site
+      ORDER BY total DESC
+    `),
+    // Which page on which site produced the giving (/donate, /janmashtami,
+    // /govardhan, ...). NULL means a gift recorded directly in DRM or synced
+    // before attribution existed, so it's labelled rather than dropped.
+    pool.query(`
+      SELECT source_site,
+             COALESCE(source_page, '(not recorded)') AS source_page,
+             COALESCE(SUM(amount), 0) AS total,
+             COUNT(*) AS count
+      FROM donations
+      GROUP BY source_site, COALESCE(source_page, '(not recorded)')
+      ORDER BY total DESC
+      LIMIT 12
+    `),
+    // Exact-match figures for the spotlight pages. A LEFT JOIN from the page
+    // list means a page with no giving yet still returns a zero row rather
+    // than vanishing from the dashboard.
+    pool.query(
+      `SELECT pages.page AS source_page,
+              COALESCE(SUM(d.amount), 0) AS total,
+              COUNT(d.id) AS count,
+              COALESCE(SUM(d.amount) FILTER (WHERE d.created_at >= date_trunc('month', NOW())), 0) AS this_month,
+              COALESCE(SUM(d.amount) FILTER (WHERE d.created_at >= date_trunc('month', NOW()) - INTERVAL '1 month'
+                                               AND d.created_at <  date_trunc('month', NOW())), 0) AS last_month,
+              MAX(d.created_at) AS last_gift_at
+       FROM unnest($1::text[]) AS pages(page)
+       LEFT JOIN donations d ON d.source_page = pages.page
+       GROUP BY pages.page`,
+      [SPOTLIGHT_PAGES]
+    ),
   ]);
 
   const pr = people.rows[0];
@@ -216,6 +268,32 @@ router.get('/dashboard', async (_req, res) => {
       purpose: r.purpose,
       createdAt: r.created_at,
       receiptNumber: r.receipt_number,
+      sourceSite: r.source_site,
+      sourcePage: r.source_page,
+      campaign: r.campaign,
+    })),
+    bySite: bySite.rows.map((r) => ({
+      site: r.source_site,
+      total: Number(r.total),
+      count: Number(r.count),
+      thisMonth: Number(r.this_month),
+    })),
+    pageSpotlight: SPOTLIGHT_PAGES.map((page) => {
+      const row = pageSpotlight.rows.find((r) => r.source_page === page);
+      return {
+        page,
+        total: Number(row?.total ?? 0),
+        count: Number(row?.count ?? 0),
+        thisMonth: Number(row?.this_month ?? 0),
+        lastMonth: Number(row?.last_month ?? 0),
+        lastGiftAt: row?.last_gift_at ?? null,
+      };
+    }),
+    bySourcePage: bySourcePage.rows.map((r) => ({
+      site: r.source_site,
+      sourcePage: r.source_page,
+      total: Number(r.total),
+      count: Number(r.count),
     })),
   });
 });
