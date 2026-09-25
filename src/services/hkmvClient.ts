@@ -17,7 +17,12 @@
 function normalizeBaseUrl(raw: string): string {
   const trimmed = (raw || '').trim().replace(/\/+$/, '');
   if (!trimmed) return '';
-  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  // A bare local host means a dev server, which won't be serving TLS -
+  // defaulting those to https would fail the handshake. Everything else
+  // (a real deployment) gets https.
+  const isLocal = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?$/i.test(trimmed);
+  return `${isLocal ? 'http' : 'https'}://${trimmed}`;
 }
 
 const HKMV_API_URL = normalizeBaseUrl(process.env.HKMV_API_URL || '');
@@ -100,6 +105,35 @@ export async function fetchDonorSnapshot(phone: string): Promise<HkmvDonorSnapsh
     throw new Error(`hkmsite2.0 internal API returned ${res.status}: ${body.slice(0, 200)}`);
   }
   return res.json() as Promise<HkmvDonorSnapshot>;
+}
+
+export interface HkmvDonorPage {
+  success: true;
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+  hasMore: boolean;
+  donors: Array<{
+    donor: NonNullable<HkmvDonorSnapshot['donor']>;
+    donations: HkmvDonation[];
+    subscriptions: HkmvSubscription[];
+  }>;
+}
+
+// One page of the full donor firehose, used by the bulk backfill import.
+// Paged rather than all-at-once so a temple with thousands of donors doesn't
+// have to hold the entire history in memory (on either side) at once.
+export async function fetchDonorPage(page: number, limit: number): Promise<HkmvDonorPage> {
+  assertConfigured();
+  const res = await fetch(`${HKMV_API_URL}/api/internal/donors?page=${page}&limit=${limit}`, {
+    headers: { 'x-internal-secret': HKMV_INTERNAL_SECRET },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`hkmsite2.0 internal API returned ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return res.json() as Promise<HkmvDonorPage>;
 }
 
 // Streams the real 80G receipt PDF straight through from hkmsite2.0-server

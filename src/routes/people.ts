@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
-import { fetchDonorSnapshot, hkmvMappers } from '../services/hkmvClient';
+import { fetchDonorSnapshot, fetchDonorPage } from '../services/hkmvClient';
+import { upsertDonorSnapshot } from '../services/hkmvSync';
 
 const router = Router();
 router.use(authenticate);
@@ -151,7 +152,7 @@ router.delete('/:id', async (req, res) => {
 // duplicates, it just refreshes what changed since the last sync.
 router.post('/:id/sync-hkmv', async (req, res) => {
   const { id } = req.params;
-  const personResult = await pool.query('SELECT * FROM people WHERE id = $1', [id]);
+  const personResult = await pool.query('SELECT phone FROM people WHERE id = $1', [id]);
   if (!personResult.rows.length) return res.status(404).json({ error: 'Person not found' });
   const person = personResult.rows[0];
 
@@ -166,96 +167,89 @@ router.post('/:id/sync-hkmv', async (req, res) => {
     return res.status(404).json({ error: 'No matching donor found on hkmsite2.0 for this phone number' });
   }
 
-  const donor = snapshot.donor;
-  const formattedAddress = hkmvMappers.formatSavedAddress(donor.savedAddress ?? null);
-
-  await pool.query(
-    `UPDATE people SET
-       email = COALESCE(email, $1),
-       pan = COALESCE(pan, $2),
-       prasadam_address = COALESCE(prasadam_address, $3),
-       updated_at = NOW()
-     WHERE id = $4`,
-    [donor.email ?? null, donor.panNumber ?? null, formattedAddress, id]
-  );
-
-  let donationsSynced = 0;
-  let subscriptionsSynced = 0;
-  let deliveriesSynced = 0;
-
-  for (const d of snapshot.donations || []) {
-    // DRM's donations ledger only tracks confirmed gifts - pending/failed/
-    // cancelled attempts on the live site aren't real contributions here.
-    if (d.status !== 'completed') continue;
-
-    const donationResult = await pool.query(
-      `INSERT INTO donations (person_id, amount, type, purpose, payment_mode, source, receipt_generated, receipt_number, receipt_issued_at, external_ref, created_at)
-       VALUES ($1, $2, 'one-time', $3, 'upi', 'website', $4, $5, $6, $7, $8)
-       ON CONFLICT (external_ref) DO UPDATE SET
-         receipt_generated = EXCLUDED.receipt_generated,
-         receipt_number = EXCLUDED.receipt_number,
-         receipt_issued_at = EXCLUDED.receipt_issued_at
-       RETURNING id`,
-      [
-        id,
-        d.amount,
-        hkmvMappers.truncate30(d.type),
-        !!d.receiptNumber,
-        d.receiptNumber ?? null,
-        d.receiptIssuedAt ?? null,
-        d.externalId,
-        d.createdAt,
-      ]
-    );
-    donationsSynced++;
-    const drmDonationId = donationResult.rows[0].id;
-
-    if (d.prasadam) {
-      const status = hkmvMappers.PRASADAM_STATUS_MAP[d.prasadam.status] || 'pending';
-      const address = hkmvMappers.formatHkmvAddress(d.prasadam.address) || formattedAddress || person.address;
-      if (address) {
-        await pool.query(
-          `INSERT INTO prasadam_deliveries (person_id, donation_id, address, status, courier_name, tracking_number, dispatched_at, delivered_at, external_ref)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-           ON CONFLICT (external_ref) DO UPDATE SET
-             status = EXCLUDED.status,
-             courier_name = EXCLUDED.courier_name,
-             tracking_number = EXCLUDED.tracking_number,
-             dispatched_at = EXCLUDED.dispatched_at,
-             delivered_at = EXCLUDED.delivered_at`,
-          [
-            id,
-            drmDonationId,
-            address,
-            status,
-            d.prasadam.courierName ?? null,
-            d.prasadam.trackingNumber ?? null,
-            d.prasadam.dispatchedAt ?? null,
-            d.prasadam.deliveredAt ?? null,
-            d.externalId,
-          ]
-        );
-        deliveriesSynced++;
-      }
-    }
+  try {
+    const counts = await upsertDonorSnapshot(snapshot);
+    return res.json({ synced: true, ...counts });
+  } catch (err) {
+    return res.status(500).json({ error: `Sync failed: ${(err as Error).message}` });
   }
-
-  for (const s of snapshot.subscriptions || []) {
-    const status = hkmvMappers.SUBSCRIPTION_STATUS_MAP[s.status] || 'active';
-    await pool.query(
-      `INSERT INTO subscriptions (person_id, amount, frequency, purpose, status, gateway_subscription_id, start_date, external_ref)
-       VALUES ($1, $2, 'monthly', $3, $4, $5, $6, $7)
-       ON CONFLICT (external_ref) DO UPDATE SET
-         amount = EXCLUDED.amount,
-         status = EXCLUDED.status,
-         updated_at = NOW()`,
-      [id, s.amount, hkmvMappers.truncate30(s.sevaName), status, s.subscriptionId, s.startedAt, s.subscriptionId]
-    );
-    subscriptionsSynced++;
-  }
-
-  res.json({ synced: true, donationsSynced, subscriptionsSynced, deliveriesSynced });
 });
+
+// Bulk backfill: pull EVERY donor from hkmsite2.0 into DRM. This is what
+// populates an empty DRM database, and it's safe to re-run at any time -
+// the same external_ref upserts make it a catch-up, not a duplicate import.
+//
+// Runs synchronously and reports totals when finished. Pages are fetched
+// sequentially rather than in parallel so a large import doesn't hammer the
+// live donation site while real donors are using it.
+//
+// One donor failing (bad data, missing mobile) is recorded and skipped rather
+// than aborting the whole import - a single malformed record shouldn't cost
+// you the other several thousand.
+router.post('/import-hkmv', authorize('admin'), async (req, res) => {
+  const pageSize = Math.min(200, Math.max(1, Number(req.body?.pageSize) || 50));
+  const maxPages = Number(req.body?.maxPages) || Infinity;
+
+  const totals = {
+    donorsProcessed: 0,
+    peopleCreated: 0,
+    donationsSynced: 0,
+    subscriptionsSynced: 0,
+    deliveriesSynced: 0,
+  };
+  const failures: Array<{ mobile?: string; name?: string; error: string }> = [];
+
+  try {
+    let page = 1;
+    let hasMore = true;
+    let totalDonors = 0;
+
+    while (hasMore && page <= maxPages) {
+      const result = await fetchDonorPage(page, pageSize);
+      totalDonors = result.total;
+
+      for (const snapshot of result.donors) {
+        try {
+          const counts = await upsertDonorSnapshot(snapshot);
+          totals.donorsProcessed++;
+          if (counts.created) totals.peopleCreated++;
+          totals.donationsSynced += counts.donationsSynced;
+          totals.subscriptionsSynced += counts.subscriptionsSynced;
+          totals.deliveriesSynced += counts.deliveriesSynced;
+        } catch (err) {
+          failures.push({
+            mobile: snapshot.donor?.mobile,
+            name: snapshot.donor?.name,
+            error: (err as Error).message,
+          });
+        }
+      }
+
+      hasMore = result.hasMore;
+      page++;
+    }
+
+    res.json({
+      imported: true,
+      totalDonorsOnHkmv: totalDonors,
+      ...totals,
+      failureCount: failures.length,
+      // Cap the detail list so one systemic problem can't produce a
+      // multi-megabyte response.
+      failures: failures.slice(0, 50),
+    });
+  } catch (err) {
+    // A transport-level failure part-way through still leaves everything
+    // already imported in place (each donor commits its own transaction),
+    // so report progress rather than pretending nothing happened.
+    res.status(502).json({
+      error: `Import stopped: ${(err as Error).message}`,
+      ...totals,
+      failureCount: failures.length,
+    });
+  }
+});
+
 
 // Public donor lookup API (used by donation site) - rate-limited, no auth required
 // This endpoint is mounted separately in index.ts without auth middleware

@@ -11,6 +11,7 @@ import triggersRoutes from './routes/triggers';
 import reportsRoutes from './routes/reports';
 import subscriptionsRoutes from './routes/subscriptions';
 import prasadamRoutes from './routes/prasadam';
+import webhooksRoutes from './routes/webhooks';
 import { scheduleBirthdayAnniversaryCheck } from './utils/cron';
 
 dotenv.config();
@@ -34,7 +35,7 @@ process.on('SIGTERM', () => {
 });
 
 const app = express();
-const PORT = Number(process.env.PORT) || 4000;
+const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json());
@@ -54,6 +55,11 @@ app.use('/api/triggers', triggersRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/subscriptions', subscriptionsRoutes);
 app.use('/api/prasadam', prasadamRoutes);
+
+// Inbound webhooks from hkmsite2.0-server. Mounted outside the JWT-protected
+// groups above on purpose - these are server-to-server calls with no logged-in
+// user, and the router enforces its own shared-secret check.
+app.use('/api/webhooks', webhooksRoutes);
 
 // Public donor lookup API (used by the live donation site - no auth, rate limited)
 app.get('/api/people/lookup', async (req, res) => {
@@ -80,6 +86,9 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 // Start cron jobs
 scheduleBirthdayAnniversaryCheck();
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`DRM Server running on port ${PORT}`);
+// Bind explicitly to 0.0.0.0 - Railway's proxy connects to the container over
+// its own network interface, not loopback, so binding to the default host can
+// leave the app unreachable from the edge even though it started fine.
+app.listen(Number(PORT), '0.0.0.0', () => {
+  console.log(`DRM Server listening on 0.0.0.0:${PORT}`);
 });
