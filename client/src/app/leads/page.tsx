@@ -23,6 +23,7 @@ import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency, number, relativeDate } from "@/lib/format";
 import { Badge, buttonPrimary, buttonSecondary, Card, EmptyState, inputClass, PageHeader, Pagination, Select, SkeletonRows, TableShell, Td, Th } from "@/components/ui";
+import { downloadFromApi, readSpreadsheet, SPREADSHEET_ACCEPT, type ParsedSheet } from "@/lib/spreadsheet";
 
 /* -------------------------------------------------------------------- types */
 
@@ -80,14 +81,6 @@ const DUE_FILTERS = [
   { key: "upcoming", label: "Upcoming" },
   { key: "none", label: "Nothing scheduled" },
 ];
-
-/* ---------------------------------------------------------- csv helpers */
-
-// Same minimal reader as the server uses, so what the browser shows and what
-// the server parses cannot disagree about a quoted comma.
-function parseCsvPreviewCount(text: string): number {
-  return text.split(/\r?\n/).filter((l) => l.trim()).length - 1;
-}
 
 /* --------------------------------------------------------------- the page */
 
@@ -184,13 +177,7 @@ export default function LeadsPage() {
 
   async function downloadCsv(path: string, filename: string) {
     try {
-      const blob = await apiClient.getBlob(path);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
+      await downloadFromApi(path, filename);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not download that file");
     }
@@ -203,12 +190,23 @@ export default function LeadsPage() {
         subtitle={`${number(total)} ${total === 1 ? "person" : "people"} in the calling list`}
         actions={
           <div className="flex flex-wrap gap-2">
-            <button
-              onClick={() => void downloadCsv("/api/crm/leads/sample.csv", "lead-upload-sample.csv")}
-              className={buttonSecondary}
-            >
-              Sample upload file
-            </button>
+            {/* Both formats. An office that works in Excel opens a .csv into
+                the text-import wizard and concludes the sample was no help. */}
+            <span className="inline-flex overflow-hidden rounded-lg border border-[var(--line)]">
+              <button
+                onClick={() => void downloadCsv("/api/crm/leads/sample.csv", "lead-upload-sample.csv")}
+                className="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+              >
+                Sample file (CSV)
+              </button>
+              <span className="w-px bg-[var(--line)]" aria-hidden />
+              <button
+                onClick={() => void downloadCsv("/api/crm/leads/sample.xlsx", "lead-upload-sample.xlsx")}
+                className="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+              >
+                Excel
+              </button>
+            </span>
             <button onClick={() => void downloadCsv(`/api/crm/leads/export.csv?${query()}`, "leads.csv")} className={buttonSecondary}>
               Download list
             </button>
@@ -218,8 +216,17 @@ export default function LeadsPage() {
             <button onClick={() => setShowPull(true)} className={buttonSecondary}>
               Pull from donors
             </button>
+            {/* Two ways in, for two genuinely different files.
+                  Quick list   - the thirty numbers someone sent on WhatsApp.
+                                 One step: named, tagged, assigned, callable.
+                  Office sheet - the donor workbook. Parked tab by tab, previewed
+                                 against what DRM already holds, and kept for
+                                 good, because a fresher export always follows. */}
+            <button onClick={() => setShowUpload(true)} className={buttonSecondary}>
+              Quick list
+            </button>
             <Link href="/calling/uploads" className={buttonPrimary}>
-              Upload a sheet
+              Upload an office sheet
             </Link>
           </div>
         }
@@ -538,19 +545,50 @@ function UploadDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{ added: number; updated: number; skipped: number } | null>(null);
+  // Only set when a workbook turns out to have several tabs, which is the only
+  // time there is anything to ask.
+  const [sheets, setSheets] = useState<ParsedSheet[] | null>(null);
+
+  // Sent as a grid rather than as CSV text: the file has already been read once
+  // on the way in, and writing it back out as CSV so the server can read it a
+  // second time is a quoting bug waiting to happen.
+  async function previewSheet(sheet: ParsedSheet) {
+    setPreview(
+      await apiClient.post<Preview>("/api/crm/leads/import/preview", {
+        rows: [sheet.headers, ...sheet.rows],
+      })
+    );
+  }
 
   async function handleFile(file: File) {
     setError(null);
     setBusy(true);
     setFileName(file.name);
-    if (!listName) setListName(file.name.replace(/\.csv$/i, ""));
+    setSheets(null);
+    if (!listName) setListName(file.name.replace(/\.(csv|xlsx|xlsm)$/i, ""));
     try {
-      const text = await file.text();
-      if (parseCsvPreviewCount(text) < 1) throw new Error("That file has no rows under its header");
-      setPreview(await apiClient.post<Preview>("/api/crm/leads/import/preview", { csv: text }));
+      const parsed = await readSpreadsheet(file);
+      // One sheet is the whole story — go straight to the preview. Several, and
+      // the person is asked, because importing the wrong tab is the sort of
+      // mistake that is only noticed once callers start ringing strangers.
+      if (parsed.length > 1) setSheets(parsed);
+      else await previewSheet(parsed[0]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not read that file");
       setPreview(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function chooseSheet(sheet: ParsedSheet) {
+    setBusy(true);
+    setError(null);
+    try {
+      await previewSheet(sheet);
+      setSheets(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not read that sheet");
     } finally {
       setBusy(false);
     }
@@ -588,12 +626,34 @@ function UploadDialog({
             See the list
           </button>
         </div>
+      ) : sheets ? (
+        <>
+          <p className="text-sm text-slate-600">
+            <strong>{fileName}</strong> has {sheets.length} sheets. Which one holds the list to call?
+          </p>
+          <div className="mt-3 space-y-2">
+            {sheets.map((s, i) => (
+              <button
+                key={i}
+                disabled={busy}
+                onClick={() => void chooseSheet(s)}
+                className="flex w-full items-center justify-between rounded-lg border border-[var(--line-soft)] px-4 py-3 text-left hover:border-[var(--accent)] hover:bg-[var(--accent-wash)] disabled:opacity-50"
+              >
+                <span className="text-sm font-medium text-slate-900">{s.name}</span>
+                <span className="text-xs text-slate-500">
+                  {number(s.rows.length)} rows · {s.headers.filter(Boolean).length} columns
+                </span>
+              </button>
+            ))}
+          </div>
+          {error && <p className="mt-3 text-sm text-red-700">{error}</p>}
+        </>
       ) : !preview ? (
         <>
           <input
             ref={fileRef}
             type="file"
-            accept=".csv,text/csv"
+            accept={SPREADSHEET_ACCEPT}
             className="sr-only"
             onChange={(e) => e.target.files?.[0] && void handleFile(e.target.files[0])}
           />
@@ -615,7 +675,7 @@ function UploadDialog({
             }`}
           >
             <p className="text-sm font-medium text-slate-900">
-              {busy ? "Reading the file…" : "Drop a CSV here, or click to choose one"}
+              {busy ? "Reading the file…" : "Drop an Excel file or CSV here, or click to choose one"}
             </p>
             <p className="mt-1 text-xs text-slate-500">
               Any column names work — Mobile, Mobile No., Contact Number are all understood

@@ -40,6 +40,7 @@ import {
   buttonSecondary,
   inputClass,
 } from "@/components/ui";
+import { SPREADSHEET_ACCEPT, toBase64 } from "@/lib/spreadsheet";
 
 interface Counts {
   new: number;
@@ -130,19 +131,18 @@ export default function UploadsPage() {
     setBusy(true);
     setError(null);
     try {
-      // Read as base64 and post as JSON. DRM has exactly one upload in the whole
-      // product, and a multipart parser with its temp files would be more
-      // moving parts than this one feature is worth.
-      const buf = await file.arrayBuffer();
-      let binary = "";
-      const bytes = new Uint8Array(buf);
-      const CHUNK = 0x8000; // String.fromCharCode blows the stack on a whole 600KB array
-      for (let i = 0; i < bytes.length; i += CHUNK) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-      }
+      // Read as base64 and post as JSON rather than as multipart: a multipart
+      // parser with its temp files is more moving parts than the upload is
+      // worth.
+      //
+      // This one posts the file itself rather than going through
+      // /api/files/parse, because the rows are not just read here - they are
+      // parked in lead_import_rows so the sheet survives the decision to apply
+      // it. Sending the file and sending the rows back would mean carrying
+      // 8,500 rows through the browser for no reason.
       const d = await apiClient.post<{ batches: Batch[] }>("/api/crm/import/sheet", {
         filename: file.name,
-        base64: btoa(binary),
+        base64: toBase64(await file.arrayBuffer()),
       });
       setDrafts(d.batches);
       await loadHistory();
@@ -183,7 +183,7 @@ export default function UploadsPage() {
     <div>
       <PageHeader
         title="Uploaded sheets"
-        subtitle="Excel workbooks from the office — every one kept, so a fresh export never costs you the calls already made"
+        subtitle="Excel or CSV from the office — every one kept, so a fresh export never costs you the calls already made"
         actions={
           <Link href="/leads" className={buttonSecondary}>
             All leads
@@ -198,7 +198,7 @@ export default function UploadsPage() {
         <input
           ref={fileRef}
           type="file"
-          accept=".xlsx,.xlsm,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          accept={SPREADSHEET_ACCEPT}
           className="sr-only"
           onChange={(e) => e.target.files?.[0] && void handleFile(e.target.files[0])}
         />
@@ -220,11 +220,12 @@ export default function UploadsPage() {
           }`}
         >
           <p className="text-sm font-medium text-slate-900">
-            {busy ? "Reading the workbook…" : "Drop an Excel file here, or click to choose one"}
+            {busy ? "Reading the file…" : "Drop an Excel file or CSV here, or click to choose one"}
           </p>
           <p className="mt-1 text-xs text-slate-500">
-            Every tab is read separately. Columns are matched by their headings — Donor Number, Mobile Number,
-            Enrolled By, Total Amount Donated and the rest are all recognised as they are written.
+            Every tab of a workbook is read separately; a CSV is read as one. Columns are matched by their
+            headings — Donor Number, Mobile Number, Enrolled By, Total Amount Donated and the rest are all
+            recognised as they are written.
           </p>
         </div>
       </Card>
@@ -393,7 +394,7 @@ export default function UploadsPage() {
             {!history.length ? (
               <tr>
                 <td colSpan={6}>
-                  <EmptyState title="Nothing uploaded yet" message="Drop an Excel file above to get started." />
+                  <EmptyState title="Nothing uploaded yet" message="Drop an Excel file or CSV above to get started." />
                 </td>
               </tr>
             ) : (

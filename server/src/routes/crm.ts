@@ -33,6 +33,7 @@ import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { fetchAbandonedPage, isSiteConfigured, type SiteKey } from '../services/hkmvClient';
+import { buildWorkbook } from '../utils/spreadsheet';
 
 const router = Router();
 router.use(authenticate);
@@ -382,18 +383,37 @@ const SORTS: Record<string, string> = {
 // "/leads/:id", or Express matches "sample.csv" as an id and the download
 // 404s with "Lead not found" - which reads as a broken button, not a
 // routing mistake, so it is the kind of bug that survives a long time.
+// Real-looking rows rather than "string, string, string", and offered next to
+// every upload button: the commonest reason an import fails is a column name.
+const LEAD_SAMPLE_ROWS = [
+  ['Name', 'Mobile Number', 'Email', 'City', 'Remarks', 'Expected Amount', 'Tags'],
+  ['Radha Krishna Das', '9876543210', 'radha@example.com', 'Visakhapatnam', 'Gave at Janmashtami last year', '5000', 'janmashtami;lapsed'],
+  ['Sita Devi', '9812345678', '', 'Hyderabad', 'Met at the Gita stall', '1100', 'gita-stall'],
+  ['Gopal Rao', '9700011122', 'gopal@example.com', 'Vizag', 'Asked to be called after Diwali', '', 'diwali'],
+];
+
 router.get('/leads/sample.csv', (_req, res) => {
-  // Real-looking rows rather than "string, string, string", and offered next to
-  // every upload button: the commonest reason an import fails is a column name.
-  const csv =
-    'Name,Mobile Number,Email,City,Remarks,Expected Amount,Tags\n' +
-    'Radha Krishna Das,9876543210,radha@example.com,Visakhapatnam,Gave at Janmashtami last year,5000,janmashtami;lapsed\n' +
-    'Sita Devi,9812345678,,Hyderabad,Met at the Gita stall,1100,gita-stall\n' +
-    'Gopal Rao,9700011122,gopal@example.com,Vizag,Asked to be called after Diwali,,diwali\n';
+  const csv = LEAD_SAMPLE_ROWS.map((r) =>
+    r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(',')
+  ).join('\n');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="lead-upload-sample.csv"');
   // BOM so Excel opens it as UTF-8 rather than mangling any Indian names in it.
-  res.send('﻿' + csv);
+  res.send('﻿' + csv + '\n');
+});
+
+// The same sample as a workbook, for an office that works in Excel and would
+// otherwise have to go through the "text import" dialog to see it.
+router.get('/leads/sample.xlsx', async (_req, res) => {
+  try {
+    const buffer = await buildWorkbook('Leads', LEAD_SAMPLE_ROWS);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="lead-upload-sample.xlsx"');
+    res.send(buffer);
+  } catch (err) {
+    console.error('crm.leadSampleXlsx error:', err);
+    res.status(500).json({ error: 'Could not build the sample file' });
+  }
 });
 
 // The list on screen, as a file. Honours every filter, for the same reason the
@@ -1088,10 +1108,21 @@ function mapHeaders(header: string[]): Record<string, number> {
  *   blank      no phone at all
  */
 router.post('/leads/import/preview', async (req, res) => {
-  const text = String(req.body?.csv ?? '');
-  if (!text.trim()) return res.status(400).json({ error: 'The file looks empty' });
-
-  const rows = parseCsv(text);
+  // Two ways in. `csv` is raw text, which is what the browser sends when it
+  // read the file itself. `rows` is a grid the browser already has, which is
+  // what it sends for an Excel file - /api/files/parse turned the workbook into
+  // rows of text and the person picked the sheet. Either way the code below is
+  // looking at the same thing: a header row and some rows under it.
+  let rows: string[][];
+  if (Array.isArray(req.body?.rows)) {
+    rows = (req.body.rows as unknown[][])
+      .map((r) => (Array.isArray(r) ? r.map((c) => String(c ?? '')) : []))
+      .filter((r) => r.some((c) => c.trim() !== ''));
+  } else {
+    const text = String(req.body?.csv ?? '');
+    if (!text.trim()) return res.status(400).json({ error: 'The file looks empty' });
+    rows = parseCsv(text);
+  }
   if (rows.length < 2) return res.status(400).json({ error: 'The file needs a header row and at least one lead' });
 
   const header = rows[0];

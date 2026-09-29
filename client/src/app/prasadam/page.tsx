@@ -15,6 +15,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiClient } from "@/lib/api";
 import { currency, number, relativeDate, shortDate } from "@/lib/format";
 import { siteLabel } from "@/components/source";
+import {
+  downloadFromApi,
+  downloadSample,
+  guessColumn,
+  readSpreadsheet,
+  SPREADSHEET_ACCEPT,
+  type ParsedSheet,
+} from "@/lib/spreadsheet";
 import { Badge, buttonPrimary, buttonSecondary, Card, EmptyState, inputClass, PageHeader, Pagination, Select, StatusBadge, TableShell, Td, Th } from "@/components/ui";
 
 interface Delivery {
@@ -82,59 +90,6 @@ const PAGE_GROUPS = [
   { key: "other", label: "Other pages" },
 ];
 
-// ---------------------------------------------------------------------------
-// A small CSV reader. Courier files are plain CSV but do quote addresses that
-// contain commas, so a naive split on "," would shear every row apart.
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') {
-          cell += '"';
-          i++;
-        } else inQuotes = false;
-      } else cell += ch;
-      continue;
-    }
-    if (ch === '"') inQuotes = true;
-    else if (ch === ",") {
-      row.push(cell);
-      cell = "";
-    } else if (ch === "\n") {
-      row.push(cell);
-      rows.push(row);
-      row = [];
-      cell = "";
-    } else if (ch !== "\r") cell += ch;
-  }
-  if (cell || row.length) {
-    row.push(cell);
-    rows.push(row);
-  }
-  return rows.filter((r) => r.some((c) => c.trim()));
-}
-
-// Courier files never agree on header names, so guess and let the person
-// correct it rather than silently reading the wrong column.
-function guessColumn(headers: string[], candidates: string[]): number {
-  const lower = headers.map((h) => h.trim().toLowerCase());
-  for (const c of candidates) {
-    const i = lower.findIndex((h) => h === c);
-    if (i !== -1) return i;
-  }
-  for (const c of candidates) {
-    const i = lower.findIndex((h) => h.includes(c));
-    if (i !== -1) return i;
-  }
-  return -1;
-}
-
 // A sample of the file the importer expects.
 //
 // Built here rather than fetched: it is four lines of text, and a courier file
@@ -146,23 +101,41 @@ function guessColumn(headers: string[], candidates: string[]): number {
 // that is the field that decides whether a row matches at all, and staff
 // otherwise assume one exact format is required.
 function downloadSampleCsv() {
-  const rows = [
+  downloadSample("prasadam-upload-sample.csv", [
     ["Donor Name", "Phone", "Tracking Number", "Delivered Date"],
     ["Ramesh Kumar", "9876543210", "BD10001", "2026-09-20"],
     ["Lakshmi Devi", "+91 98765 43211", "BD10002", "2026-09-21"],
     ["Suresh Babu", "919876543212", "", "2026-09-21"],
-  ];
-  const csv = rows
-    .map((r) => r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(","))
-    .join("\n");
-  // BOM so Excel opens it as UTF-8 rather than mangling Indian names.
-  const blob = new Blob(["\uFEFF" + csv + "\n"], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "prasadam-upload-sample.csv";
-  a.click();
-  URL.revokeObjectURL(url);
+  ]);
+}
+
+// Both formats, because "sample file" meaning CSV is only obvious to whoever
+// wrote it. An office that lives in Excel opens a .csv into the text-import
+// wizard and decides the sample was no help.
+function SampleButtons({ onError }: { onError?: (m: string) => void }) {
+  return (
+    <span className="inline-flex overflow-hidden rounded-lg border border-[var(--line)]">
+      <button
+        type="button"
+        onClick={downloadSampleCsv}
+        className="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+      >
+        Sample file (CSV)
+      </button>
+      <span className="w-px bg-[var(--line)]" aria-hidden />
+      <button
+        type="button"
+        onClick={() =>
+          downloadFromApi("/api/prasadam/import/sample.xlsx", "prasadam-upload-sample.xlsx").catch((e) =>
+            onError?.(e instanceof Error ? e.message : "Could not download the sample")
+          )
+        }
+        className="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+      >
+        Excel
+      </button>
+    </span>
+  );
 }
 
 export default function PrasadamPage() {
@@ -334,9 +307,7 @@ export default function PrasadamPage() {
                 someone preparing a file for the courier needs the format
                 BEFORE they have anything to upload, so hiding it behind the
                 upload button is exactly the wrong way round. */}
-            <button onClick={downloadSampleCsv} className={buttonSecondary}>
-              Sample upload file
-            </button>
+            <SampleButtons onError={(text) => setNotice({ tone: "bad", text })} />
             <button onClick={download} className={buttonSecondary}>
               Download list
             </button>
@@ -688,8 +659,11 @@ function ImportDialog({
   const fileRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
-  const [headers, setHeaders] = useState<string[]>([]);
-  const [rows, setRows] = useState<string[][]>([]);
+  // A courier's file is nearly always one sheet, but an Excel export can carry
+  // a tab per day or per route. Rather than guess, all of them are kept and the
+  // person picks - with the first selected, so the common case is unchanged.
+  const [sheets, setSheets] = useState<ParsedSheet[]>([]);
+  const [sheetIndex, setSheetIndex] = useState(0);
   const [cols, setCols] = useState({ phone: -1, name: -1, tracking: -1, delivered: -1 });
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [choices, setChoices] = useState<Record<number, string>>({});
@@ -697,29 +671,43 @@ function ImportDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const readFile = async (file: File) => {
-    setError(null);
-    setPreview(null);
-    setFileName(file.name);
-    if (!/\.csv$/i.test(file.name)) {
-      setError(`“${file.name}” is not a CSV. Export the courier's file as CSV and try again.`);
-      return;
-    }
-    const text = await file.text();
-    const parsed = parseCsv(text);
-    if (parsed.length < 2) {
-      setError("That file has no data rows.");
-      return;
-    }
-    const head = parsed[0].map((h) => h.replace(/^﻿/, "").trim());
-    setHeaders(head);
-    setRows(parsed.slice(1));
+  const sheet = sheets[sheetIndex] ?? null;
+  const headers = sheet?.headers ?? [];
+  const rows = sheet?.rows ?? [];
+
+  // Courier files never agree on header names, so guess and let the person
+  // correct it rather than silently reading the wrong column.
+  const mapColumns = (head: string[]) =>
     setCols({
       phone: guessColumn(head, ["phone", "mobile", "contact", "number"]),
       name: guessColumn(head, ["donor", "name", "consignee"]),
       tracking: guessColumn(head, ["tracking number", "tracking", "awb", "waybill"]),
       delivered: guessColumn(head, ["delivered at", "delivered", "delivery date", "date"]),
     });
+
+  const pickSheet = (i: number) => {
+    setSheetIndex(i);
+    mapColumns(sheets[i]?.headers ?? []);
+  };
+
+  const readFile = async (file: File) => {
+    setError(null);
+    setPreview(null);
+    setFileName(file.name);
+    setBusy(true);
+    try {
+      // Excel or CSV, read by the server's one parser - the same one the donor
+      // sheets go through, so a workbook that imports there imports here.
+      const parsed = await readSpreadsheet(file);
+      setSheets(parsed);
+      setSheetIndex(0);
+      mapColumns(parsed[0].headers);
+    } catch (e) {
+      setSheets([]);
+      setError(e instanceof Error ? e.message : "That file could not be read.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const runPreview = async () => {
@@ -731,7 +719,9 @@ function ImportDialog({
     setError(null);
     try {
       const payload: ImportRow[] = rows.map((r, i) => ({
-        rowNumber: i + 2, // +2: header row, and spreadsheets count from 1
+        // The row number in the file itself, not the position in this list, so
+        // "row 47 had no phone" sends someone to row 47 of their own sheet.
+        rowNumber: sheet?.rowNumbers[i] ?? i + 2,
         phone: r[cols.phone] ?? "",
         name: cols.name >= 0 ? r[cols.name] : undefined,
         trackingNumber: cols.tracking >= 0 ? r[cols.tracking] : undefined,
@@ -806,7 +796,7 @@ function ImportDialog({
         <input
           ref={fileRef}
           type="file"
-          accept=".csv,text/csv"
+          accept={SPREADSHEET_ACCEPT}
           onChange={(e) => e.target.files?.[0] && readFile(e.target.files[0])}
           className="sr-only"
         />
@@ -870,16 +860,14 @@ function ImportDialog({
                     Drop the courier's file here
                   </p>
                   <p className="text-xs text-slate-500 mt-1">
-                    or click to choose one — CSV, and only a phone column is required
+                    or click to choose one — Excel or CSV, and only a phone column is required
                   </p>
                 </>
               )}
             </div>
 
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-              <button type="button" onClick={downloadSampleCsv} className={buttonSecondary}>
-                Download a sample file
-              </button>
+              <SampleButtons onError={setError} />
               <span className="text-xs text-slate-500 max-w-md">
                 Not sure of the format? The sample shows the columns. The file from “Download list”
                 also works as-is — it already has Phone and Tracking number columns.
@@ -890,6 +878,25 @@ function ImportDialog({
 
         {headers.length > 0 && !preview && (
           <>
+            {/* Only when there is a choice to make. A CSV, and the great
+                majority of workbooks, have one sheet and should not be asked
+                about it. */}
+            {sheets.length > 1 && (
+              <label className="block text-xs text-slate-500 mb-3">
+                This workbook has {sheets.length} sheets — which one is the courier&apos;s?
+                <Select
+                  value={String(sheetIndex)}
+                  onChange={(v) => pickSheet(Number(v))}
+                  className="w-full mt-1"
+                >
+                  {sheets.map((s, i) => (
+                    <option key={i} value={i}>
+                      {s.name} ({number(s.rows.length)} rows)
+                    </option>
+                  ))}
+                </Select>
+              </label>
+            )}
             <p className="text-xs text-slate-500 mb-2">
               {number(rows.length)} rows read. Check the columns were picked up correctly:
             </p>

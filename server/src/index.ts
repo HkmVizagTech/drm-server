@@ -33,6 +33,7 @@ import crmRemindersRoutes from './routes/crmReminders';
 import crmLinksRoutes from './routes/crmLinks';
 import crmPreachersRoutes from './routes/crmPreachers';
 import crmImportRoutes from './routes/crmImport';
+import filesRoutes from './routes/files';
 import { scheduleBirthdayAnniversaryCheck } from './utils/cron';
 
 dotenv.config();
@@ -93,6 +94,12 @@ app.use('/api/triggers', triggersRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/subscriptions', subscriptionsRoutes);
 app.use('/api/prasadam', prasadamRoutes);
+
+// Reading an uploaded spreadsheet, for the screens that map its columns in the
+// browser. Not tied to one feature, because the point of it is that every
+// upload in DRM reads a file the same way - Excel or CSV, whichever the office
+// happened to save.
+app.use('/api/files', filesRoutes);
 
 // Calling (TeleCRM). Four routers on one prefix, split by how they are read
 // rather than by entity: leads and the call log in crm.ts, the dashboard and

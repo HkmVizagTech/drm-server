@@ -4,6 +4,7 @@ import { authenticate } from '../middleware/auth';
 import { canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 import { displayPurposeSql } from '../utils/donationLabel';
 import { updatePrasadamStatus, isSiteConfigured, type SiteKey } from '../services/hkmvClient';
+import { buildWorkbook } from '../utils/spreadsheet';
 
 const router = Router();
 router.use(authenticate);
@@ -664,6 +665,28 @@ interface ImportRow {
   trackingNumber?: string;
   deliveredAt?: string;
 }
+
+// The sample file offered beside the upload box. The three rows deliberately
+// spell the phone number three different ways, because that is the field that
+// decides whether a row matches at all and couriers each have their own habit.
+const COURIER_SAMPLE_ROWS = [
+  ['Donor Name', 'Phone', 'Tracking Number', 'Delivered Date'],
+  ['Ramesh Kumar', '9876543210', 'BD10001', '2026-09-20'],
+  ['Lakshmi Devi', '+91 98765 43211', 'BD10002', '2026-09-21'],
+  ['Suresh Babu', '919876543212', '', '2026-09-21'],
+];
+
+router.get('/import/sample.xlsx', async (_req, res) => {
+  try {
+    const buffer = await buildWorkbook('Deliveries', COURIER_SAMPLE_ROWS);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="prasadam-upload-sample.xlsx"');
+    res.send(buffer);
+  } catch (err) {
+    console.error('prasadam.sampleXlsx error:', err);
+    res.status(500).json({ error: 'Could not build the sample file' });
+  }
+});
 
 router.post('/import/preview', async (req, res) => {
   const rows: unknown = req.body?.rows;

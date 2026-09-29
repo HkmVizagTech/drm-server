@@ -26,51 +26,46 @@
 // Only if neither matches is a lead created.
 
 import { Router } from 'express';
-import ExcelJS from 'exceljs';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { preacherIdForCode, normalizeCode } from './crmPreachers';
+import {
+  parseWorkbook,
+  detectColumns,
+  cellText,
+  normalizePhone,
+  isDialable,
+  type SheetData,
+  type FieldPattern,
+} from '../utils/spreadsheet';
 
 const router = Router();
 router.use(authenticate);
 
 /* ---------------------------------------------------------------- helpers */
 
-function normalizePhone(raw: unknown): string {
-  const digits = String(raw ?? '').replace(/\D/g, '');
-  if (!digits) return '';
-  if (digits.length === 12 && digits.startsWith('91')) return digits.slice(2);
-  if (digits.length === 11 && digits.startsWith('0')) return digits.slice(1);
-  return digits.length > 10 ? digits.slice(-10) : digits;
-}
-
-const isDialable = (p: string) => /^[6-9]\d{9}$/.test(p);
-
 const str = (v: unknown, max = 255): string | null => {
-  if (v === null || v === undefined) return null;
-  // Excel hands back rich text and formula objects as well as plain values.
-  const raw =
-    typeof v === 'object'
-      ? ((v as { text?: string; result?: unknown; richText?: { text: string }[] }).text ??
-         (v as { result?: unknown }).result ??
-         (v as { richText?: { text: string }[] }).richText?.map((r) => r.text).join('') ??
-         '')
-      : v;
-  const s = String(raw).trim();
+  const s = cellText(v).trim();
   return s ? s.slice(0, max) : null;
 };
 
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === '') return null;
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
-  const n = Number(String(v).replace(/[^\d.-]/g, ''));
+  // cellText, not String: a formula cell arrives as { formula, result } and
+  // stringifies to "[object Object]", which would silently read as no money.
+  const text = cellText(v).replace(/[^\d.-]/g, '');
+  if (!text) return null;
+  const n = Number(text);
   return Number.isFinite(n) ? n : null;
 }
 
 function asDate(v: unknown): Date | null {
   if (!v) return null;
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
-  const d = new Date(String(v));
+  const text = cellText(v).trim();
+  if (!text) return null;
+  const d = new Date(text);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
@@ -83,7 +78,7 @@ function asDate(v: unknown): Date | null {
  * headings carry years in them that change every export - "Amount Donated from
  * 1stApr2024 to 7thOct2025" must still be recognised next year.
  */
-const FIELD_PATTERNS: { field: string; any: string[]; not?: string[] }[] = [
+const FIELD_PATTERNS: FieldPattern[] = [
   { field: 'donor_code', any: ['donor number', 'donor no', 'donor code', 'donor id'] },
   { field: 'phone', any: ['mobile', 'phone', 'contact', 'whatsapp', 'number'], not: ['donor'] },
   { field: 'name', any: ['donor name', 'name'], not: ['preacher', 'enrolled'] },
@@ -96,28 +91,6 @@ const FIELD_PATTERNS: { field: string; any: string[]; not?: string[] }[] = [
   { field: 'amount_recent', any: ['amount donated in', 'amount donated from', 'last 4 year', 'recent amount'] },
   { field: 'remarks', any: ['remark', 'note', 'comment'] },
 ];
-
-function detectMapping(headers: string[]): Record<string, number> {
-  const map: Record<string, number> = {};
-  const norm = headers.map((h) =>
-    String(h ?? '').toLowerCase().replace(/[._\-#]+/g, ' ').replace(/\s+/g, ' ').trim()
-  );
-
-  for (const { field, any, not } of FIELD_PATTERNS) {
-    if (map[field] !== undefined) continue;
-    for (let i = 0; i < norm.length; i++) {
-      if (Object.values(map).includes(i)) continue; // one heading, one field
-      const h = norm[i];
-      if (!h) continue;
-      if (not?.some((n) => h.includes(n))) continue;
-      if (any.some((a) => h.includes(a))) {
-        map[field] = i;
-        break;
-      }
-    }
-  }
-  return map;
-}
 
 interface ParsedRow {
   row_number: number;
@@ -133,33 +106,20 @@ interface ParsedRow {
   raw: Record<string, unknown>;
 }
 
-function parseSheet(ws: ExcelJS.Worksheet): { headers: string[]; mapping: Record<string, number>; rows: ParsedRow[] } {
-  const headers: string[] = [];
-  const headerRow = ws.getRow(1);
-  headerRow.eachCell({ includeEmpty: true }, (cell, col) => {
-    headers[col - 1] = str(cell.value, 120) ?? '';
-  });
-
-  const mapping = detectMapping(headers);
+function parseSheet(sheet: SheetData): { headers: string[]; mapping: Record<string, number>; rows: ParsedRow[] } {
+  const headers = sheet.headers.map((h) => (str(h, 120) ?? ''));
+  const mapping = detectColumns(headers, FIELD_PATTERNS);
   const at = (values: unknown[], field: string) =>
     mapping[field] === undefined ? null : values[mapping[field]];
 
-  const rows: ParsedRow[] = [];
-  ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-    if (rowNumber === 1) return;
-    const values: unknown[] = [];
-    row.eachCell({ includeEmpty: true }, (cell, col) => {
-      values[col - 1] = cell.value;
-    });
-    if (values.every((v) => v === null || v === undefined || String(v).trim() === '')) return;
-
+  const rows: ParsedRow[] = sheet.rows.map((values, i) => {
     const raw: Record<string, unknown> = {};
-    headers.forEach((h, i) => {
-      if (h) raw[h] = str(values[i], 300);
+    headers.forEach((h, k) => {
+      if (h) raw[h] = str(values[k], 300);
     });
 
-    rows.push({
-      row_number: rowNumber,
+    return {
+      row_number: sheet.rowNumbers[i],
       donor_code: str(at(values, 'donor_code'), 40),
       phone: normalizePhone(at(values, 'phone')),
       name: str(at(values, 'name'), 255),
@@ -170,7 +130,7 @@ function parseSheet(ws: ExcelJS.Worksheet): { headers: string[]; mapping: Record
       account_type: str(at(values, 'account_type'), 40),
       remarks: str(at(values, 'remarks'), 2000),
       raw,
-    });
+    };
   });
 
   return { headers, mapping, rows };
@@ -179,7 +139,7 @@ function parseSheet(ws: ExcelJS.Worksheet): { headers: string[]; mapping: Record
 /* ------------------------------------------------------------ phase one */
 
 /**
- * POST /import/sheet - read the workbook and park it, without touching a lead.
+ * POST /import/sheet - read the file and park it, without touching a lead.
  *
  * Returns one draft batch per sheet, each with what it would do. The file is
  * sent as base64 rather than multipart: DRM has exactly one upload in the whole
@@ -192,23 +152,23 @@ router.post('/import/sheet', async (req, res) => {
   const base64 = String(req.body?.base64 ?? '');
   if (!base64) return res.status(400).json({ error: 'No file received' });
 
-  let workbook: ExcelJS.Workbook;
+  let sheets: SheetData[];
   try {
-    workbook = new ExcelJS.Workbook();
-    // Cast through Uint8Array: exceljs's types still describe the old Node
-    // Buffer, and @types/node now models Buffer as Buffer<ArrayBufferLike>, so
-    // the two no longer line up even though the value is exactly right.
-    await workbook.xlsx.load(Buffer.from(base64, 'base64') as unknown as Parameters<typeof workbook.xlsx.load>[0]);
+    // One parser for .xlsx and .csv alike. A CSV comes back as a single sheet
+    // named after the file, so everything below this line is unaware of which
+    // one the office happened to save.
+    sheets = await parseWorkbook(Buffer.from(base64, 'base64'), filename);
   } catch {
-    return res.status(400).json({ error: "That file couldn't be read as an Excel workbook." });
+    return res.status(400).json({ error: "That file couldn't be read as a spreadsheet." });
   }
+  if (!sheets.length) return res.status(400).json({ error: 'That file has no rows in it.' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const batches: Record<string, unknown>[] = [];
 
-    for (const ws of workbook.worksheets) {
+    for (const ws of sheets) {
       const { headers, mapping, rows } = parseSheet(ws);
       if (!rows.length) continue;
 
@@ -379,12 +339,12 @@ router.post('/import/sheet', async (req, res) => {
     }
 
     await client.query('COMMIT');
-    if (!batches.length) return res.status(400).json({ error: 'That workbook has no rows in it.' });
+    if (!batches.length) return res.status(400).json({ error: 'That file has no rows in it.' });
     res.json({ filename, batches });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.importSheet error:', err);
-    res.status(500).json({ error: 'Could not read that workbook' });
+    res.status(500).json({ error: 'Could not read that file' });
   } finally {
     client.release();
   }
