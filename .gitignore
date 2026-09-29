@@ -1,3 +1,23 @@
+# Dependencies (root and both workspaces - npm hoists most of it to the root)
 node_modules/
-dist/
+
+# Build output
+client/.next/
+client/out/
+server/dist/
+*.tsbuildinfo
+
+# Environment. Never commit real secrets; .env.example documents the keys.
 .env
+.env.*
+!.env.example
+!.env.local.example
+
+# Misc
+.DS_Store
+*.pem
+npm-debug.log*
+
+# Local scratch from AI tooling. Design mockups and copies of env files -
+# one of them contains real WhatsApp/API keys and the shared internal secret.
+Claude outputs/

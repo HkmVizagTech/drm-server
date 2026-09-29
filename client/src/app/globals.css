@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Theme tokens.
+
+   The four surface colours are the ones chosen for this project:
+     #F0FFDF  pale green   - sidebar
+     #EBF4F6  pale blue    - page plane behind cards
+     #A8DF8E  light green  - active/selected fills
+     #ACBAC4  grey-blue    - hairlines and borders
+
+   None of those four can carry text or a button: measured against white they
+   land between 1.05:1 and 1.99:1, far below the 4.5:1 needed for text and the
+   3:1 needed for UI. They are surfaces. So the accent is a deeper green from
+   the same family (#2b6e2f, 6.2:1 on white) used for buttons, links and active
+   state, with #A8DF8E as the soft fill behind dark green text (5.9:1).
+
+   This admin is deliberately light-only - staff use it beside printed receipt
+   books and the live site, and an automatic dark flip would invert tables and
+   chart surfaces that were never contrast-checked for a dark background.
+--------------------------------------------------------------------------- */
+
+:root {
+  --page: #ebf4f6;
+  --sidebar: #f0ffdf;
+  --surface: #ffffff;
+
+  --line: #acbac4;
+  --line-soft: rgba(172, 186, 196, 0.45);
+  --line-strong: rgba(172, 186, 196, 0.8);
+
+  --accent: #2b6e2f;
+  --accent-hover: #256029;
+  --accent-soft: #a8df8e;
+  --accent-ink: #1e5128;
+  --accent-wash: rgba(168, 223, 142, 0.28);
+
+  --ink: #0f172a;
+  --ink-soft: #475569;
+  --ink-muted: #64748b;
+
+  --background: var(--page);
+  --foreground: var(--ink);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-surface: var(--surface);
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Money and counts sit in columns that must line up vertically; proportional
+   figures make those columns look ragged. */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Focus ring in the accent, so keyboard navigation is obvious without the
+   browser default blue fighting the palette. */
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #8fa2ae;
+  background-clip: content-box;
+}
+
+/* Rows animate open in the donations table; keep it quick so a list of
+   expandable rows never feels sluggish. */
+@keyframes rowExpand {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.row-expand {
+  animation: rowExpand 120ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row-expand {
+    animation: none;
+  }
+}

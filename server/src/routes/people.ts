@@ -3,6 +3,7 @@ import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import { fetchDonorSnapshot, fetchDonorPage, fetchTransactionPage, configuredSites, SITE_KEYS, SiteKey, isSiteConfigured, SITE_IMPORT_MODE } from '../services/hkmvClient';
 import { upsertDonorSnapshot, upsertTransactionBatch } from '../services/hkmvSync';
+import { groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 
 const router = Router();
 router.use(authenticate);
@@ -25,7 +26,7 @@ const PEOPLE_SORTS: Record<string, string> = {
 // person row - this endpoint surfaces how many and how much, so the list can
 // show it without N+1 follow-up requests.
 router.get('/', async (req, res) => {
-  const { role, search, sort = 'recent' } = req.query;
+  const { role, search, sort = 'recent', site, group } = req.query;
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
   const offset = (page - 1) * limit;
@@ -43,6 +44,25 @@ router.get('/', async (req, res) => {
     conditions.push(`(p.name ILIKE $${idx} OR p.phone ILIKE $${idx} OR p.email ILIKE $${idx})`);
     values.push(`%${search}%`);
     idx++;
+  }
+
+  // Which site the person has given through. source_sites is an array because a
+  // donor can have used both, so this is containment, not equality - filtering
+  // by "annadan" must still return someone who also gave on the main site.
+  if (site) {
+    conditions.push(`$${idx} = ANY(p.source_sites)`);
+    values.push(site);
+    idx++;
+  }
+
+  // People who gave through a particular family of pages. EXISTS rather than a
+  // join so a donor with twenty donations still counts once and the row count
+  // stays right.
+  if (typeof group === 'string' && isPageGroup(group)) {
+    conditions.push(
+      `EXISTS (SELECT 1 FROM donations dn WHERE dn.person_id = p.id
+                 AND ${groupPredicateSql(group, 'dn.source_page', 'dn.source_site')})`
+    );
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';

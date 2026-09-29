@@ -195,3 +195,40 @@ ALTER TABLE people ADD COLUMN IF NOT EXISTS source_sites TEXT[] NOT NULL DEFAULT
 -- recurring gifts and its own prasadam dispatch, separate from the main site's.
 ALTER TABLE subscriptions        ADD COLUMN IF NOT EXISTS source_site VARCHAR(20) NOT NULL DEFAULT 'drm';
 ALTER TABLE prasadam_deliveries  ADD COLUMN IF NOT EXISTS source_site VARCHAR(20) NOT NULL DEFAULT 'drm';
+
+-- ---------------------------------------------------------------------------
+-- Prasadam fulfilment: who marked it, and when it was marked here.
+--
+-- delivered_at is the courier's delivery date (it can come from an uploaded
+-- file and be backdated). marked_at is when a person in DRM recorded it, and
+-- marked_by is who. Kept apart on purpose: when a donor says "I never got it",
+-- the useful question is who recorded the delivery and from what, not the date
+-- the courier claimed.
+ALTER TABLE prasadam_deliveries ADD COLUMN IF NOT EXISTS marked_by UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE prasadam_deliveries ADD COLUMN IF NOT EXISTS marked_at TIMESTAMPTZ;
+-- How the status was last set: 'manual' (one row in the UI), 'bulk' (several
+-- selected at once) or 'import' (an uploaded courier file).
+ALTER TABLE prasadam_deliveries ADD COLUMN IF NOT EXISTS marked_via VARCHAR(10);
+
+-- The fulfilment queue is almost always filtered by status and read
+-- newest-first, and the import matches on the donor's phone.
+CREATE INDEX IF NOT EXISTS idx_prasadam_status_created ON prasadam_deliveries(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_prasadam_donation ON prasadam_deliveries(donation_id);
+
+-- ---------------------------------------------------------------------------
+-- Offline donations recorded through DRM.
+--
+-- DRM does NOT mint receipt numbers. Both donation sites already have a
+-- complete offline path that calls DCC, generates the 80G receipt and sends it
+-- on WhatsApp (hkmsite2.0-server's "manual entry / raise receipt", annadan's
+-- "offline donation"). DRM posts the entry to whichever site the admin picks
+-- and stores what comes back, so there is still exactly ONE receipt series per
+-- site and DCC sees every gift.
+--
+-- Which is why the only new column here is who typed it in. Everything else
+-- already exists: source='offline', payment_mode=cash/cheque/upi/bank,
+-- payment_ref=the UTR or reference number, receipt_number and external_ref as
+-- returned by the issuing site.
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS entered_by UUID REFERENCES users(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_donations_entered_by ON donations(entered_by) WHERE entered_by IS NOT NULL;

@@ -134,7 +134,12 @@ async function upsertDonation(
        utm_source        = EXCLUDED.utm_source,
        utm_medium        = EXCLUDED.utm_medium,
        utm_campaign      = EXCLUDED.utm_campaign,
-       payment_ref       = EXCLUDED.payment_ref
+       -- COALESCE, not a plain overwrite: an offline donation carries a UTR
+       -- or cheque number that DRM recorded at entry, and the source site has
+       -- no payment reference of its own for a manual gift. A bare
+       -- EXCLUDED.payment_ref would wipe that reference on the very next
+       -- import, silently losing the only link back to the bank statement.
+       payment_ref       = COALESCE(EXCLUDED.payment_ref, donations.payment_ref)
      RETURNING id`,
     [
       personId,

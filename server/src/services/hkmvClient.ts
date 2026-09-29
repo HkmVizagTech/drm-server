@@ -335,3 +335,160 @@ export const hkmvMappers = {
   truncate30,
   truncate,
 };
+
+// ---------------------------------------------------------------------------
+// Recording an offline donation on a source site.
+//
+// DRM collects ONE simple form and each site is handed the field names it
+// already expects. Neither site's validation, DCC call, receipt numbering or
+// WhatsApp send is reimplemented here - this only translates.
+//
+// The two sites genuinely disagree about names and vocabulary, which is the
+// whole reason this mapping exists in one place rather than in the route:
+//   donor name      donorName            vs  name
+//   reference       utrNumber            vs  offlineRefNo
+//   payment mode    manualPaymentMode    vs  offlinePaymentMode
+//   seva            sevaName             vs  occasion
+//   prasadam        wantPrasadam/address vs  mahaprasadam/prasadamAddress
+// and HKMV accepts only upi|bank|cash|cheque where annadan also allows
+// phonepe|bank_transfer|other.
+
+export interface OfflineDonationInput {
+  donorName: string;
+  donorMobile: string;
+  donorEmail?: string | null;
+  amount: number;
+  /** cash | cheque | upi | bank */
+  paymentMode: string;
+  /** UTR, cheque number or receipt-book reference. Required by both sites. */
+  referenceNo: string;
+  /** When the money was actually received, not when it was typed in. */
+  paymentDate?: string | null;
+  sevaName?: string | null;
+  panNumber?: string | null;
+  wantCertificate?: boolean;
+  wantPrasadam?: boolean;
+  prasadamAddress?: string | null;
+  note?: string | null;
+  /** Shown on the source site's record so staff there know where it came from. */
+  enteredByName?: string | null;
+}
+
+export interface OfflineDonationResult {
+  externalId: string | null;
+  receiptNumber: string | null;
+  donorName: string | null;
+  amount: number | null;
+  raw: unknown;
+}
+
+// HKMV's schema restricts the mode to these four. Anything else would be
+// silently coerced to "bank" by its controller, so map explicitly instead of
+// letting a cheque quietly become a bank transfer.
+const HKMV_MODES: Record<string, string> = {
+  cash: 'cash',
+  cheque: 'cheque',
+  upi: 'upi',
+  bank: 'bank',
+};
+
+const ANNADAN_MODES: Record<string, string> = {
+  cash: 'cash',
+  cheque: 'cheque',
+  upi: 'upi',
+  bank: 'bank_transfer',
+};
+
+function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<string, unknown> {
+  if (site === 'annadan') {
+    return {
+      name: input.donorName,
+      mobile: input.donorMobile,
+      email: input.donorEmail || '',
+      amount: input.amount,
+      offlineRefNo: input.referenceNo,
+      offlinePaymentMode: ANNADAN_MODES[input.paymentMode] || 'other',
+      paymentDate: input.paymentDate || undefined,
+      certificate: !!input.wantCertificate,
+      panNumber: input.panNumber || '',
+      occasion: input.sevaName || '',
+      mahaprasadam: !!input.wantPrasadam,
+      prasadamAddress: input.wantPrasadam ? input.prasadamAddress || '' : '',
+      address: input.prasadamAddress || '',
+      enteredByName: input.enteredByName || undefined,
+    };
+  }
+
+  return {
+    donorName: input.donorName,
+    donorMobile: input.donorMobile,
+    donorEmail: input.donorEmail || undefined,
+    amount: input.amount,
+    utrNumber: input.referenceNo,
+    manualPaymentMode: HKMV_MODES[input.paymentMode] || 'bank',
+    paymentDate: input.paymentDate || undefined,
+    sevaName: input.sevaName || undefined,
+    type: input.sevaName || 'Manual Entry',
+    panNumber: input.panNumber || undefined,
+    certificate: !!input.wantCertificate,
+    wantPrasadam: !!input.wantPrasadam,
+    prasadamAddress: input.wantPrasadam ? input.prasadamAddress || undefined : undefined,
+    manualEntryNote: input.note || undefined,
+    enteredByName: input.enteredByName || undefined,
+  };
+}
+
+export async function createOfflineDonation(
+  site: SiteKey,
+  input: OfflineDonationInput
+): Promise<OfflineDonationResult> {
+  const res = await siteFetch(getSite(site), '/api/internal/drm/donations/offline', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(buildOfflineBody(site, input)),
+  });
+
+  // Typed loosely on purpose: the two sites answer with different shapes and
+  // an error body is different again, so every field is read defensively below.
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+
+  if (!res.ok) {
+    // The sites' own refusals are the useful ones - a duplicate reference
+    // number, a missing field, a DCC failure. Pass the site's wording through
+    // rather than flattening it to "request failed", and carry the status so a
+    // duplicate (409) stays a duplicate to the caller.
+    const message =
+      (typeof body?.message === 'string' && body.message) ||
+      (typeof body?.error === 'string' && body.error) ||
+      `${siteLabelFor(site)} refused the entry (${res.status})`;
+    const err = new Error(message) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
+
+  // The two sites return different shapes. annadan answers with the receipt
+  // number at the top level; HKMV returns the whole donation document.
+  const donation = (body?.donation ?? {}) as Record<string, unknown>;
+  const pick = (a: unknown, b: unknown): string | null => {
+    if (typeof a === 'string' && a) return a;
+    if (typeof b === 'string' && b) return b;
+    return null;
+  };
+
+  return {
+    externalId: pick(body?.donationId ? String(body.donationId) : null, donation?._id ? String(donation._id) : null),
+    receiptNumber: pick(body?.receiptNumber, donation?.receiptNumber),
+    donorName: pick(body?.donorName, donation?.donorName) ?? input.donorName,
+    amount:
+      typeof body?.amount === 'number'
+        ? body.amount
+        : typeof donation?.amount === 'number'
+        ? donation.amount
+        : input.amount,
+    raw: body,
+  };
+}
+
+function siteLabelFor(site: SiteKey): string {
+  return site === 'annadan' ? 'The annadan site' : 'The main site';
+}

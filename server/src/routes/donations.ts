@@ -1,7 +1,15 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
-import { fetchReceiptPdf, resendReceipt, SiteKey } from '../services/hkmvClient';
+import {
+  createOfflineDonation,
+  fetchDonorSnapshot,
+  fetchReceiptPdf,
+  isSiteConfigured,
+  resendReceipt,
+  SiteKey,
+} from '../services/hkmvClient';
+import { upsertDonorSnapshot } from '../services/hkmvSync';
 import { canonPage, canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 
 const router = Router();
@@ -158,6 +166,156 @@ router.post('/', async (req, res) => {
 });
 
 // Bulk sync donations (from live site)
+// ---------------------------------------------------------------------------
+// POST /offline - record a donation taken in cash, cheque, UPI or bank transfer.
+//
+// DRM does not issue receipts. The admin picks which site the receipt should
+// come from, and that site's existing offline path runs: DCC is called, the
+// 80G receipt number is allocated from that site's own series, the PDF is
+// generated and WhatsApp goes out. Exactly what happens when staff use that
+// site's own admin form.
+//
+// Then DRM pulls the donor's fresh snapshot back and upserts it, so the gift
+// appears here immediately with its real receipt number instead of waiting for
+// the next import.
+router.post('/offline', async (req, res) => {
+  const {
+    site,
+    donor_name,
+    donor_mobile,
+    donor_email,
+    amount,
+    payment_mode,
+    reference_no,
+    payment_date,
+    seva_name,
+    pan_number,
+    want_certificate,
+    want_prasadam,
+    prasadam_address,
+    note,
+  } = req.body ?? {};
+
+  // Validate here as well as on the site. Not redundant: a clear message from
+  // DRM beats a round trip that comes back with another system's wording, and
+  // it keeps an obviously bad entry off a live donation database entirely.
+  const errors: string[] = [];
+  if (site !== 'hkmv' && site !== 'annadan') errors.push('Choose which site should issue the receipt');
+  else if (!isSiteConfigured(site)) errors.push(`The ${site} site is not configured on this server`);
+
+  const amt = Number(amount);
+  if (!String(donor_name || '').trim()) errors.push('Donor name is required');
+  if (!String(donor_mobile || '').replace(/\D/g, '')) errors.push('A mobile number is required for the receipt');
+  if (!Number.isFinite(amt) || amt <= 0) errors.push('Enter a valid amount');
+  if (!String(reference_no || '').trim()) {
+    errors.push('A reference number is required — the UTR, cheque number or receipt book number');
+  }
+  if (!['cash', 'cheque', 'upi', 'bank'].includes(String(payment_mode))) {
+    errors.push('Payment mode must be cash, cheque, upi or bank');
+  }
+  if (want_prasadam && !String(prasadam_address || '').trim()) {
+    errors.push('A delivery address is needed when prasadam is requested');
+  }
+  if (want_certificate && !String(pan_number || '').trim()) {
+    errors.push('A PAN is needed for an 80G certificate');
+  }
+  if (errors.length) return res.status(400).json({ error: errors[0], errors });
+
+  const siteKey = site as SiteKey;
+
+  // Who is recording this, for the audit trail and for the note that shows on
+  // the source site's own record.
+  let enteredByName: string | null = null;
+  if (req.user?.userId) {
+    const u = await pool.query('SELECT name FROM users WHERE id = $1', [req.user.userId]);
+    enteredByName = u.rows[0]?.name ?? null;
+  }
+
+  let issued;
+  try {
+    issued = await createOfflineDonation(siteKey, {
+      donorName: String(donor_name).trim(),
+      donorMobile: String(donor_mobile).trim(),
+      donorEmail: donor_email ? String(donor_email).trim() : null,
+      amount: amt,
+      paymentMode: String(payment_mode),
+      referenceNo: String(reference_no).trim(),
+      paymentDate: payment_date || null,
+      sevaName: seva_name ? String(seva_name).trim() : null,
+      panNumber: pan_number ? String(pan_number).trim() : null,
+      wantCertificate: !!want_certificate,
+      wantPrasadam: !!want_prasadam,
+      prasadamAddress: prasadam_address ? String(prasadam_address).trim() : null,
+      note: note ? String(note).trim() : null,
+      enteredByName,
+    });
+  } catch (err) {
+    const e = err as Error & { status?: number };
+    console.error('donations.offline error:', e.message);
+    // 409 (duplicate reference) is passed through as 409 so the UI can say
+    // "already recorded" rather than "something went wrong". Anything else the
+    // site refused is a 502: DRM is fine, the upstream declined.
+    const status = e.status === 409 || e.status === 400 ? e.status : 502;
+    return res.status(status).json({ error: e.message });
+  }
+
+  // The receipt exists on the source site now. Pulling the donor's snapshot
+  // back is a convenience, so a failure here must not read as a failed
+  // donation - it just means this row appears on the next import instead.
+  // "synced" means THIS donation is now visible in DRM - not merely that the
+  // donor lookup answered. The site can return a snapshot that does not yet
+  // include the new gift (DCC still working, or the read lagging the write),
+  // and reporting success then would have the UI claim a row that isn't there.
+  let synced = false;
+  try {
+    const snapshot = await fetchDonorSnapshot(siteKey, String(donor_mobile));
+    if (snapshot?.found) {
+      const result = await upsertDonorSnapshot(snapshot, siteKey);
+
+      if (issued.externalId) {
+        // Also correct what the sync path cannot know. upsertDonation writes a
+        // fixed payment_mode of 'upi' because that is what the overwhelming
+        // majority of website donations are - but this one was taken in cash,
+        // by cheque or over a bank transfer, and staff need to see that. The
+        // reference number goes into payment_ref for the same reason: it is
+        // how this gift is traced back to the bank statement or receipt book.
+        const marked = await pool.query(
+          `UPDATE donations SET
+             entered_by   = $1,
+             source       = 'offline',
+             payment_mode = $4,
+             payment_ref  = COALESCE(payment_ref, $5)
+           WHERE external_ref = $2 AND person_id = $3
+           RETURNING id`,
+          [
+            req.user?.userId ?? null,
+            issued.externalId,
+            result.personId,
+            String(payment_mode),
+            String(reference_no).trim(),
+          ]
+        );
+        synced = (marked.rowCount ?? 0) > 0;
+      }
+    }
+  } catch (err) {
+    console.error('donations.offline sync-back failed (non-fatal):', (err as Error).message);
+  }
+
+  res.status(201).json({
+    site: siteKey,
+    receiptNumber: issued.receiptNumber,
+    externalId: issued.externalId,
+    donorName: issued.donorName,
+    amount: issued.amount,
+    synced,
+    message: issued.receiptNumber
+      ? `Receipt ${issued.receiptNumber} issued by the ${siteKey === 'annadan' ? 'annadan' : 'main'} site.` +
+        (synced ? '' : ' It will show in this list after the next import.')
+      : 'Donation recorded. The receipt number has not come back yet — it will appear once DCC responds.',
+  });
+});
+
 router.post('/sync', async (req, res) => {
   const { donations } = req.body;
   const results = [];
