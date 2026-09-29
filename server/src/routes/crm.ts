@@ -114,6 +114,10 @@ async function reconcileConversions(force = false): Promise<number> {
        converted_amount      = f.amount,
        converted_at          = f.created_at,
        status                = 'converted',
+       -- 'auto': DRM saw the donation arrive and matched it. Distinct from a
+       -- caller asserting it, because the two are not equally good evidence
+       -- and the reports say which.
+       converted_via         = 'auto',
        updated_at            = NOW()
      FROM first_gift f
      WHERE l.id = f.lead_id
@@ -241,6 +245,12 @@ const LEAD_COLUMNS = `
   l.last_contacted_at, l.last_outcome, l.call_attempts, l.expected_amount,
   l.converted_donation_id, l.converted_amount, l.converted_at,
   l.do_not_call, l.invalid_reason, l.created_at, l.updated_at,
+  l.preacher_id, l.donor_code, l.converted_via, l.converted_note,
+  -- Giving from the office's own sheets. Shown to the caller, never added to
+  -- anything DRM raised - see the schema note on external_total_donated.
+  l.external_total_donated, l.external_recent_donated, l.external_last_donation_at,
+  l.external_account_count, l.external_account_type,
+  pr.code AS preacher_code, pr.name AS preacher_name,
   u.name AS assigned_to_name,
   s.label AS status_label, s.tone AS status_tone, s.is_open AS status_is_open,
   -- Shown on the lead row so a caller knows whether they are ringing a stranger
@@ -250,6 +260,7 @@ const LEAD_COLUMNS = `
 const LEAD_JOINS = `
   FROM leads l
   LEFT JOIN users u ON l.assigned_to = u.id
+  LEFT JOIN preachers pr ON l.preacher_id = pr.id
   LEFT JOIN crm_statuses s ON l.status = s.slug
   LEFT JOIN LATERAL (
     SELECT COALESCE(SUM(d.amount),0)::numeric AS total_donated,
@@ -300,6 +311,23 @@ function buildLeadFilters(q: Record<string, unknown>, startIdx = 1): Filters {
   if (q.tag) {
     conditions.push(`l.tags && $${i++}`);
     values.push(arr(q.tag));
+  }
+  // "Ring everyone Jagat Tarini Mataji brought in" is one of the commonest
+  // ways the office builds a list, so the preacher is a first-class filter.
+  // Accepts the code (JTMD) or the id, because the office speaks in codes.
+  if (q.preacher) {
+    if (String(q.preacher) === 'none') conditions.push(`l.preacher_id IS NULL`);
+    else {
+      conditions.push(`(l.preacher_id::text = $${i} OR pr.code = upper($${i}))`);
+      values.push(String(q.preacher));
+      i++;
+    }
+  }
+  // Lifetime giving from the sheets - the other way lists get built: "everyone
+  // who has given over a lakh and nothing lately".
+  if (q.min_external) {
+    conditions.push(`l.external_total_donated >= $${i++}`);
+    values.push(num(q.min_external));
   }
   if (q.search) {
     conditions.push(`(l.name ILIKE $${i} OR l.phone ILIKE $${i} OR l.email ILIKE $${i} OR l.city ILIKE $${i})`);
@@ -546,6 +574,11 @@ router.put('/leads/:id', async (req, res) => {
                                   ELSE $9::timestamptz END,
          follow_up_note    = COALESCE($10, follow_up_note),
          expected_amount   = COALESCE($11, expected_amount),
+         -- 'clear' rather than null, so "no preacher" can be chosen
+         -- deliberately and is not the same as "field not sent".
+         preacher_id       = CASE WHEN $14::text = 'clear' THEN NULL
+                                  WHEN $14::text IS NULL THEN preacher_id
+                                  ELSE $14::uuid END,
          -- Once set, do_not_call is only cleared by explicitly passing false.
          do_not_call       = COALESCE($12, do_not_call),
          updated_at        = NOW()
@@ -564,6 +597,7 @@ router.put('/leads/:id', async (req, res) => {
         num(b.expected_amount),
         typeof b.do_not_call === 'boolean' ? b.do_not_call : null,
         req.params.id,
+        b.preacher_id === null ? 'clear' : str(b.preacher_id, 36),
       ]
     );
 
@@ -849,6 +883,11 @@ router.post('/leads/bulk', async (req, res) => {
       result = await pool.query(
         `UPDATE leads SET next_follow_up_at = $1, updated_at = NOW() WHERE id = ANY($2::uuid[]) RETURNING id`,
         [asDate(req.body.at), ids]
+      );
+    } else if (action === 'preacher') {
+      result = await pool.query(
+        `UPDATE leads SET preacher_id = $1::uuid, updated_at = NOW() WHERE id = ANY($2::uuid[]) RETURNING id`,
+        [str(req.body.preacher_id, 36), ids]
       );
     } else if (action === 'do_not_call') {
       result = await pool.query(
@@ -1374,6 +1413,122 @@ router.delete('/activities/:id', async (req, res) => {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.undoCall error:', err);
     res.status(500).json({ error: 'Could not undo that call' });
+  } finally {
+    client.release();
+  }
+});
+
+/* -------------------------------------------------- conversions */
+
+/**
+ * GET /conversions/unseen - "one of your leads donated".
+ *
+ * The missing half of automatic linking. Without it a lead quietly moves to
+ * Donated and the caller who earned it never finds out, so it stays on their
+ * mental list and they ring a donor who has already given - which is the most
+ * embarrassing call a fundraising team can make.
+ *
+ * Scoped to the caller the lead was assigned to, plus unassigned ones, the same
+ * rule the queue and the reminders use.
+ */
+router.get('/conversions/unseen', async (req, res) => {
+  try {
+    await reconcileConversions();
+    const rows = await pool.query(
+      `SELECT l.id, l.name, l.phone, l.converted_amount, l.converted_at, l.converted_via,
+              d.purpose, d.source_site
+         FROM leads l
+         LEFT JOIN donations d ON l.converted_donation_id = d.id
+        WHERE l.converted_donation_id IS NOT NULL
+          AND l.conversion_seen_at IS NULL
+          AND (l.assigned_to = $1::uuid OR l.assigned_to IS NULL)
+          -- Anything older than a fortnight is history, not news.
+          AND l.converted_at > NOW() - INTERVAL '14 days'
+        ORDER BY l.converted_at DESC LIMIT 20`,
+      [req.user?.userId ?? null]
+    );
+    res.json({ conversions: rows.rows });
+  } catch (err) {
+    console.error('crm.unseenConversions error:', err);
+    // Never an error banner over a caller's work; it retries on the next poll.
+    res.json({ conversions: [] });
+  }
+});
+
+router.post('/conversions/seen', async (req, res) => {
+  const ids: string[] = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  try {
+    await pool.query(
+      `UPDATE leads SET conversion_seen_at = NOW()
+        WHERE conversion_seen_at IS NULL
+          AND (${ids.length ? 'id = ANY($1::uuid[])' : 'TRUE'})`,
+      ids.length ? [ids] : []
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('crm.markConversionsSeen error:', err);
+    res.status(500).json({ error: 'Could not update those' });
+  }
+});
+
+/**
+ * POST /leads/:id/donated - the caller says money arrived.
+ *
+ * For giving DRM cannot see: cash at the counter, a bank transfer, a cheque
+ * handed to a preacher. Recorded as 'manual' so the reports can separate what
+ * the system observed from what a caller asserted - a distinction that matters
+ * the moment anyone uses these numbers to judge a caller's work.
+ *
+ * Deliberately does NOT create a donation row. DRM's donations come from the
+ * two sites, which issue the 80G receipts; inventing one here would produce a
+ * donation with no receipt behind it and break the reconciliation against the
+ * sites. The amount is recorded against the lead, and the real donation links
+ * itself automatically when the site's own entry syncs across.
+ */
+router.post('/leads/:id/donated', async (req, res) => {
+  const amount = num(req.body?.amount);
+  if (amount === null || amount <= 0) return res.status(400).json({ error: 'How much did they give?' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const before = await client.query(`SELECT status FROM leads WHERE id = $1 FOR UPDATE`, [req.params.id]);
+    if (!before.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    const result = await client.query(
+      `UPDATE leads SET
+         status             = 'converted',
+         converted_amount   = $1::numeric,
+         converted_at       = COALESCE($2::timestamptz, NOW()),
+         converted_via      = 'manual',
+         converted_note     = $3,
+         conversion_seen_at = NOW(),
+         next_follow_up_at  = NULL,
+         updated_at         = NOW()
+       WHERE id = $4 RETURNING *`,
+      [amount, asDate(req.body?.at), str(req.body?.note, 1000), req.params.id]
+    );
+
+    await client.query(
+      `INSERT INTO lead_activities (lead_id, user_id, kind, from_value, to_value, note)
+       VALUES ($1,$2,'status_change',$3,'converted',$4)`,
+      [
+        req.params.id,
+        req.user?.userId ?? null,
+        before.rows[0].status,
+        `Donated ${amount}${req.body?.note ? ` — ${String(req.body.note).slice(0, 200)}` : ''} (recorded by hand)`,
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.json(result.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    console.error('crm.markDonated error:', err);
+    res.status(500).json({ error: 'Could not record that donation' });
   } finally {
     client.release();
   }

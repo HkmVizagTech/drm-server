@@ -23,6 +23,7 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 import { apiClient } from "@/lib/api";
 import { Badge, buttonPrimary, buttonSecondary, Card, CardHeader, inputClass, PageHeader, Select, TableShell, Td, Th } from "@/components/ui";
 import { apiClient as api } from "@/lib/api";
+import { currency, number } from "@/lib/format";
 
 interface Status {
   slug: string;
@@ -289,6 +290,9 @@ export default function CallingSettingsPage() {
           </TableShell>
         </Card>
 
+        {/* ------------------------------------------------------ preachers */}
+        <PreachersSection />
+
         {/* ---------------------------------------------------------- links */}
         <LinksSection />
 
@@ -309,6 +313,145 @@ export default function CallingSettingsPage() {
         </Card>
       </div>
     </div>
+  );
+}
+
+/**
+ * Preachers.
+ *
+ * The codes come out of the office's sheets - "Enrolled By" - and DRM creates
+ * any it has not seen during an import, so this list fills itself. What it
+ * cannot do is know what JTMD stands for, which is the one thing a caller
+ * actually needs: "Jagat Tarini Mataji gave us your name" opens a call in a way
+ * that "JTMD" never will.
+ *
+ * The counts are what make this worth opening. A preacher list without them is
+ * an admin screen; with them it answers "whose donors should we be calling",
+ * which is the question the office has.
+ */
+interface PreacherRow {
+  id: string;
+  code: string;
+  name: string | null;
+  phone: string | null;
+  active: boolean;
+  leads: number;
+  open_leads: number;
+  converted: number;
+  raised: string;
+  external_total: string;
+  donors: number;
+}
+
+function PreachersSection() {
+  const [rows, setRows] = useState<PreacherRow[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [newCode, setNewCode] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const d = await api.get<{ preachers: PreacherRow[] }>("/api/crm/preachers");
+      setRows(d.preachers);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load the preachers");
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function save(id: string, body: Record<string, unknown>) {
+    try {
+      await api.put(`/api/crm/preachers/${id}`, body);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save that");
+    }
+  }
+
+  return (
+    <Card padded={false}>
+      <div className="px-5 pt-5">
+        <CardHeader
+          title={`Preachers${rows.length ? ` · ${rows.length}` : ""}`}
+          subtitle="The Enrolled By codes from your sheets. Give them real names and every caller sees the name instead of the code."
+        />
+      </div>
+
+      {error && <p className="px-5 pb-3 text-sm text-red-700">{error}</p>}
+
+      <TableShell>
+        <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
+          <tr>
+            <Th>Code</Th>
+            <Th>Name</Th>
+            <Th align="right">Leads</Th>
+            <Th align="right">Still to call</Th>
+            <Th align="right">In temple accounts</Th>
+            <Th align="right">Raised by calling</Th>
+            <Th align="center">In use</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {!rows.length ? (
+            <tr>
+              <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-400">
+                None yet — they appear automatically when you upload a sheet with an Enrolled By column.
+              </td>
+            </tr>
+          ) : (
+            rows.map((p) => (
+              <tr key={p.id} className="hover:bg-slate-50/60">
+                <Td className="font-medium text-slate-900 tabular-nums">{p.code}</Td>
+                <Td>
+                  <input
+                    defaultValue={p.name ?? ""}
+                    placeholder="Their name…"
+                    onBlur={(e) => e.target.value !== (p.name ?? "") && void save(p.id, { name: e.target.value })}
+                    className="w-full bg-transparent text-slate-800 placeholder:text-slate-300 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] rounded px-1 -mx-1"
+                  />
+                </Td>
+                <Td align="right" className="tabular-nums text-slate-600">{number(p.leads)}</Td>
+                <Td align="right" className="tabular-nums text-slate-600">{number(p.open_leads)}</Td>
+                <Td align="right" className="tabular-nums text-slate-700">
+                  {Number(p.external_total) ? currency(Number(p.external_total)) : <span className="text-slate-300">—</span>}
+                </Td>
+                <Td align="right" className="tabular-nums font-medium text-slate-900">
+                  {Number(p.raised) ? currency(Number(p.raised)) : <span className="text-slate-300">—</span>}
+                </Td>
+                <Td align="center"><Toggle on={p.active} onChange={(v) => void save(p.id, { active: v })} /></Td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </TableShell>
+
+      <div className="px-5 py-4 flex flex-wrap gap-2 border-t border-[var(--line-soft)]">
+        <input
+          value={newCode}
+          onChange={(e) => setNewCode(e.target.value.toUpperCase())}
+          placeholder="Add a code, e.g. JTMD"
+          className={`${inputClass} w-40`}
+        />
+        <button
+          disabled={!newCode.trim()}
+          onClick={async () => {
+            await api.post("/api/crm/preachers", { code: newCode.trim() });
+            setNewCode("");
+            await load();
+          }}
+          className={buttonPrimary}
+        >
+          Add
+        </button>
+        <p className="w-full text-xs text-slate-500 mt-1">
+          A preacher is somebody the DONOR knows, not somebody who signs in to DRM — which is why this is a separate
+          list from your users. Retiring one keeps every donor they brought in; it only takes the code out of the
+          dropdowns.
+        </p>
+      </div>
+    </Card>
   );
 }
 

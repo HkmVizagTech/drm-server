@@ -19,10 +19,11 @@
 // most browsers - so there is a button, and the toast works regardless of the
 // answer.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency } from "@/lib/format";
+import { useCallingAlerts } from "./calling-alerts";
 
 interface Alert {
   id: string;
@@ -53,8 +54,10 @@ function timeUntil(iso: string): string {
 }
 
 export function ReminderBell() {
-  const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [dueCount, setDueCount] = useState(0);
+  // The poll lives in CallingAlertsProvider, once for the whole app. Three
+  // components need this information and three timers would race each other for
+  // the same alerts, since fetching one is what marks it delivered.
+  const { alerts, conversions, dueCount, dismissAlert, dismissConversions, refresh } = useCallingAlerts();
   const [open, setOpen] = useState(false);
   const [canNotify, setCanNotify] = useState<"unsupported" | "granted" | "denied" | "default">("unsupported");
   const panelRef = useRef<HTMLDivElement>(null);
@@ -65,52 +68,13 @@ export function ReminderBell() {
     }
   }, []);
 
-  const poll = useCallback(async () => {
-    try {
-      const [a, board] = await Promise.all([
-        apiClient.get<{ alerts: Alert[] }>("/api/crm/reminders/alerts"),
-        apiClient.get<{ counts: Record<string, number> }>("/api/crm/reminders?scope=open&mine=true"),
-      ]);
-
-      // The badge counts what is actually outstanding - late, due now, or due
-      // today. Counting every future reminder would leave a permanent number on
-      // the bell that means nothing and gets ignored within a week.
-      setDueCount((board.counts.missed ?? 0) + (board.counts.now ?? 0) + (board.counts.today ?? 0));
-
-      if (a.alerts.length) {
-        setAlerts((prev) => [...a.alerts, ...prev].slice(0, 20));
-        setOpen(true);
-        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-          for (const al of a.alerts) {
-            new Notification(al.lead_name ? `${al.lead_name} — ${timeUntil(al.due_at)}` : "Reminder", {
-              body: al.title,
-              // Same tag per reminder, so an alert that somehow arrives twice
-              // replaces rather than stacks.
-              tag: al.id,
-            });
-          }
-        }
-      }
-    } catch {
-      // Silent on purpose: a failed poll must not put an error banner over
-      // someone's call. The next one is a minute away.
-    }
-  }, []);
-
+  // Open by itself when something new arrives — the whole point of an alert is
+  // that the caller does not have to go looking for it.
+  const seen = useRef(0);
   useEffect(() => {
-    void poll();
-    const t = setInterval(() => void poll(), POLL_MS);
-    // Catching up the moment someone comes back to the tab matters more than
-    // the timer does - a laptop that was asleep has a backlog waiting.
-    const onFocus = () => void poll();
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onFocus);
-    return () => {
-      clearInterval(t);
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onFocus);
-    };
-  }, [poll]);
+    if (alerts.length > seen.current) setOpen(true);
+    seen.current = alerts.length;
+  }, [alerts.length]);
 
   useEffect(() => {
     if (!open) return;
@@ -122,10 +86,10 @@ export function ReminderBell() {
   }, [open]);
 
   async function act(id: string, action: string, minutes?: number) {
-    setAlerts((a) => a.filter((x) => x.id !== id));
+    dismissAlert(id);
     try {
       await apiClient.put(`/api/crm/reminders/${id}`, { action, minutes });
-      void poll();
+      void refresh();
     } catch {
       /* the board is the source of truth; a failed snooze just reappears */
     }
@@ -158,7 +122,40 @@ export function ReminderBell() {
           </div>
 
           <div className="max-h-96 overflow-y-auto">
-            {!alerts.length ? (
+            {/* A lead that has donated goes above the reminders. It is the one
+                piece of news that changes what a caller does next — including
+                not ringing someone who has already given. */}
+            {conversions.length > 0 && (
+              <ul className="divide-y divide-emerald-100 bg-emerald-50/60">
+                {conversions.map((c) => (
+                  <li key={c.id} className="px-4 py-3">
+                    <p className="text-sm font-medium text-emerald-900">
+                      {c.name || c.phone} donated {c.converted_amount ? currency(Number(c.converted_amount)) : ""}
+                    </p>
+                    <p className="text-xs text-emerald-800 mt-0.5">
+                      {c.purpose ? `${c.purpose} · ` : ""}
+                      {c.converted_via === "auto" ? "came through on the site" : "recorded by hand"}
+                    </p>
+                    <div className="mt-2 flex gap-2">
+                      <Link
+                        href={`/leads/${c.id}`}
+                        onClick={() => setOpen(false)}
+                        className="rounded-lg bg-[var(--accent)] px-2.5 py-1 text-xs font-medium text-white"
+                      >
+                        Open
+                      </Link>
+                      <button
+                        onClick={() => void dismissConversions([c.id])}
+                        className="rounded-lg border border-emerald-200 bg-white px-2.5 py-1 text-xs text-emerald-800"
+                      >
+                        Got it
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {!alerts.length && !conversions.length ? (
               <p className="px-4 py-6 text-sm text-slate-500 text-center">
                 {dueCount > 0
                   ? `${dueCount} reminder${dueCount === 1 ? "" : "s"} need attention.`

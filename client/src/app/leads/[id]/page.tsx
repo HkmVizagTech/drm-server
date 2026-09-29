@@ -18,6 +18,8 @@ import { currency, number, relativeDate, shortDate } from "@/lib/format";
 import { Badge, buttonPrimary, buttonSecondary, Card, CardHeader, EmptyState, inputClass, PageHeader, Select } from "@/components/ui";
 import { SendLink } from "@/components/send-link";
 
+interface Preacher { id: string; code: string; name: string | null }
+
 interface Lead {
   id: string;
   phone: string;
@@ -45,6 +47,15 @@ interface Lead {
   total_donated: string | null;
   donation_count: number | null;
   created_at: string;
+  preacher_id: string | null;
+  preacher_code: string | null;
+  preacher_name: string | null;
+  donor_code: string | null;
+  converted_via: string | null;
+  external_total_donated: string | null;
+  external_account_count: number | null;
+  external_last_donation_at: string | null;
+  external_source: string | null;
 }
 
 interface Activity {
@@ -82,6 +93,10 @@ export default function LeadDetailPage() {
   const [activities, setActivities] = useState<Activity[]>([]);
   const [donations, setDonations] = useState<Donation[]>([]);
   const [config, setConfig] = useState<{ statuses: { slug: string; label: string }[]; users: { id: string; name: string }[] } | null>(null);
+  const [preachers, setPreachers] = useState<Preacher[]>([]);
+  const [donatedOpen, setDonatedOpen] = useState(false);
+  const [donatedAmount, setDonatedAmount] = useState("");
+  const [donatedNote, setDonatedNote] = useState("");
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -106,6 +121,10 @@ export default function LeadDetailPage() {
 
   useEffect(() => {
     apiClient.get<typeof config>("/api/crm/config").then(setConfig).catch(() => undefined);
+    apiClient
+      .get<{ preachers: Preacher[] }>("/api/crm/preachers?counts=false")
+      .then((d) => setPreachers(d.preachers))
+      .catch(() => undefined);
   }, []);
 
   async function patch(body: Record<string, unknown>) {
@@ -266,6 +285,24 @@ export default function LeadDetailPage() {
                 />
               </label>
               <label className="block">
+                {/* Optional by design: plenty of donors have no preacher, and
+                    forcing one would just get whoever was top of the list. */}
+                <span className="block text-xs text-slate-500 mb-1">Known to (preacher)</span>
+                <Select
+                  value={lead.preacher_id ?? ""}
+                  onChange={(v) => void patch({ preacher_id: v || null })}
+                  className="w-full"
+                  placeholder="Nobody in particular"
+                  options={[
+                    { value: "", label: "Nobody in particular" },
+                    ...preachers.map((p) => ({
+                      value: p.id,
+                      label: p.name ? `${p.name} (${p.code})` : p.code,
+                    })),
+                  ]}
+                />
+              </label>
+              <label className="block">
                 <span className="block text-xs text-slate-500 mb-1">Hoping for (₹)</span>
                 <input
                   type="number"
@@ -307,11 +344,83 @@ export default function LeadDetailPage() {
                 ) : undefined
               }
             />
+            {lead.external_total_donated && (
+              <p className="mb-3 rounded-lg bg-[var(--accent-wash)] px-3 py-2 text-sm text-slate-800">
+                {currency(Number(lead.external_total_donated))} on record in the temple accounts
+                {Number(lead.external_account_count) > 1 && <> across {lead.external_account_count} accounts</>}
+                {lead.external_last_donation_at && <> · last in {new Date(lead.external_last_donation_at).getFullYear()}</>}
+                <span className="block text-[11px] text-slate-500 mt-0.5">
+                  From {lead.external_source || "an uploaded sheet"} — kept out of DRM&apos;s own totals.
+                </span>
+              </p>
+            )}
             {lead.converted_at && (
               <p className="mb-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
                 Gave {currency(Number(lead.converted_amount ?? 0))} {relativeDate(lead.converted_at)} after being
                 called.
+                <span className="block text-[11px] text-emerald-800 mt-0.5">
+                  {lead.converted_via === "manual"
+                    ? "Recorded by a caller — DRM did not see this one arrive."
+                    : "Matched automatically to a donation on the site."}
+                </span>
               </p>
+            )}
+
+            {/* Money DRM cannot see: cash at the counter, a bank transfer, a
+                cheque handed to a preacher. Without this the only conversions
+                on record are the ones that happened to come through a website,
+                and every report understates what the calling achieved. */}
+            {!lead.converted_at && (
+              donatedOpen ? (
+                <div className="mb-3 rounded-lg border border-[var(--line-soft)] p-3">
+                  <p className="text-xs font-medium text-slate-700 mb-2">They donated — how much?</p>
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      autoFocus
+                      value={donatedAmount}
+                      onChange={(e) => setDonatedAmount(e.target.value)}
+                      placeholder="₹"
+                      className={`${inputClass} w-28`}
+                    />
+                    <input
+                      value={donatedNote}
+                      onChange={(e) => setDonatedNote(e.target.value)}
+                      placeholder="Cash at the counter, bank transfer…"
+                      className={`${inputClass} flex-1`}
+                    />
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      disabled={!donatedAmount}
+                      onClick={async () => {
+                        await apiClient.post(`/api/crm/leads/${id}/donated`, {
+                          amount: Number(donatedAmount),
+                          note: donatedNote || undefined,
+                        });
+                        setDonatedOpen(false);
+                        setDonatedAmount("");
+                        setDonatedNote("");
+                        await load();
+                      }}
+                      className={buttonPrimary}
+                    >
+                      Record it
+                    </button>
+                    <button onClick={() => setDonatedOpen(false)} className={buttonSecondary}>
+                      Cancel
+                    </button>
+                  </div>
+                  <p className="mt-2 text-[11px] text-slate-400">
+                    This records the donation against the lead. The receipt still comes from whichever site issues it —
+                    DRM never mints one.
+                  </p>
+                </div>
+              ) : (
+                <button onClick={() => setDonatedOpen(true)} className={`${buttonSecondary} mb-3`}>
+                  They donated — record it
+                </button>
+              )
             )}
             {!donations.length ? (
               <p className="text-sm text-slate-500">

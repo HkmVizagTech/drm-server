@@ -34,6 +34,7 @@ import { apiClient } from "@/lib/api";
 import { currency, dueLabel, relativeDate } from "@/lib/format";
 import { Badge, Card, EmptyState, PageHeader, buttonPrimary, buttonSecondary, inputClass } from "@/components/ui";
 import { SendLink } from "@/components/send-link";
+import { useCallingAlerts } from "@/components/calling-alerts";
 
 interface Lead {
   id: string;
@@ -58,6 +59,13 @@ interface Lead {
   total_donated: string | null;
   donation_count: number | null;
   last_donation_at: string | null;
+  preacher_code: string | null;
+  preacher_name: string | null;
+  donor_code: string | null;
+  external_total_donated: string | null;
+  external_account_count: number | null;
+  external_last_donation_at: string | null;
+  external_source: string | null;
 }
 
 interface Disposition {
@@ -146,6 +154,12 @@ export default function CallingQueuePage() {
 
   const noteRef = useRef<HTMLTextAreaElement>(null);
   const lead = queue[0] ?? null;
+
+  // Reminders and conversions, from the one shared poll. On this screen they
+  // cannot live in a bell in the corner: a caller mid-run is looking at the
+  // outcome buttons, not the header, and a reminder they scroll past is a
+  // promise broken.
+  const { alerts, conversions, dueCount, dismissAlert, dismissConversions } = useCallingAlerts();
 
   // Phone or desk? A tel: link opens the dialler on a touch device and usually
   // does nothing on a desktop, so the primary button changes accordingly
@@ -352,6 +366,86 @@ export default function CallingQueuePage() {
         <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
       )}
 
+      {/* ------------------------------------------- a lead has just donated */}
+      {conversions.map((c) => (
+        <div
+          key={c.id}
+          className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3"
+        >
+          <p className="text-sm text-emerald-900">
+            <span className="font-semibold">{c.name || c.phone}</span> donated
+            {c.converted_amount ? <> {currency(Number(c.converted_amount))}</> : null}
+            {c.purpose ? <span className="text-emerald-800"> — {c.purpose}</span> : null}
+            <span className="text-emerald-700">
+              {" "}
+              · {c.converted_via === "auto" ? "arrived on the site" : "recorded by hand"}
+            </span>
+          </p>
+          <div className="flex gap-2">
+            <Link href={`/leads/${c.id}`} className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white">
+              Open
+            </Link>
+            <button
+              onClick={() => void dismissConversions([c.id])}
+              className="rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-xs text-emerald-800"
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {/* -------------------------------------------- a reminder has come due */}
+      {alerts.map((a) => (
+        <div
+          key={a.id + a.due_at}
+          className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3"
+        >
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-amber-900">
+              {a.lead_name || a.lead_phone}
+              {a.occasion ? <span className="font-normal"> · {a.occasion}</span> : null}
+            </p>
+            <p className="text-sm text-amber-800">{a.title}</p>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            <a
+              href={`tel:+91${a.lead_phone}`}
+              className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white"
+            >
+              Call {a.lead_phone}
+            </a>
+            <button
+              onClick={() => void apiClient.put(`/api/crm/reminders/${a.id}`, { action: "snooze", minutes: 60 }).then(() => dismissAlert(a.id))}
+              className="rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-xs text-amber-900"
+            >
+              In an hour
+            </button>
+            <button
+              onClick={() => void apiClient.put(`/api/crm/reminders/${a.id}`, { action: "done" }).then(() => dismissAlert(a.id))}
+              className="rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-xs text-amber-900"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {/* Nothing has fired yet, but something is owed today. Quieter than an
+          alert, because it is not interrupting - just refusing to let a caller
+          finish a run unaware that a promise falls due. */}
+      {!alerts.length && dueCount > 0 && (
+        <Link
+          href="/calling/reminders"
+          className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-[var(--line-soft)] bg-white px-4 py-2.5 hover:bg-slate-50"
+        >
+          <span className="text-sm text-slate-600">
+            {dueCount} reminder{dueCount === 1 ? "" : "s"} due today or overdue
+          </span>
+          <span className="text-xs text-[var(--accent)]">See them →</span>
+        </Link>
+      )}
+
       {/* Undo sits above the fold, because a misclick is noticed instantly and
           the fix has to be within reach at that moment. */}
       {lastCall && (
@@ -414,6 +508,16 @@ export default function CallingQueuePage() {
                 <p className="mt-1 text-sm text-slate-500">
                   {[lead.city, lead.email].filter(Boolean).join(" · ") || "No other details"}
                 </p>
+                {/* The preacher who brought this donor in. A caller who can
+                    open with "Jagat Tarini Mataji gave us your name" is not
+                    making a cold call, which is why this sits with the name
+                    rather than buried in the record. */}
+                {lead.preacher_code && (
+                  <p className="mt-1 text-sm text-slate-700">
+                    <span className="text-slate-500">Known to:</span>{" "}
+                    <span className="font-medium">{lead.preacher_name || lead.preacher_code}</span>
+                  </p>
+                )}
               </div>
 
               {/* The number, big. On a phone it dials; at a desk it copies. */}
@@ -470,6 +574,24 @@ export default function CallingQueuePage() {
                     See their full history
                   </Link>
                 )}
+              </div>
+            ) : lead.external_total_donated ? (
+              // From the office's own sheets, not from DRM. Shown because a
+              // caller ringing someone who has given three lakhs needs to know
+              // that; kept out of every DRM total because it is not money the
+              // calling raised.
+              <div className="mt-4 rounded-lg bg-[var(--accent-wash)] px-4 py-3">
+                <p className="text-sm text-slate-800">
+                  <span className="font-semibold">{currency(Number(lead.external_total_donated))}</span> on record in
+                  the temple accounts
+                  {Number(lead.external_account_count) > 1 && (
+                    <span className="text-slate-600"> across {lead.external_account_count} accounts</span>
+                  )}
+                  {lead.external_last_donation_at && <> · last in {new Date(lead.external_last_donation_at).getFullYear()}</>}
+                </p>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  From {lead.external_source || "an uploaded sheet"} — not counted in DRM&apos;s own totals.
+                </p>
               </div>
             ) : (
               <p className="mt-4 rounded-lg bg-slate-50 px-4 py-3 text-sm text-slate-600">

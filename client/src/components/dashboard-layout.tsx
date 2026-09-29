@@ -16,6 +16,7 @@ import { ReactNode, useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Sidebar } from "./sidebar";
 import { ReminderBell } from "./reminder-bell";
+import { CallingAlertsProvider } from "./calling-alerts";
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -40,6 +41,10 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   }, [open]);
 
   return (
+    // One provider around the whole shell: the bell, the nav count and the
+    // calling screen all read the same poll, so they can never disagree and
+    // cannot race each other for an alert.
+    <CallingAlertsProvider>
     <div className="flex h-screen bg-[var(--page)] text-slate-900">
       {/* Desktop: unchanged. */}
       <div className="hidden lg:flex">
@@ -97,5 +102,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         <div className="max-w-[1400px] mx-auto px-4 sm:px-6 pb-5 sm:pb-7 pt-3 sm:pt-4">{children}</div>
       </main>
     </div>
+    </CallingAlertsProvider>
   );
 }

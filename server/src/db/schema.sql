@@ -761,3 +761,216 @@ WHERE NOT EXISTS (SELECT 1 FROM crm_links);
 INSERT INTO crm_settings (key, value) VALUES
   ('whatsapp_open_mode', '"wa"'::jsonb)
 ON CONFLICT (key) DO NOTHING;
+
+-- ===========================================================================
+-- PREACHERS
+--
+-- Every donor sheet the temple keeps has an "Enrolled By" column - JTMD, VKTD,
+-- YDRD and so on - and it is the single most important thing on the row that
+-- DRM had nowhere to put. It is the preacher who brought that donor in, and it
+-- changes how a call goes: mentioning the preacher a donor already knows turns
+-- a cold call into a warm one.
+--
+-- Codes, not names, because that is what the sheets carry and what the office
+-- says out loud. A full name can be filled in here later and every screen picks
+-- it up; until then the code is shown, which is still better than nothing.
+--
+-- NOT a `users` row. A preacher is someone the DONOR knows; a user is someone
+-- who signs in to DRM. Sometimes the same person, usually not, and conflating
+-- them would mean creating a login for every preacher just to record a name.
+CREATE TABLE IF NOT EXISTS preachers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- The code exactly as the sheets write it, upper-cased. This is what an
+  -- import matches on, so it is the real key.
+  code VARCHAR(20) UNIQUE NOT NULL,
+  name VARCHAR(160),
+  phone VARCHAR(15),
+  notes TEXT,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_preachers_active ON preachers(active, code);
+
+-- A donor's preacher, and a lead's. Both nullable, and deliberately separate
+-- columns rather than one on people alone: a lead from an uploaded sheet may
+-- have a preacher long before it is ever linked to a person in DRM.
+ALTER TABLE people ADD COLUMN IF NOT EXISTS preacher_id UUID REFERENCES preachers(id) ON DELETE SET NULL;
+ALTER TABLE leads  ADD COLUMN IF NOT EXISTS preacher_id UUID REFERENCES preachers(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_people_preacher ON people(preacher_id) WHERE preacher_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_leads_preacher  ON leads(preacher_id)  WHERE preacher_id IS NOT NULL;
+
+
+-- ===========================================================================
+-- UPLOADED SHEETS
+--
+-- The office works from spreadsheets: last four years' general donation data,
+-- a festival list, a stall register. A sheet gets uploaded, the team calls
+-- through it, and some weeks later a fresher export of the same data arrives.
+--
+-- WHAT MUST SURVIVE A RE-UPLOAD: every call, note, reminder and outcome
+-- recorded against those people. That is the entire value of the CRM, and it
+-- is exactly what would be lost if a new sheet replaced the old rows.
+--
+-- So an upload never replaces anything. It adds people who are new and fills
+-- gaps on people already here, and it is recorded as a BATCH: which file, who
+-- uploaded it, when, and what it did. Every lead remembers the batch it first
+-- arrived in, so "where did this person come from" always has an answer, and a
+-- batch that turns out to be wrong can be traced rather than guessed at.
+CREATE TABLE IF NOT EXISTS lead_import_batches (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  filename VARCHAR(255) NOT NULL,
+  -- Which tab of the workbook. The temple's sheets carry several (HKMI, TSC),
+  -- and they mean different things, so they import as separate batches.
+  sheet_name VARCHAR(120),
+  label VARCHAR(160),
+  uploaded_by UUID REFERENCES users(id) ON DELETE SET NULL,
+
+  rows_total INT NOT NULL DEFAULT 0,
+  leads_added INT NOT NULL DEFAULT 0,
+  leads_updated INT NOT NULL DEFAULT 0,
+  rows_skipped INT NOT NULL DEFAULT 0,
+  -- People in the sheet who were already donors in DRM. Worth recording: it is
+  -- the number that tells the office whether a list is fresh or a re-export.
+  matched_existing_donors INT NOT NULL DEFAULT 0,
+
+  -- The column mapping that was used, and the counts per bucket. Kept so a
+  -- puzzling import can be explained months later without the original file.
+  detail JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_batches_time ON lead_import_batches(created_at DESC);
+
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS import_batch_id UUID REFERENCES lead_import_batches(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_leads_batch ON leads(import_batch_id) WHERE import_batch_id IS NOT NULL;
+
+-- The donor code the office's own sheets use (D2, D18, ...). A far better key
+-- than a phone number for matching a re-upload: people change numbers, and two
+-- family members share one, but the donor code stays put.
+ALTER TABLE leads  ADD COLUMN IF NOT EXISTS donor_code VARCHAR(40);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS donor_code VARCHAR(40);
+CREATE INDEX IF NOT EXISTS idx_leads_donor_code  ON leads(donor_code)  WHERE donor_code IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_people_donor_code ON people(donor_code) WHERE donor_code IS NOT NULL;
+
+
+-- ---------------------------------------------------------------------------
+-- GIVING RECORDED ELSEWHERE
+--
+-- The sheets carry lifetime totals - one of them adds up to over sixteen crore
+-- - from the accounting system, not from DRM. A caller badly needs to see it:
+-- ringing someone who has given three lakhs over the years is a different
+-- conversation from ringing a stranger.
+--
+-- It is kept in its own columns, NEVER written into the donations table, and
+-- that separation is the whole point. DRM's totals and its conversion reports
+-- exist to answer "what did the calling achieve"; folding in money that arrived
+-- years before anyone picked up the phone would make every one of those figures
+-- flattering and useless. Shown to the caller, excluded from the arithmetic.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS external_total_donated NUMERIC(14,2);
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS external_recent_donated NUMERIC(14,2);
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS external_last_donation_at TIMESTAMPTZ;
+-- Which system said so, and what it called the account (the sheets say "TSC").
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS external_source VARCHAR(60);
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS external_account_type VARCHAR(40);
+
+-- Calling lists are very often built from this: "everyone who has given over a
+-- lakh but nothing since 2023".
+CREATE INDEX IF NOT EXISTS idx_leads_external_total
+  ON leads(external_total_donated DESC NULLS LAST)
+  WHERE external_total_donated IS NOT NULL;
+
+-- Every row of every sheet ever uploaded, exactly as it arrived.
+--
+-- Asked for directly: "if they upload a new one we should store the old sheet
+-- data". It earns its space three times over:
+--
+--   - a batch can be previewed, checked and only then applied, because the rows
+--     are already parked here rather than being held in a browser tab
+--   - months later "what did the March sheet actually say about this donor"
+--     has an answer, without hunting for the file on someone's laptop
+--   - a fresh export can be compared against the last one, so "this donor's
+--     total went up by 50,000 since the last sheet" is a question DRM can
+--     answer rather than a spreadsheet exercise
+--
+-- raw holds the whole original row keyed by its real column headings, so a
+-- column nobody thought to map is still there when it turns out to matter.
+CREATE TABLE IF NOT EXISTS lead_import_rows (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_id UUID NOT NULL REFERENCES lead_import_batches(id) ON DELETE CASCADE,
+  row_number INT NOT NULL,
+
+  -- The mapped fields, as understood at import time.
+  donor_code VARCHAR(40),
+  phone VARCHAR(10),
+  name VARCHAR(255),
+  preacher_code VARCHAR(20),
+  amount_total NUMERIC(14,2),
+  amount_recent NUMERIC(14,2),
+  last_donation_at TIMESTAMPTZ,
+  account_type VARCHAR(40),
+  remarks TEXT,
+
+  -- new | updated | duplicate_in_file | invalid_phone | no_phone
+  outcome VARCHAR(24),
+  lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+
+  raw JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_rows_batch ON lead_import_rows(batch_id, row_number);
+CREATE INDEX IF NOT EXISTS idx_import_rows_phone ON lead_import_rows(phone) WHERE phone IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_import_rows_code  ON lead_import_rows(donor_code) WHERE donor_code IS NOT NULL;
+
+-- draft (parsed, nothing applied) | applied | discarded
+ALTER TABLE lead_import_batches ADD COLUMN IF NOT EXISTS status VARCHAR(12) NOT NULL DEFAULT 'draft';
+ALTER TABLE lead_import_batches ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ;
+ALTER TABLE lead_import_batches ADD COLUMN IF NOT EXISTS applied_by UUID REFERENCES users(id) ON DELETE SET NULL;
+
+-- How many donor accounts sit behind one phone number.
+--
+-- The real sheet has 6,348 donor codes across 5,452 numbers: families and
+-- businesses sharing a line, each code with its own lifetime total. A lead is
+-- one phone (one call), so those totals are ADDED onto that lead - otherwise a
+-- caller ringing a number behind two accounts worth 50 lakh between them sees
+-- only whichever row happened to be imported last. On the real workbook that is
+-- 2.12 crore of giving that would have been invisible on the calling screen.
+--
+-- The count is kept so the screen can say "across 2 accounts" rather than
+-- presenting a summed figure as though it were one donor's.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS external_account_count INT;
+
+-- ---------------------------------------------------------------------------
+-- WHEN A LEAD DONATES
+--
+-- Three ways DRM finds out, and it needs all three:
+--
+--   automatic  the donor gives on one of the sites, the sync brings it in, and
+--              reconcileConversions() links it to the lead. No one does
+--              anything. This is the common case and it already worked.
+--
+--   alerted    the caller who rang them is TOLD. Without this the automatic
+--              link is silent: the lead quietly moves to Donated and the person
+--              who earned it never knows, so they keep the lead on their list
+--              and ring a donor who has already given - the single most
+--              embarrassing thing a fundraising team can do.
+--
+--   manual     money that arrived by a route DRM cannot see: cash at the
+--              counter, a transfer to the temple account, a cheque handed to a
+--              preacher. The caller marks it and says how.
+--
+-- converted_via records WHICH of the three it was, because a conversion the
+-- system observed and one a caller asserted are not equally strong evidence,
+-- and a report that mixes them without saying so is overstating its case.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS converted_via VARCHAR(12);
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS converted_note TEXT;
+-- Cleared when the caller has seen it. Drives the "one of your leads donated"
+-- alert, and only for the person whose lead it was.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS conversion_seen_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_leads_conversion_unseen
+  ON leads(assigned_to, converted_at DESC)
+  WHERE converted_donation_id IS NOT NULL AND conversion_seen_at IS NULL;

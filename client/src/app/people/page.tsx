@@ -167,7 +167,7 @@ export default function PeoplePage() {
           placeholder="Search name, phone or email…"
           className={`${inputClass} flex-1 min-w-[16rem]`}
         />
-        <Select value={roleFilter} onChange={(v) => setRoleFilter(v)} className="w-full">
+        <Select value={roleFilter} onChange={(v) => setRoleFilter(v)} className="flex-1 min-w-[9rem]">
           <option value="">All roles</option>
           {roleOptions.map((r) => (
             <option key={r} value={r}>
@@ -178,7 +178,7 @@ export default function PeoplePage() {
         <Select
           value={siteFilter}
           onChange={(v) => setSiteFilter(v)}
-          className="w-full"
+          className="flex-1 min-w-[9rem]"
           aria-label="Filter by donation site"
         >
           <option value="">All sites</option>
@@ -188,7 +188,7 @@ export default function PeoplePage() {
         <Select
           value={groupFilter}
           onChange={(v) => setGroupFilter(v)}
-          className="w-full"
+          className="flex-1 min-w-[9rem]"
           aria-label="Filter by donation page"
         >
           <option value="">Any page</option>
@@ -196,7 +196,7 @@ export default function PeoplePage() {
           <option value="donate">Donate — seva campaigns</option>
           <option value="other">Other pages</option>
         </Select>
-        <Select value={sort} onChange={(v) => setSort(v)} className="w-full">
+        <Select value={sort} onChange={(v) => setSort(v)} className="flex-1 min-w-[9rem]">
           {sortOptions.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}

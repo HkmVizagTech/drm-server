@@ -389,7 +389,7 @@ export default function PrasadamPage() {
             placeholder="Donor name, phone or tracking number"
             className={`${inputClass} flex-1 min-w-[16rem]`}
           />
-          <Select value={site} onChange={(v) => setSite(v)} className="w-full">
+          <Select value={site} onChange={(v) => setSite(v)} className="flex-1 min-w-[9rem]">
             <option value="">All sites</option>
             {options.sites.map((s) => (
               <option key={s.site} value={s.site}>
@@ -397,7 +397,7 @@ export default function PrasadamPage() {
               </option>
             ))}
           </Select>
-          <Select value={group} onChange={(v) => setGroup(v)} className="w-full">
+          <Select value={group} onChange={(v) => setGroup(v)} className="flex-1 min-w-[9rem]">
             {PAGE_GROUPS.map((g) => (
               <option key={g.key} value={g.key}>
                 {g.label}
@@ -407,7 +407,7 @@ export default function PrasadamPage() {
           <Select
             value={includePurpose}
             onChange={(v) => setIncludePurpose(v)}
-            className="w-full"
+            className="flex-1 min-w-[9rem]"
           >
             <option value="">Include any seva</option>
             {options.purposes.map((p) => (
@@ -419,7 +419,7 @@ export default function PrasadamPage() {
           <Select
             value={excludePurpose}
             onChange={(v) => setExcludePurpose(v)}
-            className="w-full"
+            className="flex-1 min-w-[9rem]"
           >
             <option value="">Exclude nothing</option>
             {options.purposes.map((p) => (

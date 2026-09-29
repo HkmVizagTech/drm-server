@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
+import { useCallingAlerts } from "./calling-alerts";
 
 // Grouped so the nav reads as "what am I looking at" vs "what do I need to do"
 // rather than one undifferentiated list of nine links.
@@ -45,6 +46,7 @@ const navGroups: { heading: string; items: { href: string; label: string; icon: 
       { href: "/calling/reminders", label: "Reminders", icon: "M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0" },
       // A caller's own presets, set up before a shift rather than mid-call.
       { href: "/calling/links", label: "My links", icon: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" },
+      { href: "/calling/uploads", label: "Uploaded sheets", icon: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" },
     ],
   },
   {
@@ -56,6 +58,10 @@ const navGroups: { heading: string; items: { href: string; label: string; icon: 
 export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const pathname = usePathname();
   const { user, logout } = useAuth();
+  // Late, due now, or due today. Counting every future reminder would leave a
+  // permanent number beside Reminders that means nothing and gets ignored
+  // within a week - which is worse than no badge at all.
+  const { dueCount } = useCallingAlerts();
 
   return (
     // h-full, not h-screen: on a phone this renders inside a drawer that is
@@ -111,6 +117,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
                       <path d={item.icon} />
                     </svg>
                     <span className="truncate">{item.label}</span>
+                    {item.href === "/calling/reminders" && dueCount > 0 && (
+                      <span className="ml-auto min-w-[1.25rem] px-1.5 h-5 rounded-full bg-red-600 text-white text-[10px] font-semibold grid place-items-center tabular-nums flex-none">
+                        {dueCount > 99 ? "99+" : dueCount}
+                      </span>
+                    )}
                   </Link>
                 );
               })}

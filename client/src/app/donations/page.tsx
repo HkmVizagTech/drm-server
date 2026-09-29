@@ -219,7 +219,7 @@ export default function DonationsPage() {
             placeholder="Search donor, phone or receipt no…"
             className={`${inputClass} flex-1 min-w-[15rem]`}
           />
-          <Select value={purpose} onChange={(v) => setPurpose(v)} className="w-full">
+          <Select value={purpose} onChange={(v) => setPurpose(v)} className="flex-1 min-w-[9rem]">
             <option value="">All purposes</option>
             {(purposeOptions.length ? purposeOptions : purposes.map((p) => ({ purpose: p, count: 0 }))).map((p) => (
               <option key={p.purpose} value={p.purpose}>
@@ -228,12 +228,12 @@ export default function DonationsPage() {
               </option>
             ))}
           </Select>
-          <Select value={receipt} onChange={(v) => setReceipt(v)} className="w-full">
+          <Select value={receipt} onChange={(v) => setReceipt(v)} className="flex-1 min-w-[9rem]">
             <option value="">Any receipt status</option>
             <option value="true">Receipt issued</option>
             <option value="false">Receipt pending</option>
           </Select>
-          <Select value={siteFilter} onChange={(v) => setSiteFilter(v)} className="w-full">
+          <Select value={siteFilter} onChange={(v) => setSiteFilter(v)} className="flex-1 min-w-[9rem]">
             <option value="">All sites</option>
             {sources.sites.map((s) => (
               <option key={s.site} value={s.site}>
@@ -241,7 +241,7 @@ export default function DonationsPage() {
               </option>
             ))}
           </Select>
-          <Select value={pageFilter} onChange={(v) => setPageFilter(v)} className="w-full">
+          <Select value={pageFilter} onChange={(v) => setPageFilter(v)} className="flex-1 min-w-[9rem]">
             <option value="">All pages</option>
             {visiblePages.map((p) => (
               <option key={`${p.site}${p.page}`} value={p.page}>

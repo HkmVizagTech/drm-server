@@ -31,6 +31,8 @@ import crmRoutes from './routes/crm';
 import crmReportsRoutes from './routes/crmReports';
 import crmRemindersRoutes from './routes/crmReminders';
 import crmLinksRoutes from './routes/crmLinks';
+import crmPreachersRoutes from './routes/crmPreachers';
+import crmImportRoutes from './routes/crmImport';
 import { scheduleBirthdayAnniversaryCheck } from './utils/cron';
 
 dotenv.config();
@@ -71,7 +73,10 @@ const SERVE_CLIENT = process.env.SERVE_CLIENT
   : process.env.NODE_ENV === 'production';
 
 app.use(cors());
-app.use(express.json());
+// 25mb, not the 100kb default. The office uploads its donor workbooks through
+// this API - the real one is 8,569 rows across two sheets - and the default
+// limit would reject them with a bare 413 that reads like the server is broken.
+app.use(express.json({ limit: '25mb' }));
 
 // Health check
 app.get('/health', (_req, res) => {
@@ -102,6 +107,8 @@ app.use('/api/crm', crmRoutes);
 app.use('/api/crm', crmReportsRoutes);
 app.use('/api/crm', crmRemindersRoutes);
 app.use('/api/crm', crmLinksRoutes);
+app.use('/api/crm', crmPreachersRoutes);
+app.use('/api/crm', crmImportRoutes);
 
 // Inbound webhooks from hkmsite2.0-server. Mounted outside the JWT-protected
 // groups above on purpose - these are server-to-server calls with no logged-in

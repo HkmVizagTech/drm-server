@@ -74,19 +74,81 @@ body {
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------------------
+   Scrollbars, in the temple's colours.
+
+   Two engines, two mechanisms, and both are needed: Firefox only understands
+   `scrollbar-width` / `scrollbar-color`, and Chrome/Edge/Safari only understand
+   the ::-webkit-scrollbar pseudo-elements. Styling one and not the other leaves
+   half the staff looking at a grey Windows scrollbar down the side of a green
+   admin.
+
+   The thumb is the soft green used for selected rows, so a scrollbar reads as
+   part of the surface rather than as chrome bolted to the edge of it. It
+   darkens to the accent on hover, which is the only moment it matters.
+
+   Deliberately NOT hidden or replaced with a custom element: a real scrollbar
+   is draggable, shows how much list is left, and keeps working with a mouse
+   wheel, a trackpad, a touchscreen and the keyboard. Every "elegant" scrollbar
+   that throws that away is worse to use than the one it replaced.
+--------------------------------------------------------------------------- */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent-soft) transparent;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 ::-webkit-scrollbar-thumb {
-  background: var(--line);
-  border-radius: 6px;
-  border: 2px solid transparent;
+  background: var(--accent-soft);
+  border-radius: 999px;
+  /* A transparent border with background-clip is what makes the thumb look
+     slimmer than its hit area - so it stays easy to grab while reading as a
+     thin line. */
+  border: 3px solid transparent;
   background-clip: content-box;
 }
+
 ::-webkit-scrollbar-thumb:hover {
-  background: #8fa2ae;
+  background: var(--accent);
   background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* The sidebar sits on pale green, where the soft green thumb would vanish. */
+aside {
+  scrollbar-color: #8fc47a transparent;
+}
+aside::-webkit-scrollbar-thumb {
+  background: #8fc47a;
+  background-clip: content-box;
+}
+
+/* Inside a dropdown, a table or any small scrolling panel the bar should be
+   nearly invisible until used - it is beside content, not framing the page. */
+[role="listbox"],
+.scroll-slim {
+  scrollbar-width: thin;
+}
+[role="listbox"]::-webkit-scrollbar,
+.scroll-slim::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+[role="listbox"]::-webkit-scrollbar-thumb,
+.scroll-slim::-webkit-scrollbar-thumb {
+  border-width: 2px;
 }
 
 /* Rows animate open in the donations table; keep it quick so a list of

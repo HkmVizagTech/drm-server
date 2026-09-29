@@ -49,7 +49,12 @@ interface Lead {
   assigned_to_name: string | null;
   total_donated: string | null;
   donation_count: number | null;
+  preacher_code: string | null;
+  preacher_name: string | null;
+  external_total_donated: string | null;
 }
+
+interface Preacher { id: string; code: string; name: string | null; leads?: number }
 
 interface Config {
   statuses: { slug: string; label: string; tone: string; is_open: boolean }[];
@@ -99,6 +104,8 @@ export default function LeadsPage() {
   const [source, setSource] = useState("");
   const [assigned, setAssigned] = useState("");
   const [due, setDue] = useState("");
+  const [preacher, setPreacher] = useState("");
+  const [preachers, setPreachers] = useState<Preacher[]>([]);
   const [sort, setSort] = useState("due");
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -116,8 +123,9 @@ export default function LeadsPage() {
     if (source) p.set("source", source);
     if (assigned) p.set("assigned_to", assigned);
     if (due) p.set("due", due);
+    if (preacher) p.set("preacher", preacher);
     return p.toString();
-  }, [page, sort, search, status, source, assigned, due]);
+  }, [page, sort, search, status, source, assigned, due, preacher]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -139,6 +147,10 @@ export default function LeadsPage() {
 
   useEffect(() => {
     apiClient.get<Config>("/api/crm/config").then(setConfig).catch(() => undefined);
+    apiClient
+      .get<{ preachers: Preacher[] }>("/api/crm/preachers")
+      .then((d) => setPreachers(d.preachers))
+      .catch(() => undefined);
   }, []);
 
   // Debounce the search so typing a name doesn't fire a request per keystroke.
@@ -206,9 +218,9 @@ export default function LeadsPage() {
             <button onClick={() => setShowPull(true)} className={buttonSecondary}>
               Pull from donors
             </button>
-            <button onClick={() => setShowUpload(true)} className={buttonPrimary}>
-              Upload a list
-            </button>
+            <Link href="/calling/uploads" className={buttonPrimary}>
+              Upload a sheet
+            </Link>
           </div>
         }
       />
@@ -250,6 +262,24 @@ export default function LeadsPage() {
               <option key={d.key} value={d.key}>{d.label || "Any follow-up"}</option>
             ))}
           </Select>
+          {/* "Ring everyone Jagat Tarini Mataji brought in" is one of the
+              commonest ways the office builds a list, so the preacher is a
+              filter rather than something to search for. */}
+          <Select
+            value={preacher}
+            onChange={(v) => { setPreacher(v); setPage(1); }}
+            className="w-full"
+            placeholder="Any preacher"
+            options={[
+              { value: "", label: "Any preacher" },
+              { value: "none", label: "No preacher" },
+              ...preachers.map((p) => ({
+                value: p.code,
+                label: p.name ? `${p.name} (${p.code})` : p.code,
+                hint: p.leads ? `${p.leads} leads` : undefined,
+              })),
+            ]}
+          />
         </div>
         <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
           <span>Sort by</span>
@@ -342,6 +372,7 @@ export default function LeadsPage() {
             </Th>
             <Th>Who</Th>
             <Th>Stage</Th>
+            <Th>Preacher</Th>
             <Th>Assigned</Th>
             <Th align="right">Attempts</Th>
             <Th>Due</Th>
@@ -350,11 +381,11 @@ export default function LeadsPage() {
         </thead>
 
         {loading ? (
-          <SkeletonRows rows={8} cols={7} />
+          <SkeletonRows rows={8} cols={8} />
         ) : !leads.length ? (
           <tbody>
             <tr>
-              <td colSpan={7}>
+              <td colSpan={8}>
                 <EmptyState
                   title="No leads match"
                   message="Try clearing a filter, or build a list from your existing donors."
@@ -405,6 +436,13 @@ export default function LeadsPage() {
                     <Badge tone={l.converted_amount ? "good" : "neutral"}>{l.status_label ?? l.status}</Badge>
                     {l.last_outcome && <div className="mt-0.5 text-[11px] text-slate-400">{l.last_outcome.replace(/_/g, " ")}</div>}
                   </Td>
+                  <Td className="text-sm text-slate-600">
+                    {l.preacher_code ? (
+                      <span title={l.preacher_name ?? undefined}>{l.preacher_name || l.preacher_code}</span>
+                    ) : (
+                      <span className="text-slate-300">—</span>
+                    )}
+                  </Td>
                   <Td className="text-sm text-slate-600">{l.assigned_to_name ?? <span className="text-slate-400">—</span>}</Td>
                   <Td align="right" className="tabular-nums text-sm text-slate-600">
                     {l.call_attempts || <span className="text-slate-300">0</span>}
@@ -423,6 +461,11 @@ export default function LeadsPage() {
                       <>
                         <span className="text-slate-900">{currency(Number(l.total_donated ?? 0))}</span>
                         <div className="text-[11px] text-slate-400">{l.donation_count} donation{l.donation_count === 1 ? "" : "s"}</div>
+                      </>
+                    ) : l.external_total_donated ? (
+                      <>
+                        <span className="text-slate-700">{currency(Number(l.external_total_donated))}</span>
+                        <div className="text-[11px] text-slate-400">in temple accounts</div>
                       </>
                     ) : (
                       <span className="text-slate-300">never given</span>
