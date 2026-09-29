@@ -37,6 +37,10 @@ interface Donation {
   donor_phone?: string;
   source_site?: string | null;
   source_page?: string | null;
+  // Server-computed readable label: the real seva, or the page it came from
+  // when the stored purpose is a content-free placeholder like
+  // "Donate any other Amount". The raw purpose is still available above.
+  display_purpose?: string | null;
   campaign?: string | null;
   utm_source?: string | null;
   utm_medium?: string | null;
@@ -343,7 +347,7 @@ export default function DonationsPage() {
                   <Td align="right" className="font-semibold tabular-nums text-slate-900">
                     {currency(d.amount)}
                   </Td>
-                  <Td className="text-slate-600">{titleCase(d.purpose)}</Td>
+                  <Td className="text-slate-600">{titleCase(d.display_purpose || d.purpose)}</Td>
                   <Td>
                     <Badge tone={d.type === "recurring" ? "good" : "neutral"}>{titleCase(d.type)}</Badge>
                   </Td>
@@ -499,7 +503,14 @@ function DonationDetail({ donation, onChanged }: { donation: Donation; onChanged
         <Field label="Donor" value={donation.donor_name} />
         <Field label="Phone" value={donation.donor_phone} />
         <Field label="Amount" value={currency(donation.amount)} />
-        <Field label="Purpose" value={titleCase(donation.purpose)} />
+        <Field label="Purpose" value={titleCase(donation.display_purpose || donation.purpose)} />
+        {donation.display_purpose &&
+          donation.display_purpose.toLowerCase() !== (donation.purpose ?? "").toLowerCase() && (
+            /* The donor's site recorded something that describes the input box
+               rather than the gift, so the label above shows the page instead.
+               The original is kept visible - it is what that site still holds. */
+            <Field label="As recorded on the site" value={donation.purpose} />
+          )}
         <Field label="Type" value={titleCase(donation.type)} />
 
         <Field label="Came from" value={siteLabel(donation.source_site)} />

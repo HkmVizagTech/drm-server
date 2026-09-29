@@ -2,6 +2,7 @@ import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroups';
+import { displayPurposeSql } from '../utils/donationLabel';
 
 const router = Router();
 router.use(authenticate);
@@ -95,7 +96,7 @@ function buildFilters(q: Record<string, unknown>, startIdx = 1): Filters {
   const includePurpose = listOf(q.include_purpose);
   if (includePurpose.length) {
     conditions.push(
-      `EXISTS (SELECT 1 FROM donations dn WHERE dn.id = d.donation_id AND lower(dn.purpose) = ANY($${idx}::text[]))`
+      `EXISTS (SELECT 1 FROM donations dn WHERE dn.id = d.donation_id AND lower(${displayPurposeSql('dn.purpose', 'dn.source_page')}) = ANY($${idx}::text[]))`
     );
     values.push(includePurpose);
     idx++;
@@ -107,7 +108,7 @@ function buildFilters(q: Record<string, unknown>, startIdx = 1): Filters {
     // silently dropped by the exclusion - it was never one of the excluded
     // sevas to begin with.
     conditions.push(
-      `NOT EXISTS (SELECT 1 FROM donations dn WHERE dn.id = d.donation_id AND lower(dn.purpose) = ANY($${idx}::text[]))`
+      `NOT EXISTS (SELECT 1 FROM donations dn WHERE dn.id = d.donation_id AND lower(${displayPurposeSql('dn.purpose', 'dn.source_page')}) = ANY($${idx}::text[]))`
     );
     values.push(excludePurpose);
     idx++;
@@ -148,7 +149,7 @@ const SELECT_COLUMNS = `
   p.phone AS donor_phone,
   u.name  AS marked_by_name,
   dn.amount        AS donation_amount,
-  dn.purpose       AS donation_purpose,
+  ${displayPurposeSql('dn.purpose', 'dn.source_page')} AS donation_purpose,
   dn.created_at    AS donation_date,
   dn.receipt_number AS donation_receipt,
   ${canonPageSql('dn.source_page')} AS donation_page`;
@@ -210,10 +211,10 @@ router.get('/', async (req, res) => {
 router.get('/filters', async (_req, res) => {
   const [purposes, pages, sites] = await Promise.all([
     pool.query(`
-      SELECT lower(dn.purpose) AS purpose, COUNT(*) AS count
+      SELECT lower(${displayPurposeSql('dn.purpose', 'dn.source_page')}) AS purpose, COUNT(*) AS count
       FROM prasadam_deliveries d JOIN donations dn ON d.donation_id = dn.id
       WHERE dn.purpose IS NOT NULL AND btrim(dn.purpose) <> ''
-      GROUP BY lower(dn.purpose) ORDER BY count DESC LIMIT 60
+      GROUP BY lower(${displayPurposeSql('dn.purpose', 'dn.source_page')}) ORDER BY count DESC LIMIT 60
     `),
     pool.query(`
       SELECT ${canonPageSql('dn.source_page')} AS page, COUNT(*) AS count

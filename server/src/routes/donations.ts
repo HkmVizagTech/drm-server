@@ -11,6 +11,7 @@ import {
 } from '../services/hkmvClient';
 import { upsertDonorSnapshot } from '../services/hkmvSync';
 import { canonPage, canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroups';
+import { displayPurposeSql } from '../utils/donationLabel';
 
 const router = Router();
 router.use(authenticate);
@@ -28,7 +29,14 @@ router.get('/', async (req, res) => {
 
   // lower() on both sides so the filter matches regardless of how the seva name
   // was cased upstream - the dropdown is populated from lowered values.
-  if (purpose) { conditions.push(`lower(d.purpose) = lower($${idx})`); values.push(purpose); idx++; }
+  // Matched against the SAME expression /purposes offers, or picking
+  // "/donations" from the dropdown would filter on a value no row stores and
+  // silently return nothing.
+  if (purpose) {
+    conditions.push(`lower(${displayPurposeSql('d.purpose', 'd.source_page')}) = lower($${idx})`);
+    values.push(purpose);
+    idx++;
+  }
   if (source) { conditions.push(`d.source = $${idx}`); values.push(source); idx++; }
   if (from_date) { conditions.push(`d.created_at >= $${idx}`); values.push(from_date); idx++; }
   if (to_date) { conditions.push(`d.created_at <= $${idx}`); values.push(to_date); idx++; }
@@ -69,7 +77,11 @@ router.get('/', async (req, res) => {
   // truncating at the page limit.
   const [data, count, sum] = await Promise.all([
     pool.query(
-      `SELECT d.*, p.name as donor_name, p.phone as donor_phone
+      // display_purpose alongside the raw purpose, never instead of it: the
+      // table shows the readable label while the filters, the CSV and anything
+      // reconciled against the source site keep the value that site sent.
+      `SELECT d.*, p.name as donor_name, p.phone as donor_phone,
+              ${displayPurposeSql('d.purpose', 'd.source_page')} AS display_purpose
        FROM donations d JOIN people p ON d.person_id = p.id
        ${where} ORDER BY d.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
       [...values, limit, offset]
@@ -98,9 +110,9 @@ router.get('/', async (req, res) => {
 // case-insensitive for the same reason the dashboard groups that way.
 router.get('/purposes', async (_req, res) => {
   const result = await pool.query(`
-    SELECT lower(purpose) AS purpose, COUNT(*) AS count
+    SELECT lower(${displayPurposeSql('purpose', 'source_page')}) AS purpose, COUNT(*) AS count
     FROM donations
-    GROUP BY lower(purpose)
+    GROUP BY lower(${displayPurposeSql('purpose', 'source_page')})
     ORDER BY count DESC
   `);
   res.json(result.rows.map((r) => ({ purpose: r.purpose, count: Number(r.count) })));

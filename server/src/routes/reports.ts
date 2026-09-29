@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
+import { displayPurposeSql } from '../utils/donationLabel';
 import {
   GROUP_LABELS,
   canonPageSql,
@@ -160,9 +161,17 @@ router.get('/dashboard', async (_req, res) => {
     // seva names, so "General" and "general" both occur and would otherwise
     // render as two identical-looking rows that don't add up. The UI title-cases
     // the lowered value back for display.
+    // displayPurposeSql, not the raw column: "Donate any other Amount" is the
+    // label on a free-amount input box, not a seva, and 584 donations carry it.
+    // Grouped raw it forms one of the biggest slices of "where it goes" while
+    // saying nothing; resolved to the page it came from, the slice is honest.
     pool.query(`
-      SELECT lower(purpose) AS purpose, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
-      FROM donations GROUP BY lower(purpose) ORDER BY total DESC LIMIT 8
+      SELECT lower(${displayPurposeSql('purpose', 'source_page')}) AS purpose,
+             COALESCE(SUM(amount), 0) AS total,
+             COUNT(*) AS count
+      FROM donations
+      GROUP BY lower(${displayPurposeSql('purpose', 'source_page')})
+      ORDER BY total DESC LIMIT 8
     `),
     pool.query(`
       SELECT p.id, p.name, p.phone,
@@ -173,6 +182,7 @@ router.get('/dashboard', async (_req, res) => {
     pool.query(`
       SELECT d.id, d.amount, d.purpose, d.created_at, d.receipt_number,
              d.source_site, d.source_page, d.campaign,
+             ${displayPurposeSql('d.purpose', 'd.source_page')} AS display_purpose,
              p.id AS person_id, p.name AS donor_name, p.phone AS donor_phone
       FROM donations d JOIN people p ON d.person_id = p.id
       ORDER BY d.created_at DESC LIMIT 8
@@ -273,7 +283,7 @@ router.get('/dashboard', async (_req, res) => {
       donorName: r.donor_name,
       donorPhone: r.donor_phone,
       amount: Number(r.amount),
-      purpose: r.purpose,
+      purpose: r.display_purpose || r.purpose,
       createdAt: r.created_at,
       receiptNumber: r.receipt_number,
       sourceSite: r.source_site,
