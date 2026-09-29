@@ -654,6 +654,36 @@ export default function PrasadamPage() {
 // Deliberately four steps rather than one. The file has phone numbers, not
 // delivery ids, and a donor can have several open deliveries; applying it
 // blindly would mark the wrong gift delivered with nothing on screen to say so.
+// A sample of the file the importer expects.
+//
+// Built here rather than fetched: it is four lines of text, and a courier file
+// arriving in the wrong shape is the most likely reason an import goes wrong.
+// Seeing the expected columns beforehand is faster than uploading, reading the
+// "matched nothing" report and guessing which header was misread.
+//
+// The example rows deliberately show three different phone spellings, because
+// that is the field that decides whether a row matches at all, and staff
+// otherwise assume one exact format is required.
+function downloadSampleCsv() {
+  const rows = [
+    ["Donor Name", "Phone", "Tracking Number", "Delivered Date"],
+    ["Ramesh Kumar", "9876543210", "BD10001", "2026-09-20"],
+    ["Lakshmi Devi", "+91 98765 43211", "BD10002", "2026-09-21"],
+    ["Suresh Babu", "919876543212", "", "2026-09-21"],
+  ];
+  const csv = rows
+    .map((r) => r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(","))
+    .join("\n");
+  // BOM so Excel opens it as UTF-8 rather than mangling Indian names.
+  const blob = new Blob(["\uFEFF" + csv + "\n"], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "prasadam-upload-sample.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function ImportDialog({
   onClose,
   onDone,
@@ -767,13 +797,23 @@ function ImportDialog({
 
         {error && <p className="mb-3 text-sm text-red-700 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
 
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".csv,text/csv"
-          onChange={(e) => e.target.files?.[0] && readFile(e.target.files[0])}
-          className="text-sm mb-4 block"
-        />
+        <div className="mb-4">
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv,text/csv"
+            onChange={(e) => e.target.files?.[0] && readFile(e.target.files[0])}
+            className="text-sm block"
+          />
+          <p className="text-[11px] text-slate-500 mt-2">
+            Only the phone column is required — everything else is optional.{" "}
+            <button type="button" onClick={downloadSampleCsv} className="text-[var(--accent)] hover:underline">
+              Download a sample file
+            </button>{" "}
+            to see the expected columns, or re-upload the file from “Download list” — it already has
+            Phone and Tracking number columns.
+          </p>
+        </div>
 
         {headers.length > 0 && !preview && (
           <>
