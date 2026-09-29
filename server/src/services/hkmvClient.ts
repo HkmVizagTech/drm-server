@@ -105,7 +105,7 @@ export interface HkmvDonation {
   subscriptionId?: string | null;
   receiptNumber?: string | null;
   receiptIssuedAt?: string | null;
-  // Attribution - which site, page and campaign produced the gift.
+  // Attribution - which site, page and campaign produced the donation.
   sourceSite?: SiteKey | null;
   sourcePage?: string | null;
   campaign?: string | null;
@@ -491,4 +491,137 @@ export async function createOfflineDonation(
 
 function siteLabelFor(site: SiteKey): string {
   return site === 'annadan' ? 'The annadan site' : 'The main site';
+}
+
+/* --------------------------------------------------- abandoned donations */
+
+export interface AbandonedDonation {
+  externalId: string;
+  name: string | null;
+  mobile: string | null;
+  email: string | null;
+  amount: number | null;
+  purpose: string | null;
+  sourcePage: string | null;
+  status: string;
+  attemptedAt: string;
+  sourceSite: SiteKey;
+}
+
+export interface AbandonedPage {
+  page: number;
+  limit: number;
+  total: number;
+  hasMore: boolean;
+  donations: AbandonedDonation[];
+}
+
+/**
+ * Donations someone started on a site and never finished.
+ *
+ * These are the best leads the temple has: the person had already decided to
+ * give and got as far as the payment screen. Most abandonments are a failed UPI
+ * app or a distracted moment rather than a change of mind, so a call recovers a
+ * real share of them.
+ *
+ * `minMinutes` guards against calling someone who is still on the payment page:
+ * a record is only "abandoned" once it has sat incomplete for that long. An
+ * hour is the default on both sites.
+ */
+export async function fetchAbandonedPage(
+  siteKey: SiteKey,
+  opts: { page?: number; limit?: number; since?: string | null; minMinutes?: number } = {}
+): Promise<AbandonedPage> {
+  const site = getSite(siteKey);
+  const q = new URLSearchParams({
+    page: String(opts.page ?? 1),
+    limit: String(opts.limit ?? 200),
+    minMinutes: String(opts.minMinutes ?? 60),
+  });
+  if (opts.since) q.set('since', opts.since);
+
+  const res = await siteFetch(site, `/api/internal/drm/abandoned?${q.toString()}`);
+  if (!res.ok) {
+    throw new Error(`${site.label} returned ${res.status} listing abandoned donations.`);
+  }
+  const body = (await res.json()) as AbandonedPage;
+  return { ...body, donations: body.donations ?? [] };
+}
+
+/* ----------------------------------------------------- prasadam write-back */
+
+export interface PrasadamWriteBack {
+  status: 'pending' | 'shipped' | 'delivered' | 'cancelled';
+  courierName?: string | null;
+  trackingNumber?: string | null;
+  deliveredAt?: string | null;
+  markedByName?: string | null;
+  /** Ask the site to WhatsApp the donor. Off unless a human chose it. */
+  notify?: boolean;
+}
+
+export interface PrasadamWriteBackResult {
+  /** The site accepted and stored the status. */
+  applied: boolean;
+  /** The site sent the donor a message as part of this call. */
+  notified: boolean;
+  /** The site's own wording, worth showing when applied is false. */
+  message: string | null;
+}
+
+/**
+ * Pushes a prasadam status set in DRM back to the site the donation came from.
+ *
+ * Why this exists: the sites have their own prasadam screens, and until now the
+ * sync ran one way only. Staff marking a box delivered here left it showing as
+ * pending there, so anyone working from the site's own list would courier it a
+ * second time.
+ *
+ * The two sites can't record the same things. HKMV has the full
+ * pending/dispatched/delivered/cancelled lifecycle; annadan has only
+ * pending/delivered, so it stores a shipped box as pending-with-tracking and
+ * refuses "cancelled" outright. Both answer with `applied`, and a false there
+ * is NOT an error - it is the site saying, accurately, that it cannot represent
+ * this state. The caller records that and moves on.
+ */
+export async function updatePrasadamStatus(
+  site: SiteKey,
+  externalDonationId: string,
+  input: PrasadamWriteBack
+): Promise<PrasadamWriteBackResult> {
+  const cfg = getSite(site);
+  const res = await siteFetch(cfg, `/api/internal/drm/donations/${externalDonationId}/prasadam-status`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      status: input.status,
+      courierName: input.courierName ?? undefined,
+      trackingNumber: input.trackingNumber ?? undefined,
+      deliveredAt: input.deliveredAt ?? undefined,
+      markedByName: input.markedByName ?? undefined,
+      // Explicitly false rather than omitted: the sites treat a missing value
+      // as "don't send", and being explicit means a future default change on
+      // their side can't start messaging donors behind DRM's back.
+      notify: input.notify === true,
+    }),
+  });
+
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+
+  if (!res.ok || body?.success === false) {
+    const message =
+      (typeof body?.message === 'string' && body.message) ||
+      `${siteLabelFor(site)} returned ${res.status} updating the prasadam status.`;
+    const err = new Error(message) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
+
+  return {
+    // HKMV's handler predates the `applied` flag and just returns success, so
+    // a missing field means "yes, stored" rather than "no".
+    applied: body?.applied === undefined ? true : body.applied === true,
+    notified: body?.notified === true,
+    message: typeof body?.message === 'string' ? body.message : null,
+  };
 }

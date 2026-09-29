@@ -85,3 +85,29 @@ export function percentChange(current: number, previous: number): number | null 
   if (!previous) return null;
   return ((current - previous) / previous) * 100;
 }
+
+/**
+ * How a scheduled callback reads: how late a promise is, or how soon one is
+ * due.
+ *
+ * relativeDate() above answers the opposite question ("how long ago") and falls
+ * back to a plain date for anything in the future - which is every row on the
+ * follow-ups board, so it ended up printing the date twice. This is the future
+ * half of the same idea, kept here rather than in a page so the calling screen
+ * and the follow-ups board cannot word it differently.
+ */
+export function dueLabel(value: string | null | undefined): string {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  const days = Math.round((d.getTime() - midnight.getTime()) / 86_400_000);
+  if (days < -1) return `${Math.abs(days)} days late`;
+  if (days === -1) return "1 day late";
+  if (days === 0) return "today";
+  if (days === 1) return "tomorrow";
+  if (days < 7) return `in ${days} days`;
+  if (days < 14) return "next week";
+  return `in ${Math.round(days / 7)} weeks`;
+}

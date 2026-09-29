@@ -8,27 +8,14 @@
 //   - taking the courier's file back and applying it
 //
 // The rule running through all of it: when a donor's number has more than one
-// open delivery, nothing is guessed. The person marking it chooses which gift
+// open delivery, nothing is guessed. The person marking it chooses which donation
 // arrived, because marking the wrong one is invisible until the donor rings up.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiClient } from "@/lib/api";
 import { currency, number, relativeDate, shortDate } from "@/lib/format";
 import { siteLabel } from "@/components/source";
-import {
-  Badge,
-  Card,
-  EmptyState,
-  PageHeader,
-  Pagination,
-  StatusBadge,
-  TableShell,
-  Td,
-  Th,
-  buttonPrimary,
-  buttonSecondary,
-  inputClass,
-} from "@/components/ui";
+import { Badge, buttonPrimary, buttonSecondary, Card, EmptyState, inputClass, PageHeader, Pagination, Select, StatusBadge, TableShell, Td, Th } from "@/components/ui";
 
 interface Delivery {
   id: string;
@@ -146,6 +133,36 @@ function guessColumn(headers: string[], candidates: string[]): number {
     if (i !== -1) return i;
   }
   return -1;
+}
+
+// A sample of the file the importer expects.
+//
+// Built here rather than fetched: it is four lines of text, and a courier file
+// arriving in the wrong shape is the most likely reason an import goes wrong.
+// Seeing the expected columns beforehand is faster than uploading, reading the
+// "matched nothing" report and guessing which header was misread.
+//
+// The example rows deliberately show three different phone spellings, because
+// that is the field that decides whether a row matches at all, and staff
+// otherwise assume one exact format is required.
+function downloadSampleCsv() {
+  const rows = [
+    ["Donor Name", "Phone", "Tracking Number", "Delivered Date"],
+    ["Ramesh Kumar", "9876543210", "BD10001", "2026-09-20"],
+    ["Lakshmi Devi", "+91 98765 43211", "BD10002", "2026-09-21"],
+    ["Suresh Babu", "919876543212", "", "2026-09-21"],
+  ];
+  const csv = rows
+    .map((r) => r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(","))
+    .join("\n");
+  // BOM so Excel opens it as UTF-8 rather than mangling Indian names.
+  const blob = new Blob(["\uFEFF" + csv + "\n"], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "prasadam-upload-sample.csv";
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export default function PrasadamPage() {
@@ -312,7 +329,14 @@ export default function PrasadamPage() {
             : undefined
         }
         actions={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            {/* The sample sits out here as well as inside the upload dialog:
+                someone preparing a file for the courier needs the format
+                BEFORE they have anything to upload, so hiding it behind the
+                upload button is exactly the wrong way round. */}
+            <button onClick={downloadSampleCsv} className={buttonSecondary}>
+              Sample upload file
+            </button>
             <button onClick={download} className={buttonSecondary}>
               Download list
             </button>
@@ -365,25 +389,25 @@ export default function PrasadamPage() {
             placeholder="Donor name, phone or tracking number"
             className={`${inputClass} flex-1 min-w-[16rem]`}
           />
-          <select value={site} onChange={(e) => setSite(e.target.value)} className={inputClass}>
+          <Select value={site} onChange={(v) => setSite(v)} className="w-full">
             <option value="">All sites</option>
             {options.sites.map((s) => (
               <option key={s.site} value={s.site}>
                 {siteLabel(s.site)} ({s.count})
               </option>
             ))}
-          </select>
-          <select value={group} onChange={(e) => setGroup(e.target.value)} className={inputClass}>
+          </Select>
+          <Select value={group} onChange={(v) => setGroup(v)} className="w-full">
             {PAGE_GROUPS.map((g) => (
               <option key={g.key} value={g.key}>
                 {g.label}
               </option>
             ))}
-          </select>
-          <select
+          </Select>
+          <Select
             value={includePurpose}
-            onChange={(e) => setIncludePurpose(e.target.value)}
-            className={inputClass}
+            onChange={(v) => setIncludePurpose(v)}
+            className="w-full"
           >
             <option value="">Include any seva</option>
             {options.purposes.map((p) => (
@@ -391,11 +415,11 @@ export default function PrasadamPage() {
                 Only {p.purpose} ({p.count})
               </option>
             ))}
-          </select>
-          <select
+          </Select>
+          <Select
             value={excludePurpose}
-            onChange={(e) => setExcludePurpose(e.target.value)}
-            className={inputClass}
+            onChange={(v) => setExcludePurpose(v)}
+            className="w-full"
           >
             <option value="">Exclude nothing</option>
             {options.purposes.map((p) => (
@@ -403,7 +427,7 @@ export default function PrasadamPage() {
                 Exclude {p.purpose} ({p.count})
               </option>
             ))}
-          </select>
+          </Select>
           <input
             type="date"
             value={fromDate}
@@ -465,7 +489,7 @@ export default function PrasadamPage() {
           }) && (
             <p className="text-xs text-[var(--accent-ink)] mt-2">
               Some of these donors have more than one open delivery. Check you have ticked the right
-              gift — the row expands to show which donation it belongs to.
+              donation — the row expands to show which donation it belongs to.
             </p>
           )}
         </Card>
@@ -653,37 +677,7 @@ export default function PrasadamPage() {
 //
 // Deliberately four steps rather than one. The file has phone numbers, not
 // delivery ids, and a donor can have several open deliveries; applying it
-// blindly would mark the wrong gift delivered with nothing on screen to say so.
-// A sample of the file the importer expects.
-//
-// Built here rather than fetched: it is four lines of text, and a courier file
-// arriving in the wrong shape is the most likely reason an import goes wrong.
-// Seeing the expected columns beforehand is faster than uploading, reading the
-// "matched nothing" report and guessing which header was misread.
-//
-// The example rows deliberately show three different phone spellings, because
-// that is the field that decides whether a row matches at all, and staff
-// otherwise assume one exact format is required.
-function downloadSampleCsv() {
-  const rows = [
-    ["Donor Name", "Phone", "Tracking Number", "Delivered Date"],
-    ["Ramesh Kumar", "9876543210", "BD10001", "2026-09-20"],
-    ["Lakshmi Devi", "+91 98765 43211", "BD10002", "2026-09-21"],
-    ["Suresh Babu", "919876543212", "", "2026-09-21"],
-  ];
-  const csv = rows
-    .map((r) => r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(","))
-    .join("\n");
-  // BOM so Excel opens it as UTF-8 rather than mangling Indian names.
-  const blob = new Blob(["\uFEFF" + csv + "\n"], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "prasadam-upload-sample.csv";
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
+// blindly would mark the wrong donation delivered with nothing on screen to say so.
 function ImportDialog({
   onClose,
   onDone,
@@ -692,6 +686,8 @@ function ImportDialog({
   onDone: (message: string) => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const [fileName, setFileName] = useState<string | null>(null);
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<string[][]>([]);
   const [cols, setCols] = useState({ phone: -1, name: -1, tracking: -1, delivered: -1 });
@@ -704,6 +700,11 @@ function ImportDialog({
   const readFile = async (file: File) => {
     setError(null);
     setPreview(null);
+    setFileName(file.name);
+    if (!/\.csv$/i.test(file.name)) {
+      setError(`“${file.name}” is not a CSV. Export the courier's file as CSV and try again.`);
+      return;
+    }
     const text = await file.text();
     const parsed = parseCsv(text);
     if (parsed.length < 2) {
@@ -797,23 +798,95 @@ function ImportDialog({
 
         {error && <p className="mb-3 text-sm text-red-700 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
 
-        <div className="mb-4">
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".csv,text/csv"
-            onChange={(e) => e.target.files?.[0] && readFile(e.target.files[0])}
-            className="text-sm block"
-          />
-          <p className="text-[11px] text-slate-500 mt-2">
-            Only the phone column is required — everything else is optional.{" "}
-            <button type="button" onClick={downloadSampleCsv} className="text-[var(--accent)] hover:underline">
-              Download a sample file
-            </button>{" "}
-            to see the expected columns, or re-upload the file from “Download list” — it already has
-            Phone and Tracking number columns.
-          </p>
-        </div>
+        {/* A real drop target rather than the browser's default "Choose File"
+            control, which is tiny, unlabelled and gives no hint about what
+            kind of file is wanted. Clicking anywhere in the box opens the
+            picker, and a file can also be dragged straight in from the
+            courier's email. */}
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".csv,text/csv"
+          onChange={(e) => e.target.files?.[0] && readFile(e.target.files[0])}
+          className="sr-only"
+        />
+
+        {!preview && (
+          <div className="mb-5">
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => fileRef.current?.click()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  fileRef.current?.click();
+                }
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragging(true);
+              }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragging(false);
+                const f = e.dataTransfer.files?.[0];
+                if (f) readFile(f);
+              }}
+              className={
+                "rounded-xl border-2 border-dashed px-6 py-8 text-center cursor-pointer transition-colors " +
+                (dragging
+                  ? "border-[var(--accent)] bg-[var(--accent-soft)]/30"
+                  : fileName
+                  ? "border-[var(--accent)]/40 bg-[var(--accent-soft)]/15"
+                  : "border-[var(--line)]/70 hover:border-[var(--accent)]/50 hover:bg-slate-50")
+              }
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="w-8 h-8 mx-auto text-[var(--accent)]/70"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <path d="M12 16V4M12 4l-4 4M12 4l4 4" />
+                <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+              </svg>
+
+              {fileName ? (
+                <>
+                  <p className="mt-3 text-sm font-medium text-slate-900">{fileName}</p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    {number(rows.length)} rows read · click to choose a different file
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="mt-3 text-sm font-medium text-slate-900">
+                    Drop the courier's file here
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    or click to choose one — CSV, and only a phone column is required
+                  </p>
+                </>
+              )}
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+              <button type="button" onClick={downloadSampleCsv} className={buttonSecondary}>
+                Download a sample file
+              </button>
+              <span className="text-xs text-slate-500 max-w-md">
+                Not sure of the format? The sample shows the columns. The file from “Download list”
+                also works as-is — it already has Phone and Tracking number columns.
+              </span>
+            </div>
+          </div>
+        )}
 
         {headers.length > 0 && !preview && (
           <>
@@ -831,10 +904,14 @@ function ImportDialog({
               ).map(([key, label]) => (
                 <label key={key} className="text-xs text-slate-500">
                   {label}
-                  <select
-                    value={cols[key]}
-                    onChange={(e) => setCols({ ...cols, [key]: Number(e.target.value) })}
-                    className={`${inputClass} w-full mt-1`}
+                  {/* Select is a string-valued control and the column index is
+                      a number, so it is stringified here and parsed back on
+                      change - simpler than teaching the component about types
+                      only this one dropdown uses. */}
+                  <Select
+                    value={String(cols[key])}
+                    onChange={(v) => setCols({ ...cols, [key]: Number(v) })}
+                    className="w-full mt-1"
                   >
                     <option value={-1}>— none —</option>
                     {headers.map((h, i) => (
@@ -842,7 +919,7 @@ function ImportDialog({
                         {h || `Column ${i + 1}`}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                 </label>
               ))}
             </div>
@@ -873,7 +950,7 @@ function ImportDialog({
             {preview.ambiguous.length > 0 && (
               <div className="mb-4">
                 <p className="text-xs font-medium text-slate-700 mb-2">
-                  These donors have more than one open delivery. Pick which gift arrived:
+                  These donors have more than one open delivery. Pick which donation arrived:
                 </p>
                 <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
                   {preview.ambiguous.map((a) => (

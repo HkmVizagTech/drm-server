@@ -31,25 +31,45 @@ const navGroups: { heading: string; items: { href: string; label: string; icon: 
     ],
   },
   {
+    // Phone outreach. Its own group rather than tucked under Donors, because it
+    // is a different job done by different people - a caller lives on these
+    // three screens all day and never opens the donation list.
+    heading: "Calling",
+    items: [
+      { href: "/calling", label: "Overview", icon: "M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z" },
+      { href: "/leads", label: "Leads", icon: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8M20 8v6M23 11h-6" },
+      { href: "/follow-ups", label: "Follow-ups", icon: "M12 8v4l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" },
+      // Separate from follow-ups on purpose: a follow-up is the caller's own
+      // working note, a reminder is a promise the donor made at a moment they
+      // chose. One list for both is how the real promises get lost.
+      { href: "/calling/reminders", label: "Reminders", icon: "M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0" },
+      // A caller's own presets, set up before a shift rather than mid-call.
+      { href: "/calling/links", label: "My links", icon: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" },
+    ],
+  },
+  {
     heading: "Insight",
     items: [{ href: "/reports", label: "Reports", icon: "M3 3v18h18M7 15l3-4 3 3 5-7" }],
   },
 ];
 
-export function Sidebar() {
+export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const pathname = usePathname();
   const { user, logout } = useAuth();
 
   return (
-    <aside className="w-60 flex-none bg-[var(--sidebar)] border-r border-[var(--line-soft)] flex flex-col">
-      <div className="px-5 py-5 border-b border-[var(--line-soft)]">
-        <div className="flex items-center gap-2.5">
+    // h-full, not h-screen: on a phone this renders inside a drawer that is
+    // already the height of the viewport, and h-screen there would overflow
+    // behind the browser chrome.
+    <aside className="w-60 flex-none h-full bg-[var(--sidebar)] border-r border-[var(--line-soft)] flex flex-col">
+      <div className="px-4 py-4 border-b border-[var(--line-soft)]">
+        <div className="flex items-center gap-2">
           <span className="w-8 h-8 rounded-lg bg-[var(--accent)] text-white grid place-items-center text-sm font-bold flex-none">
             H
           </span>
           <div className="min-w-0">
             <h1 className="text-sm font-semibold leading-tight truncate text-slate-900">HKM Vizag</h1>
-            <p className="text-[11px] text-slate-500 leading-tight">Donor Relationship Manager</p>
+            <p className="text-[11px] text-slate-500 leading-tight truncate">Donor Relationship Manager</p>
           </div>
         </div>
       </div>
@@ -67,6 +87,7 @@ export function Sidebar() {
                   <Link
                     key={item.href}
                     href={item.href}
+                    onClick={onNavigate}
                     aria-current={active ? "page" : undefined}
                     /* Active state is a soft green fill with dark green ink -
                        #A8DF8E can't carry white text (1.5:1) but reads at 5.9:1

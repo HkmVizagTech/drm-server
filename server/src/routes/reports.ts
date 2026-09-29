@@ -199,7 +199,7 @@ router.get('/dashboard', async (_req, res) => {
       ORDER BY total DESC
     `),
     // Which page on which site produced the giving (/donate, /janmashtami,
-    // /govardhan, ...). NULL means a gift recorded directly in DRM or synced
+    // /govardhan, ...). NULL means a donation recorded directly in DRM or synced
     // before attribution existed, so it's labelled rather than dropped.
     pool.query(`
       SELECT source_site,

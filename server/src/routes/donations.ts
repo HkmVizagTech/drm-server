@@ -187,7 +187,7 @@ router.post('/', async (req, res) => {
 // generated and WhatsApp goes out. Exactly what happens when staff use that
 // site's own admin form.
 //
-// Then DRM pulls the donor's fresh snapshot back and upserts it, so the gift
+// Then DRM pulls the donor's fresh snapshot back and upserts it, so the donation
 // appears here immediately with its real receipt number instead of waiting for
 // the next import.
 router.post('/offline', async (req, res) => {
@@ -276,7 +276,7 @@ router.post('/offline', async (req, res) => {
   // donation - it just means this row appears on the next import instead.
   // "synced" means THIS donation is now visible in DRM - not merely that the
   // donor lookup answered. The site can return a snapshot that does not yet
-  // include the new gift (DCC still working, or the read lagging the write),
+  // include the new donation (DCC still working, or the read lagging the write),
   // and reporting success then would have the UI claim a row that isn't there.
   let synced = false;
   try {
@@ -290,7 +290,7 @@ router.post('/offline', async (req, res) => {
         // majority of website donations are - but this one was taken in cash,
         // by cheque or over a bank transfer, and staff need to see that. The
         // reference number goes into payment_ref for the same reason: it is
-        // how this gift is traced back to the bank statement or receipt book.
+        // how this donation is traced back to the bank statement or receipt book.
         const marked = await pool.query(
           `UPDATE donations SET
              entered_by   = $1,

@@ -136,7 +136,7 @@ async function upsertDonation(
        utm_campaign      = EXCLUDED.utm_campaign,
        -- COALESCE, not a plain overwrite: an offline donation carries a UTR
        -- or cheque number that DRM recorded at entry, and the source site has
-       -- no payment reference of its own for a manual gift. A bare
+       -- no payment reference of its own for a manual donation. A bare
        -- EXCLUDED.payment_ref would wipe that reference on the very next
        -- import, silently losing the only link back to the bank statement.
        payment_ref       = COALESCE(EXCLUDED.payment_ref, donations.payment_ref)
@@ -174,12 +174,39 @@ async function upsertDonation(
       await client.query(
         `INSERT INTO prasadam_deliveries (person_id, donation_id, address, status, courier_name, tracking_number, dispatched_at, delivered_at, external_ref, source_site)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         -- DRM wins once staff have touched the row.
+         --
+         -- The source sites have their own prasadam tracking, and nothing in
+         -- DRM writes back to them, so the two will legitimately disagree: a
+         -- delivery marked here stays "pending" on the site. A plain
+         -- "status = EXCLUDED.status" would therefore let the very next import
+         -- silently revert every delivery the temple staff marked - hundreds of
+         -- rows of real work, undone by a background job, with no error.
+         --
+         -- marked_at is set by routes/prasadam.ts whenever a human (or a
+         -- courier-file upload) sets a status in DRM. Once it is set, DRM is
+         -- the authority on that row's status and timestamps; the site may
+         -- still FILL IN blanks (a tracking number DRM never had) but may not
+         -- overwrite or null out what is already there.
+         --
+         -- Until a row is marked here, the site remains the authority, and
+         -- COALESCE stops a snapshot that omits a field from wiping it.
          ON CONFLICT (external_ref) DO UPDATE SET
-           status          = EXCLUDED.status,
-           courier_name    = EXCLUDED.courier_name,
-           tracking_number = EXCLUDED.tracking_number,
-           dispatched_at   = EXCLUDED.dispatched_at,
-           delivered_at    = EXCLUDED.delivered_at`,
+           status = CASE WHEN prasadam_deliveries.marked_at IS NOT NULL
+                         THEN prasadam_deliveries.status
+                         ELSE EXCLUDED.status END,
+           courier_name = CASE WHEN prasadam_deliveries.marked_at IS NOT NULL
+                         THEN COALESCE(prasadam_deliveries.courier_name, EXCLUDED.courier_name)
+                         ELSE COALESCE(EXCLUDED.courier_name, prasadam_deliveries.courier_name) END,
+           tracking_number = CASE WHEN prasadam_deliveries.marked_at IS NOT NULL
+                         THEN COALESCE(prasadam_deliveries.tracking_number, EXCLUDED.tracking_number)
+                         ELSE COALESCE(EXCLUDED.tracking_number, prasadam_deliveries.tracking_number) END,
+           dispatched_at = CASE WHEN prasadam_deliveries.marked_at IS NOT NULL
+                         THEN COALESCE(prasadam_deliveries.dispatched_at, EXCLUDED.dispatched_at)
+                         ELSE COALESCE(EXCLUDED.dispatched_at, prasadam_deliveries.dispatched_at) END,
+           delivered_at = CASE WHEN prasadam_deliveries.marked_at IS NOT NULL
+                         THEN COALESCE(prasadam_deliveries.delivered_at, EXCLUDED.delivered_at)
+                         ELSE COALESCE(EXCLUDED.delivered_at, prasadam_deliveries.delivered_at) END`,
         [
           personId,
           donationId,
@@ -236,7 +263,7 @@ export async function upsertDonorSnapshot(
     // Address to fall back on when a prasadam record carries none of its own.
     // Reads the PERSON row rather than only this snapshot: with transaction
     // feeds the donor's address can arrive on a different page than the
-    // prasadam gift, and prasadam_deliveries.address is NOT NULL - so relying
+    // prasadam donation, and prasadam_deliveries.address is NOT NULL - so relying
     // on the batch alone silently drops deliveries depending on page
     // boundaries. The person row has already been upserted above, so it
     // carries whatever address any earlier page supplied.
@@ -253,7 +280,7 @@ export async function upsertDonorSnapshot(
     let deliveriesSynced = 0;
 
     for (const d of snapshot.donations || []) {
-      // DRM's ledger tracks confirmed gifts only - pending/failed/cancelled
+      // DRM's ledger tracks confirmed donations only - pending/failed/cancelled
       // attempts on the live site aren't real contributions here.
       if (d.status !== 'completed') continue;
       const { deliveryUpserted } = await upsertDonation(client, personId, d, fallbackAddress, site);
@@ -340,7 +367,7 @@ export async function upsertTransactionBatch(
       d.email = txn.donor.email || d.email;
       d.panNumber = txn.donor.panNumber || d.panNumber;
       d.savedAddress = txn.donor.savedAddress || d.savedAddress;
-      // donorSince is the EARLIEST gift, so it moves backwards only.
+      // donorSince is the EARLIEST donation, so it moves backwards only.
       if (txn.donor.donorSince && (!d.donorSince || txn.donor.donorSince < d.donorSince)) {
         d.donorSince = txn.donor.donorSince;
       }

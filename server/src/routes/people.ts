@@ -22,7 +22,7 @@ const PEOPLE_SORTS: Record<string, string> = {
 // List people with filters, giving aggregates and pagination.
 //
 // The aggregates are the answer to "one phone number, many donations": people
-// are keyed by phone, so every gift that donor ever made rolls up to the single
+// are keyed by phone, so every donation that donor ever made rolls up to the single
 // person row - this endpoint surfaces how many and how much, so the list can
 // show it without N+1 follow-up requests.
 router.get('/', async (req, res) => {

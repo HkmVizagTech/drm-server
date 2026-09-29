@@ -3,6 +3,7 @@ import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 import { displayPurposeSql } from '../utils/donationLabel';
+import { updatePrasadamStatus, isSiteConfigured, type SiteKey } from '../services/hkmvClient';
 
 const router = Router();
 router.use(authenticate);
@@ -140,11 +141,15 @@ function buildFilters(q: Record<string, unknown>, startIdx = 1): Filters {
 }
 
 // The columns every screen and the export read, including the donation behind
-// the delivery so staff can see WHICH gift earned the prasadam.
+// the delivery so staff can see WHICH donation earned the prasadam.
 const SELECT_COLUMNS = `
   d.id, d.person_id, d.donation_id, d.address, d.status, d.courier_name,
   d.tracking_number, d.dispatched_at, d.delivered_at, d.notes, d.created_at,
   d.source_site, d.marked_at, d.marked_via,
+  -- Whether the source site has caught up with what was marked here. Shown as a
+  -- small badge so staff can see at a glance that a row is out of step, rather
+  -- than discovering it when a box gets couriered twice.
+  d.site_sync_status, d.site_sync_error, d.site_synced_at,
   p.name  AS donor_name,
   p.phone AS donor_phone,
   u.name  AS marked_by_name,
@@ -292,6 +297,17 @@ async function applyStatus(
     trackingNumber?: string | null;
     notes?: string | null;
     deliveredAt?: string | null;
+    /**
+     * Ask the SOURCE SITE to WhatsApp the donor as well.
+     *
+     * Almost always leave this off. DRM raises its own prasadam_shipped /
+     * prasadam_delivered trigger a few lines below, and that is the one place
+     * the donor should be messaged from - turning this on as well means the
+     * donor gets the same news twice, from two systems, with two wordings.
+     * It exists for the case where DRM's own trigger queue is disabled and the
+     * site's template is the one being relied on.
+     */
+    notifyDonorOnSite?: boolean;
   }
 ): Promise<{ updated: number; rows: Record<string, unknown>[] }> {
   if (!ids.length) return { updated: 0, rows: [] };
@@ -318,7 +334,7 @@ async function applyStatus(
          marked_at       = NOW(),
          marked_via      = $7
        WHERE id = ANY($8::uuid[])
-       RETURNING id, person_id, status, courier_name, tracking_number`,
+       RETURNING id, person_id, status, courier_name, tracking_number, delivered_at, external_ref, source_site`,
       [
         status,
         opts.courierName ?? null,
@@ -351,12 +367,97 @@ async function applyStatus(
     }
 
     await client.query('COMMIT');
+
+    // Push to the source sites AFTER the commit, deliberately. Two reasons: an
+    // HTTP call to another server must never be made with a transaction open
+    // (it would hold locks on these rows for as long as the far end takes to
+    // answer), and a site being down must never undo work a human just did.
+    // The local mark is the record; the push is best-effort reconciliation.
+    void pushStatusToSites(result.rows, status, opts.notifyDonorOnSite === true).catch((err) => {
+      console.error('prasadam.pushStatusToSites error:', err);
+    });
+
     return { updated: result.rowCount ?? 0, rows: result.rows };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;
   } finally {
     client.release();
+  }
+}
+
+// DRM's vocabulary against what the sites can actually store.
+//
+// DRM tracks five states because the temple's own workflow has five: a box can
+// be packed and waiting for the courier. Neither site has that, and neither has
+// anything to say about it, so "packed" is reported as still pending there -
+// which is true from the donor's point of view, and the alternative (claiming
+// it shipped) would be a lie that reaches the donor as a WhatsApp message.
+const SITE_STATUS: Record<Status, 'pending' | 'shipped' | 'delivered' | 'cancelled'> = {
+  pending: 'pending',
+  packed: 'pending',
+  shipped: 'shipped',
+  delivered: 'delivered',
+  returned: 'cancelled',
+};
+
+/**
+ * Mirrors a status change onto the site the donation came from.
+ *
+ * Runs outside the transaction, one row at a time, and records the outcome per
+ * row so the screen can show which deliveries the sites have caught up with.
+ * Nothing here throws to the caller: the staff member has already been told
+ * their mark succeeded, because it did.
+ *
+ * Three outcomes are recorded, and they mean different things:
+ *   synced      - the site stored it
+ *   unsupported - the site answered honestly that it cannot represent this
+ *                 state (annadan has no "cancelled", for instance). Not a
+ *                 failure and not worth retrying; the two sides simply differ.
+ *   failed      - the site was unreachable or refused. Worth retrying.
+ */
+async function pushStatusToSites(
+  rows: Record<string, unknown>[],
+  status: Status,
+  notifyDonorOnSite: boolean
+): Promise<void> {
+  const siteStatus = SITE_STATUS[status];
+
+  for (const row of rows) {
+    const externalRef = row.external_ref ? String(row.external_ref) : '';
+    const site = String(row.source_site || '') as SiteKey;
+
+    // Offline deliveries entered in DRM have no counterpart on either site, so
+    // there is nothing to push and nothing wrong with that.
+    if (!externalRef || (site !== 'hkmv' && site !== 'annadan')) continue;
+    if (!isSiteConfigured(site)) continue;
+
+    let syncStatus: 'synced' | 'unsupported' | 'failed';
+    let syncError: string | null = null;
+
+    try {
+      const result = await updatePrasadamStatus(site, externalRef, {
+        status: siteStatus,
+        courierName: row.courier_name ? String(row.courier_name) : null,
+        trackingNumber: row.tracking_number ? String(row.tracking_number) : null,
+        deliveredAt: row.delivered_at ? new Date(row.delivered_at as string).toISOString() : null,
+        notify: notifyDonorOnSite,
+      });
+      syncStatus = result.applied ? 'synced' : 'unsupported';
+      syncError = result.applied ? null : result.message;
+    } catch (err) {
+      syncStatus = 'failed';
+      syncError = err instanceof Error ? err.message.slice(0, 500) : 'Unknown error';
+    }
+
+    await pool
+      .query(
+        `UPDATE prasadam_deliveries
+            SET site_sync_status = $1, site_sync_error = $2, site_synced_at = NOW()
+          WHERE id = $3`,
+        [syncStatus, syncError, row.id]
+      )
+      .catch((err) => console.error('prasadam.recordSyncState error:', err));
   }
 }
 
@@ -423,6 +524,66 @@ router.post('/bulk-status', async (req, res) => {
   } catch (err) {
     console.error('prasadam.bulkStatus error:', err);
     res.status(500).json({ error: 'Could not update those deliveries' });
+  }
+});
+
+// POST /resync - push already-marked deliveries to their sites again.
+//
+// The push after a mark is best-effort: a site being down or restarting leaves
+// rows recorded here and stale there. Rather than a background job nobody can
+// see, this is a button - the screen shows how many rows are out of step, and
+// this retries them.
+//
+// "unsupported" rows are excluded on purpose. Those are not failures waiting to
+// clear; they are states the site genuinely cannot hold, and retrying them
+// forever would just keep producing the same honest refusal.
+router.post('/resync', async (req, res) => {
+  const limit = Math.min(Number(req.body?.limit) || 200, 1000);
+
+  try {
+    const stale = await pool.query(
+      `SELECT id, status, courier_name, tracking_number, delivered_at, external_ref, source_site
+         FROM prasadam_deliveries
+        WHERE marked_at IS NOT NULL
+          AND external_ref IS NOT NULL
+          AND source_site IN ('hkmv','annadan')
+          AND (site_sync_status IS NULL OR site_sync_status = 'failed')
+        ORDER BY marked_at DESC
+        LIMIT $1`,
+      [limit]
+    );
+
+    if (!stale.rows.length) {
+      return res.json({ attempted: 0, synced: 0, unsupported: 0, failed: 0, message: 'Everything is already in step.' });
+    }
+
+    // Grouped by status because pushStatusToSites maps one status for the whole
+    // batch - a mixed list would otherwise need one call per row anyway.
+    const byStatus = new Map<Status, Record<string, unknown>[]>();
+    for (const row of stale.rows) {
+      const s = row.status as Status;
+      if (!isStatus(s)) continue;
+      if (!byStatus.has(s)) byStatus.set(s, []);
+      byStatus.get(s)!.push(row);
+    }
+    for (const [s, rows] of byStatus) await pushStatusToSites(rows, s, false);
+
+    const after = await pool.query(
+      `SELECT site_sync_status AS s, COUNT(*)::int AS n
+         FROM prasadam_deliveries WHERE id = ANY($1::uuid[]) GROUP BY 1`,
+      [stale.rows.map((r) => r.id)]
+    );
+    const count = (k: string) => after.rows.find((r) => r.s === k)?.n ?? 0;
+
+    res.json({
+      attempted: stale.rows.length,
+      synced: count('synced'),
+      unsupported: count('unsupported'),
+      failed: count('failed') + count(null as unknown as string),
+    });
+  } catch (err) {
+    console.error('prasadam.resync error:', err);
+    res.status(500).json({ error: 'Could not re-sync those deliveries' });
   }
 });
 

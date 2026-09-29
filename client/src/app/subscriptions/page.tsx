@@ -3,6 +3,7 @@
 import { useEffect, useState, FormEvent } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
+import { Select } from "@/components/ui";
 
 interface Subscription {
   id: string;
@@ -179,17 +180,17 @@ function NewSubscriptionModal({ onClose, onAdded }: { onClose: () => void; onAdd
           className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none"
         />
         <div className="grid grid-cols-2 gap-3">
-          <select value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value })} className="px-3 py-2.5 border border-slate-300 rounded-lg">
+          <Select value={form.frequency} onChange={(v) => setForm({ ...form, frequency: v })} className="w-full">
             <option value="monthly">Monthly</option>
             <option value="quarterly">Quarterly</option>
             <option value="yearly">Yearly</option>
-          </select>
-          <select value={form.purpose} onChange={(e) => setForm({ ...form, purpose: e.target.value })} className="px-3 py-2.5 border border-slate-300 rounded-lg">
+          </Select>
+          <Select value={form.purpose} onChange={(v) => setForm({ ...form, purpose: v })} className="w-full">
             <option value="annadan">Annadan</option>
             <option value="temple_maintenance">Temple maintenance</option>
             <option value="festival">Festival</option>
             <option value="general">General</option>
-          </select>
+          </Select>
         </div>
         <div className="flex gap-3 pt-2">
           <button type="button" onClick={onClose} className="flex-1 px-4 py-2.5 border border-slate-300 rounded-lg hover:bg-gray-50">

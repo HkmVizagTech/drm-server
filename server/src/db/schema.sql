@@ -170,7 +170,7 @@ CREATE INDEX IF NOT EXISTS idx_person_notes_person ON person_notes(person_id);
 --
 -- Donations reach DRM from more than one place: the main site
 -- (harekrishnavizag.org), the separate annadan site
--- (annadan.harekrishnavizag.org), and manual entry here. Within a site, a gift
+-- (annadan.harekrishnavizag.org), and manual entry here. Within a site, a donation
 -- also comes from a specific page or campaign - /donate, /janmashtami,
 -- /govardhan and so on - which the source sites already record. Keeping these
 -- as three separate columns means totals can be split by site, by page, or by
@@ -192,7 +192,7 @@ CREATE INDEX IF NOT EXISTS idx_donations_campaign    ON donations(campaign);
 ALTER TABLE people ADD COLUMN IF NOT EXISTS source_sites TEXT[] NOT NULL DEFAULT '{}';
 
 -- Subscriptions and prasadam carry the site too - annadan runs its own
--- recurring gifts and its own prasadam dispatch, separate from the main site's.
+-- recurring donations and its own prasadam dispatch, separate from the main site's.
 ALTER TABLE subscriptions        ADD COLUMN IF NOT EXISTS source_site VARCHAR(20) NOT NULL DEFAULT 'drm';
 ALTER TABLE prasadam_deliveries  ADD COLUMN IF NOT EXISTS source_site VARCHAR(20) NOT NULL DEFAULT 'drm';
 
@@ -223,7 +223,7 @@ CREATE INDEX IF NOT EXISTS idx_prasadam_donation ON prasadam_deliveries(donation
 -- on WhatsApp (hkmsite2.0-server's "manual entry / raise receipt", annadan's
 -- "offline donation"). DRM posts the entry to whichever site the admin picks
 -- and stores what comes back, so there is still exactly ONE receipt series per
--- site and DCC sees every gift.
+-- site and DCC sees every donation.
 --
 -- Which is why the only new column here is who typed it in. Everything else
 -- already exists: source='offline', payment_mode=cash/cheque/upi/bank,
@@ -232,3 +232,532 @@ CREATE INDEX IF NOT EXISTS idx_prasadam_donation ON prasadam_deliveries(donation
 ALTER TABLE donations ADD COLUMN IF NOT EXISTS entered_by UUID REFERENCES users(id) ON DELETE SET NULL;
 
 CREATE INDEX IF NOT EXISTS idx_donations_entered_by ON donations(entered_by) WHERE entered_by IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Prasadam: has the source site caught up?
+--
+-- Staff work the dispatch list in DRM, but both donation sites keep their own
+-- prasadam screens. When someone marks a box delivered here, DRM pushes that
+-- to the site it came from - best-effort, after the local write, so a site
+-- being down can never undo work a human just did.
+--
+-- These three columns are what "best-effort" is allowed to mean. Without them
+-- a failed push is invisible, and the two systems drift apart with nobody able
+-- to see that they have.
+--
+--   synced       the site stored it
+--   unsupported  the site answered honestly that it cannot hold this state -
+--                annadan has no "cancelled", for instance. Not a failure, and
+--                retrying only produces the same refusal.
+--   failed       unreachable or refused. The Prasadam screen offers a re-sync.
+ALTER TABLE prasadam_deliveries ADD COLUMN IF NOT EXISTS site_sync_status VARCHAR(12);
+ALTER TABLE prasadam_deliveries ADD COLUMN IF NOT EXISTS site_sync_error TEXT;
+ALTER TABLE prasadam_deliveries ADD COLUMN IF NOT EXISTS site_synced_at TIMESTAMPTZ;
+
+-- The re-sync sweep looks for exactly this: marked here, belongs to a site, not
+-- yet confirmed there.
+CREATE INDEX IF NOT EXISTS idx_prasadam_sync_pending
+  ON prasadam_deliveries(marked_at DESC)
+  WHERE marked_at IS NOT NULL
+    AND external_ref IS NOT NULL
+    AND (site_sync_status IS NULL OR site_sync_status = 'failed');
+
+
+-- ===========================================================================
+-- CALLING (TeleCRM)
+--
+-- The temple calls donors: lapsed givers, last year's festival donors, people
+-- who started a donation and never finished, and cold lists from events. This
+-- is where that work is tracked.
+--
+-- ONE DESIGN DECISION SHAPES EVERYTHING HERE: calls are placed from the
+-- callers' own phones, and DRM is told what happened afterwards. So duration,
+-- connected-or-not and recordings are what a human reports, not what a
+-- telephony system measured. Every such column below is therefore nullable and
+-- carries a `source` of 'manual'. If a cloud provider (Exotel, MyOperator,
+-- Knowlarity, Twilio) is ever added, it fills the same columns with measured
+-- values and sets its own name as the source - no migration, and no report
+-- needs rewriting. What DOES change is how much the numbers can be trusted,
+-- which is why the source travels with every row rather than being assumed.
+-- ===========================================================================
+
+-- --------------------------------------------------------------------- leads
+--
+-- A lead is someone to call. It is NOT a second copy of a donor: when the
+-- person is already in DRM, person_id points at them and the donation history
+-- stays where it is. A cold lead from a CSV has no person row until they give.
+--
+-- phone is UNIQUE, and that is the whole duplicate story. One number is one
+-- person to the temple, so importing a list that already contains a donor
+-- updates that lead instead of forking them into two records that two callers
+-- then ring on the same afternoon.
+CREATE TABLE IF NOT EXISTS leads (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  -- Identity. phone is the last 10 digits, the same rule the donor sync uses,
+  -- so a lead and a donor with the same number always meet.
+  phone VARCHAR(10) UNIQUE NOT NULL,
+  name VARCHAR(255),
+  alt_phone VARCHAR(15),
+  email VARCHAR(255),
+  city VARCHAR(120),
+
+  -- Set when this lead is a person DRM already knows. Null for cold leads.
+  person_id UUID REFERENCES people(id) ON DELETE SET NULL,
+
+  -- Where they came from: donor (pulled from DRM's own people), csv (uploaded
+  -- list), website (started a donation and didn't finish), walk_in, referral,
+  -- event, manual (typed in by a caller).
+  source VARCHAR(20) NOT NULL DEFAULT 'manual',
+  -- The specific thing: the uploaded file's name, the page they abandoned, who
+  -- referred them. Free text because the useful detail differs per source.
+  source_detail VARCHAR(255),
+  source_site VARCHAR(20),
+
+  -- Where this lead has got to. Configurable labels live in crm_statuses; the
+  -- value here is the slug from that table.
+  status VARCHAR(30) NOT NULL DEFAULT 'new',
+
+  assigned_to UUID REFERENCES users(id) ON DELETE SET NULL,
+  assigned_at TIMESTAMPTZ,
+
+  tags TEXT[] NOT NULL DEFAULT '{}',
+  -- The latest note, denormalised so the list can show it without a join. The
+  -- full history is in lead_activities and this is never the only copy.
+  remarks TEXT,
+
+  -- WHAT IS DUE, AND WHEN. Deliberately a single column on the lead rather than
+  -- a follow-ups table: with two places recording what is due, they disagree,
+  -- and then nobody trusts the "overdue" count. Each time it is set, an
+  -- activity row records who set it and why, so the history is not lost.
+  next_follow_up_at TIMESTAMPTZ,
+  follow_up_note TEXT,
+
+  last_contacted_at TIMESTAMPTZ,
+  last_outcome VARCHAR(30),
+  call_attempts INT NOT NULL DEFAULT 0,
+
+  -- What this lead is worth if it lands - the caller's estimate, used for the
+  -- pipeline figure. Never a promise, and never counted as income.
+  expected_amount NUMERIC(12,2),
+
+  -- Conversion. Recorded against the actual donation so the reported figure is
+  -- money that genuinely arrived, not a caller ticking a box.
+  converted_donation_id UUID REFERENCES donations(id) ON DELETE SET NULL,
+  converted_amount NUMERIC(12,2),
+  converted_at TIMESTAMPTZ,
+
+  -- Survives every status change, on purpose. Someone who asked not to be
+  -- called must stay uncalled even if a later import reopens their lead.
+  do_not_call BOOLEAN NOT NULL DEFAULT FALSE,
+  -- Set when a number is unusable (disconnected, wrong person, not 10 digits).
+  -- Kept rather than deleted so the same bad number isn't re-imported monthly.
+  invalid_reason VARCHAR(120),
+
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The calling queue: "my leads, still open, due first". This is the index that
+-- makes the caller's screen instant, and it is the query they run all day.
+CREATE INDEX IF NOT EXISTS idx_leads_queue
+  ON leads(assigned_to, status, next_follow_up_at NULLS LAST)
+  WHERE do_not_call = FALSE;
+CREATE INDEX IF NOT EXISTS idx_leads_due ON leads(next_follow_up_at) WHERE next_follow_up_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
+CREATE INDEX IF NOT EXISTS idx_leads_person ON leads(person_id) WHERE person_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_leads_source ON leads(source, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_tags ON leads USING GIN(tags);
+-- Search by name in the leads list.
+CREATE INDEX IF NOT EXISTS idx_leads_name ON leads(lower(name));
+
+-- ---------------------------------------------------------- lead_activities
+--
+-- Everything that has ever happened to a lead, in one stream: calls, notes,
+-- status changes, follow-ups being set, reassignment, WhatsApp sent.
+--
+-- One table rather than four because the thing a caller actually wants is the
+-- lead's story in order, and stitching that together from four tables at read
+-- time is how it ends up displayed out of order.
+CREATE TABLE IF NOT EXISTS lead_activities (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  lead_id UUID NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+
+  -- call | note | status_change | follow_up | assignment | whatsapp | import
+  kind VARCHAR(20) NOT NULL,
+  note TEXT,
+
+  -- ------------------------------------------------- call columns (kind='call')
+  -- outbound | inbound | missed. A missed call is one the temple did not
+  -- answer, logged so it can be returned rather than lost.
+  direction VARCHAR(10),
+  -- What came of it. Slug from crm_dispositions.
+  disposition VARCHAR(30),
+  -- Stored rather than derived from the disposition: a caller can mark a call
+  -- connected that ended in a disposition the temple later reclassifies, and
+  -- the connected/unanswered split should not shift under old reports.
+  connected BOOLEAN,
+  duration_seconds INT,
+
+  -- Where these numbers came from. 'manual' means a human typed or estimated
+  -- them; a provider name means they were measured. Reports say which, because
+  -- a manually-entered average call time is not the same kind of fact as a
+  -- measured one and should never be presented as though it were.
+  source VARCHAR(20) NOT NULL DEFAULT 'manual',
+  provider_call_id VARCHAR(120),
+  recording_url TEXT,
+
+  -- Status transitions, for the audit trail.
+  from_value VARCHAR(60),
+  to_value VARCHAR(60),
+
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_lead_activities_lead ON lead_activities(lead_id, occurred_at DESC);
+-- Caller-wise reports: one person's calls over a date range.
+CREATE INDEX IF NOT EXISTS idx_lead_activities_user_time
+  ON lead_activities(user_id, occurred_at DESC) WHERE kind = 'call';
+CREATE INDEX IF NOT EXISTS idx_lead_activities_calls
+  ON lead_activities(occurred_at DESC) WHERE kind = 'call';
+-- A provider webhook arriving twice must not log the call twice.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_activities_provider_call
+  ON lead_activities(provider_call_id) WHERE provider_call_id IS NOT NULL;
+
+-- ------------------------------------------------------------- crm_statuses
+--
+-- The stages a lead moves through, editable in Settings rather than compiled
+-- in - every temple's calling process is slightly different, and a hard-coded
+-- list means a code change to add "will give after Kartik".
+--
+-- is_won / is_lost are what the reports key off. A stage the temple invents
+-- later is counted correctly the moment it is created, without touching any
+-- reporting SQL.
+CREATE TABLE IF NOT EXISTS crm_statuses (
+  slug VARCHAR(30) PRIMARY KEY,
+  label VARCHAR(60) NOT NULL,
+  -- Tailwind-ish token the UI maps to a colour; kept as a name, not a hex, so
+  -- dark mode stays the UI's business.
+  tone VARCHAR(20) NOT NULL DEFAULT 'slate',
+  sort_order INT NOT NULL DEFAULT 0,
+  is_won BOOLEAN NOT NULL DEFAULT FALSE,
+  is_lost BOOLEAN NOT NULL DEFAULT FALSE,
+  -- Closed stages drop out of the calling queue without being deleted.
+  is_open BOOLEAN NOT NULL DEFAULT TRUE,
+  active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+INSERT INTO crm_statuses (slug, label, tone, sort_order, is_won, is_lost, is_open) VALUES
+  ('new',            'New',              'slate',  10, FALSE, FALSE, TRUE),
+  ('attempting',     'Attempting',       'amber',  20, FALSE, FALSE, TRUE),
+  ('contacted',      'Contacted',        'blue',   30, FALSE, FALSE, TRUE),
+  ('interested',     'Interested',       'violet', 40, FALSE, FALSE, TRUE),
+  ('callback',       'Callback booked',  'cyan',   50, FALSE, FALSE, TRUE),
+  ('converted',      'Donated',          'emerald',60, TRUE,  FALSE, FALSE),
+  ('not_interested', 'Not interested',   'rose',   70, FALSE, TRUE,  FALSE),
+  ('invalid',        'Wrong / invalid',  'zinc',   80, FALSE, TRUE,  FALSE),
+  ('dnc',            'Do not call',      'zinc',   90, FALSE, TRUE,  FALSE)
+ON CONFLICT (slug) DO NOTHING;
+
+-- --------------------------------------------------------- crm_dispositions
+--
+-- How a single call ended. Separate from lead status because they answer
+-- different questions: the disposition is about the call ("no answer"), the
+-- status is about the relationship ("still interested"). Collapsing them is
+-- what makes a CRM unable to tell you how many calls went unanswered.
+--
+-- counts_connected drives the connected-vs-unanswered split, and
+-- suggests_status is what the calling screen pre-selects so a caller picking
+-- "not interested" doesn't have to also remember to move the lead.
+CREATE TABLE IF NOT EXISTS crm_dispositions (
+  slug VARCHAR(30) PRIMARY KEY,
+  label VARCHAR(60) NOT NULL,
+  counts_connected BOOLEAN NOT NULL DEFAULT FALSE,
+  suggests_status VARCHAR(30) REFERENCES crm_statuses(slug) ON DELETE SET NULL,
+  -- Whether picking this should ask for a callback date.
+  wants_follow_up BOOLEAN NOT NULL DEFAULT FALSE,
+  sort_order INT NOT NULL DEFAULT 0,
+  active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+INSERT INTO crm_dispositions (slug, label, counts_connected, suggests_status, wants_follow_up, sort_order) VALUES
+  ('interested',     'Interested',            TRUE,  'interested',     TRUE,  10),
+  ('will_donate',    'Will donate',           TRUE,  'callback',       TRUE,  20),
+  ('donated',        'Donated now',           TRUE,  'converted',      FALSE, 30),
+  ('call_back',      'Call back later',       TRUE,  'callback',       TRUE,  40),
+  ('not_interested', 'Not interested',        TRUE,  'not_interested', FALSE, 50),
+  ('no_answer',      'No answer',             FALSE, 'attempting',     TRUE,  60),
+  ('busy',           'Busy',                  FALSE, 'attempting',     TRUE,  70),
+  ('switched_off',   'Switched off',          FALSE, 'attempting',     TRUE,  80),
+  ('wrong_number',   'Wrong number',          TRUE,  'invalid',        FALSE, 90),
+  ('invalid_number', 'Number does not exist', FALSE, 'invalid',        FALSE, 100),
+  ('do_not_call',    'Asked not to be called',TRUE,  'dnc',            FALSE, 110)
+ON CONFLICT (slug) DO NOTHING;
+
+-- ------------------------------------------------------------- crm_settings
+-- Small key/value store for the Settings screen. JSONB so a setting can grow
+-- from a flag into an object without a migration.
+CREATE TABLE IF NOT EXISTS crm_settings (
+  key VARCHAR(60) PRIMARY KEY,
+  value JSONB NOT NULL,
+  updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO crm_settings (key, value) VALUES
+  -- How many leads the "give me work" button hands a caller at once.
+  ('queue_batch_size',      '25'::jsonb),
+  -- A lead nobody has touched for this many days comes back to the top.
+  ('stale_lead_days',       '30'::jsonb),
+  -- How many unanswered attempts before the lead is parked rather than
+  -- dialled forever.
+  ('max_attempts',          '6'::jsonb),
+  -- Days before an unanswered lead comes back round. Without this a "no
+  -- answer" would leave the lead with no date at all and it would quietly
+  -- drop out of everyone's day.
+  ('retry_after_days',      '2'::jsonb),
+  -- Calling hours, so the screen can warn before someone rings at 6am.
+  ('calling_hours',         '{"from":"09:00","to":"20:00"}'::jsonb),
+  -- Whether a caller may see leads assigned to someone else.
+  ('callers_see_all_leads', 'false'::jsonb)
+ON CONFLICT (key) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- REMINDERS
+--
+-- A reminder is NOT a follow-up, and keeping them apart is the whole point.
+--
+--   follow-up   "ring this lead back around the 20th" - a working date the
+--               caller picks so the queue hands the lead back at a sensible
+--               time. Lives on leads.next_follow_up_at. Fuzzy by design.
+--
+--   reminder    "he said he will donate on Govardhan Puja evening, after the
+--               arati" - a commitment the DONOR made, at a moment THEY named.
+--               Being an hour late to this is the difference between catching
+--               someone in the mood they promised in and catching them at
+--               dinner. It needs alerting, not a list to scroll.
+--
+-- Mixing them is what makes a CRM's reminder feature useless: the genuine
+-- commitments drown in a list of routine callbacks, so people stop looking, so
+-- the commitments get missed anyway.
+--
+-- HOW THE ALERTING WORKS
+-- lead_times holds minutes before due_at at which this should surface: the
+-- default {1440, 60, 15} is a day before, an hour before, and a quarter of an
+-- hour before. fired_offsets records which of those have already been shown, so
+-- an alert is raised exactly once per offset no matter how many times the
+-- screen polls or how many tabs are open. That state has to be in the database
+-- rather than the browser, because the caller who gets alerted may not be the
+-- one whose tab is open, and a refresh must not replay yesterday's alerts.
+CREATE TABLE IF NOT EXISTS lead_reminders (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  lead_id UUID NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+
+  -- What the donor actually said, in their words where possible. This is read
+  -- out loud on the call, so it is the most important column here.
+  title VARCHAR(200) NOT NULL,
+  note TEXT,
+
+  -- The occasion they named: Govardhan Puja, Ekadashi, "after salary day",
+  -- "when my son returns". Free text because a temple's calendar is not a
+  -- fixed list, and forcing one would just get "Other" every time.
+  occasion VARCHAR(120),
+
+  -- When it comes due, to the minute. Not a date: "Govardhan Puja evening" and
+  -- "Govardhan Puja morning" are different calls.
+  due_at TIMESTAMPTZ NOT NULL,
+
+  -- What they said they would give. Lets the caller open with the right ask
+  -- instead of starting the negotiation again.
+  expected_amount NUMERIC(12,2),
+
+  -- Minutes before due_at to raise an alert, largest first by convention.
+  lead_times INT[] NOT NULL DEFAULT '{1440,60,15}',
+  fired_offsets INT[] NOT NULL DEFAULT '{}',
+
+  -- Who should be alerted. Falls back to the lead's assignee when null, so a
+  -- reminder never ends up belonging to nobody.
+  assigned_to UUID REFERENCES users(id) ON DELETE SET NULL,
+
+  -- open | done | dismissed | missed
+  --
+  -- "missed" is computed, never stored by a user: it is what an open reminder
+  -- becomes once its time has passed. Recording it as a status would mean a
+  -- background job to flip rows, and a job that stops leaves the board lying.
+  status VARCHAR(12) NOT NULL DEFAULT 'open',
+  completed_at TIMESTAMPTZ,
+  -- Set when the reminder was pushed back, so a reminder snoozed four times is
+  -- visibly a reminder nobody wants to act on.
+  snooze_count INT NOT NULL DEFAULT 0,
+
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The alert poll runs every minute per signed-in caller, so it needs to be
+-- close to free: open reminders only, ordered by when they come due.
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON lead_reminders(due_at) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS idx_reminders_assignee ON lead_reminders(assigned_to, due_at) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS idx_reminders_lead ON lead_reminders(lead_id, due_at DESC);
+
+-- How far ahead the reminders board looks, and whether the browser is allowed
+-- to raise a desktop notification.
+INSERT INTO crm_settings (key, value) VALUES
+  ('reminder_lead_times',   '[1440,60,15]'::jsonb),
+  ('reminder_desktop_alerts', 'true'::jsonb)
+ON CONFLICT (key) DO NOTHING;
+
+-- Undo for a logged call.
+--
+-- The outcome buttons on the calling screen sit close together and are hit at
+-- speed, so a misclick happens several times a shift. Deleting the activity row
+-- alone would NOT undo the call: logging one also bumps call_attempts, moves
+-- the lead's stage, rewrites last_contacted_at and last_outcome, may set or
+-- clear the follow-up date, and may create a reminder. Reversing all of that by
+-- re-deriving it afterwards is guesswork.
+--
+-- So the lead's state from immediately BEFORE the call is written here at the
+-- moment it is logged, and undo restores it verbatim. Small, written once,
+-- never read unless somebody presses U.
+ALTER TABLE lead_activities ADD COLUMN IF NOT EXISTS undo_payload JSONB;
+
+-- ---------------------------------------------------------------------------
+-- SAVED LINKS
+--
+-- The thing a caller says twenty times a day: "shall I send you the link?"
+-- Until now the answer meant hanging up, opening the site, finding the right
+-- seva page, copying the URL and pasting it into WhatsApp by hand - so mostly
+-- it was "search for our website on Google", and the donation never happened.
+--
+-- These are the links the temple actually sends, saved once. A caller picks
+-- one, and DRM opens WhatsApp already in that donor's chat with the message
+-- written. No template approval, no per-message cost, because this is
+-- click-to-chat from the caller's own WhatsApp rather than the Business API.
+--
+-- TWO KINDS OF PLACEHOLDER, and they do different jobs:
+--
+--   in `url`      {phone} {lead} {caller}
+--                 Substituted before the link is sent, so a UTM can carry who
+--                 was called and who called them. That is what makes a
+--                 donation traceable back to the call that caused it -
+--                 donations already store utm_source/medium/campaign, so a
+--                 link tagged utm_source=call arrives already attributed.
+--
+--   in `message`  {name} {link} {seva} {amount} {caller}
+--                 The WhatsApp text itself. The caller can edit it before
+--                 sending; this is the starting point, not a fixed script.
+--
+-- owner_user_id NULL means the link is shared with everyone. Set, it belongs
+-- to one caller - which is the "custom link I saved myself" case, and keeps
+-- one person's experiment out of everybody else's dropdown.
+CREATE TABLE IF NOT EXISTS crm_links (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  label VARCHAR(80) NOT NULL,
+  url TEXT NOT NULL,
+  -- Which site it points at, so DRM can tell which WhatsApp number the donor
+  -- already knows and attribute the donation to the right place.
+  site VARCHAR(20),
+  -- The seva as a donor would say it, used in the message.
+  seva_name VARCHAR(120),
+  message TEXT,
+  owner_user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  sort_order INT NOT NULL DEFAULT 0,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  -- What actually gets used. The picker puts the busy links first, so the
+  -- three links a caller sends all day stop being three scrolls away.
+  use_count INT NOT NULL DEFAULT 0,
+  last_used_at TIMESTAMPTZ,
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_crm_links_pick
+  ON crm_links(sort_order, use_count DESC) WHERE active;
+CREATE INDEX IF NOT EXISTS idx_crm_links_owner ON crm_links(owner_user_id) WHERE owner_user_id IS NOT NULL;
+
+-- Seeded with the temple's real pages. Editable in Calling settings, because
+-- the campaign pages change every festival and a code change to add one would
+-- mean nobody ever adds one.
+--
+-- utm_source=call is on every seed deliberately: without it a donation that a
+-- phone call produced looks identical to one that arrived on its own, and the
+-- conversion report can only guess.
+-- Seeded ONCE, and only into an empty table.
+--
+-- NOT "ON CONFLICT DO NOTHING": that needs a unique constraint to conflict
+-- against, and there is none here, so it silently does nothing and every
+-- re-run of this file would append another nine rows. This file is applied on
+-- every deploy, so within a month the caller's dropdown would hold sixty
+-- copies of Gau Seva.
+--
+-- Guarding on the table being empty also means a link the temple deletes on
+-- purpose stays deleted rather than reappearing at the next deploy.
+-- The message literals are E'' strings: in a plain SQL literal a backslash and
+-- an n are two characters, so the donor would receive "...calling\n\nHare
+-- Krishna Movement" with the escape printed instead of a line break.
+INSERT INTO crm_links (label, url, site, seva_name, message, sort_order)
+SELECT * FROM (VALUES
+('Annadana Seva (annadan site)',
+   'https://annadan.harekrishnavizag.org/?utm_source=call&utm_medium=whatsapp&utm_campaign=calling',
+   'annadan', 'Annadana Seva',
+   E'Hare Krishna {name}, thank you for speaking with me. Here is the link for your {seva}: {link}\n\nHare Krishna Movement, Visakhapatnam', 10),
+
+  ('Gau Seva',
+   'https://harekrishnavizag.org/gau-seva?utm_source=call&utm_medium=whatsapp&utm_campaign=calling',
+   'hkmv', 'Gau Seva',
+   E'Hare Krishna {name}, thank you for speaking with me. Here is the link for your {seva}: {link}\n\nHare Krishna Movement, Visakhapatnam', 20),
+
+  ('Anna Daan Seva',
+   'https://harekrishnavizag.org/anna-daan-seva?utm_source=call&utm_medium=whatsapp&utm_campaign=calling',
+   'hkmv', 'Anna Daan Seva',
+   E'Hare Krishna {name}, thank you for speaking with me. Here is the link for your {seva}: {link}\n\nHare Krishna Movement, Visakhapatnam', 30),
+
+  ('Gita Daan Seva',
+   'https://harekrishnavizag.org/gita-daan-seva?utm_source=call&utm_medium=whatsapp&utm_campaign=calling',
+   'hkmv', 'Gita Daan Seva',
+   E'Hare Krishna {name}, thank you for speaking with me. Here is the link for your {seva}: {link}\n\nHare Krishna Movement, Visakhapatnam', 40),
+
+  ('Pitru Paksha',
+   'https://harekrishnavizag.org/pitru-paksha?utm_source=call&utm_medium=whatsapp&utm_campaign=calling',
+   'hkmv', 'Pitru Paksha Seva',
+   E'Hare Krishna {name}, thank you for speaking with me. Here is the link for the {seva}: {link}\n\nHare Krishna Movement, Visakhapatnam', 50),
+
+  ('Brick Seva',
+   'https://harekrishnavizag.org/brick-seva-campaign?utm_source=call&utm_medium=whatsapp&utm_campaign=calling',
+   'hkmv', 'Brick Seva',
+   E'Hare Krishna {name}, thank you for speaking with me. Here is the link for your {seva} towards the Vaikuntham temple: {link}\n\nHare Krishna Movement, Visakhapatnam', 60),
+
+  ('Square Foot Seva',
+   'https://harekrishnavizag.org/sqft-seva-campaign?utm_source=call&utm_medium=whatsapp&utm_campaign=calling',
+   'hkmv', 'Square Foot Seva',
+   E'Hare Krishna {name}, thank you for speaking with me. Here is the link for your {seva} towards the Vaikuntham temple: {link}\n\nHare Krishna Movement, Visakhapatnam', 70),
+
+  ('Alankara Vastra Seva',
+   'https://harekrishnavizag.org/alankara-vastra-seva?utm_source=call&utm_medium=whatsapp&utm_campaign=calling',
+   'hkmv', 'Alankara Vastra Seva',
+   E'Hare Krishna {name}, thank you for speaking with me. Here is the link for your {seva}: {link}\n\nHare Krishna Movement, Visakhapatnam', 80),
+
+  ('General donation (main site)',
+   'https://harekrishnavizag.org/donations?utm_source=call&utm_medium=whatsapp&utm_campaign=calling',
+   'hkmv', 'donation',
+   E'Hare Krishna {name}, thank you for speaking with me. Here is the donation link: {link}\n\nHare Krishna Movement, Visakhapatnam', 90)
+) AS seed(label, url, site, seva_name, message, sort_order)
+WHERE NOT EXISTS (SELECT 1 FROM crm_links);
+
+-- How the WhatsApp button opens.
+--
+--   'wa'       https://wa.me/... - works everywhere: the desktop app if it is
+--              installed, WhatsApp Web otherwise. One extra click on Windows.
+--   'desktop'  whatsapp://send?... - opens the installed desktop app straight
+--              away, and does nothing at all on a machine without it.
+--
+-- Default is the one that always works; a temple whose callers all have the
+-- desktop app can switch it and save a click twenty times a day.
+INSERT INTO crm_settings (key, value) VALUES
+  ('whatsapp_open_mode', '"wa"'::jsonb)
+ON CONFLICT (key) DO NOTHING;

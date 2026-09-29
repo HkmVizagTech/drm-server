@@ -3,6 +3,7 @@
 import { use, useEffect, useState, FormEvent } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
+import { Select } from "@/components/ui";
 
 interface Person {
   id: string;
@@ -623,17 +624,17 @@ function NewSubscriptionModal({ personId, onClose, onSaved }: { personId: string
     <ModalShell title="New Recurring Donation" onClose={onClose} onSubmit={submit}>
       <input type="number" step="0.01" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="Amount (₹) *" required className={inputClass} />
       <div className="grid grid-cols-2 gap-3">
-        <select value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value })} className="px-3 py-2.5 border border-slate-300 rounded-lg">
+        <Select value={form.frequency} onChange={(v) => setForm({ ...form, frequency: v })} className="w-full">
           <option value="monthly">Monthly</option>
           <option value="quarterly">Quarterly</option>
           <option value="yearly">Yearly</option>
-        </select>
-        <select value={form.purpose} onChange={(e) => setForm({ ...form, purpose: e.target.value })} className="px-3 py-2.5 border border-slate-300 rounded-lg">
+        </Select>
+        <Select value={form.purpose} onChange={(v) => setForm({ ...form, purpose: v })} className="w-full">
           <option value="annadan">Annadan</option>
           <option value="temple_maintenance">Temple maintenance</option>
           <option value="festival">Festival</option>
           <option value="general">General</option>
-        </select>
+        </Select>
       </div>
       <input type="date" value={form.next_charge_date} onChange={(e) => setForm({ ...form, next_charge_date: e.target.value })} className={inputClass} />
     </ModalShell>
@@ -679,12 +680,12 @@ function UpdateDeliveryModal({ delivery, onClose, onSaved }: { delivery: Prasada
 
   return (
     <ModalShell title="Update Delivery" onClose={onClose} onSubmit={submit}>
-      <select value={status} onChange={(e) => setStatus(e.target.value)} className="w-full px-3 py-2.5 border border-slate-300 rounded-lg">
+      <Select value={status} onChange={(v) => setStatus(v)} className="w-full">
         <option value="packed">Packed</option>
         <option value="shipped">Shipped</option>
         <option value="delivered">Delivered</option>
         <option value="returned">Returned</option>
-      </select>
+      </Select>
       <input value={courier} onChange={(e) => setCourier(e.target.value)} placeholder="Courier name" className={inputClass} />
       <input value={tracking} onChange={(e) => setTracking(e.target.value)} placeholder="Tracking number" className={inputClass} />
     </ModalShell>

@@ -4,7 +4,7 @@
 // The seva name that arrives from the source sites is whatever the donation
 // form called the button. On the main site's /donations page the free-amount
 // option is labelled "Donate any other Amount", and 584 donations carry that as
-// their purpose. It is not a seva - it describes the input box, not the gift -
+// their purpose. It is not a seva - it describes the input box, not the donation -
 // so it tells staff nothing, and in the dashboard's purpose breakdown it forms
 // one of the largest slices while meaning nothing at all.
 //
@@ -35,7 +35,7 @@ export const PLACEHOLDER_PURPOSES = [
 
 const asSqlArray = (xs: readonly string[]) => `ARRAY[${xs.map((x) => `'${x}'`).join(',')}]::text[]`;
 
-/** True when the purpose in `col` says nothing about what the gift was for. */
+/** True when the purpose in `col` says nothing about what the donation was for. */
 export function isPlaceholderPurposeSql(col = 'purpose'): string {
   return `(${col} IS NULL OR btrim(${col}) = '' OR lower(btrim(${col})) = ANY(${asSqlArray(PLACEHOLDER_PURPOSES)}))`;
 }

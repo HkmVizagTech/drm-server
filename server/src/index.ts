@@ -1,3 +1,16 @@
+// DRM — the single deployable service.
+//
+// THIS FILE STARTS BOTH HALVES OF DRM. The Express API and the Next.js admin UI
+// used to be two Railway services on two domains; commit 5f143fa merged them so
+// Next runs inside this process (see mountClient below). Anything under /api or
+// /health is answered here, everything else is handed to Next.
+//
+// So an "API only" version of this file is not a simplification, it is a
+// regression: root package.json runs `node server/dist/index.js` and there is no
+// `next start` anywhere, so dropping mountClient() deploys an API that serves no
+// UI at all, and every screen 404s. If you are adding a route, add it to the
+// route block below and leave the client wiring alone.
+
 import path from 'path';
 import fs from 'fs';
 import express from 'express';
@@ -14,6 +27,10 @@ import reportsRoutes from './routes/reports';
 import subscriptionsRoutes from './routes/subscriptions';
 import prasadamRoutes from './routes/prasadam';
 import webhooksRoutes from './routes/webhooks';
+import crmRoutes from './routes/crm';
+import crmReportsRoutes from './routes/crmReports';
+import crmRemindersRoutes from './routes/crmReminders';
+import crmLinksRoutes from './routes/crmLinks';
 import { scheduleBirthdayAnniversaryCheck } from './utils/cron';
 
 dotenv.config();
@@ -71,6 +88,20 @@ app.use('/api/triggers', triggersRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/subscriptions', subscriptionsRoutes);
 app.use('/api/prasadam', prasadamRoutes);
+
+// Calling (TeleCRM). Four routers on one prefix, split by how they are read
+// rather than by entity: leads and the call log in crm.ts, the dashboard and
+// reports in crmReports.ts, the reminder board and its alerts in
+// crmReminders.ts, and the saved WhatsApp links in crmLinks.ts. The reports are
+// all aggregates over the same tables, and keeping them together is what stops
+// two tiles disagreeing about a definition.
+//
+// All of these are registered BEFORE mountClient() runs, which matters: Next is
+// a catch-all, so any route added after it would never be reached.
+app.use('/api/crm', crmRoutes);
+app.use('/api/crm', crmReportsRoutes);
+app.use('/api/crm', crmRemindersRoutes);
+app.use('/api/crm', crmLinksRoutes);
 
 // Inbound webhooks from hkmsite2.0-server. Mounted outside the JWT-protected
 // groups above on purpose - these are server-to-server calls with no logged-in

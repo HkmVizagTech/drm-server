@@ -5,21 +5,7 @@ import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency, number, shortDate, titleCase } from "@/lib/format";
 import { SourceCell, siteLabel } from "@/components/source";
-import {
-  Badge,
-  Card,
-  EmptyState,
-  PageHeader,
-  Pagination,
-  SkeletonRows,
-  StatTile,
-  TableShell,
-  Td,
-  Th,
-  buttonPrimary,
-  buttonSecondary,
-  inputClass,
-} from "@/components/ui";
+import { Badge, buttonPrimary, buttonSecondary, Card, EmptyState, inputClass, PageHeader, Pagination, Select, SkeletonRows, StatTile, TableShell, Td, Th } from "@/components/ui";
 
 interface Donation {
   id: string;
@@ -233,7 +219,7 @@ export default function DonationsPage() {
             placeholder="Search donor, phone or receipt no…"
             className={`${inputClass} flex-1 min-w-[15rem]`}
           />
-          <select value={purpose} onChange={(e) => setPurpose(e.target.value)} className={inputClass}>
+          <Select value={purpose} onChange={(v) => setPurpose(v)} className="w-full">
             <option value="">All purposes</option>
             {(purposeOptions.length ? purposeOptions : purposes.map((p) => ({ purpose: p, count: 0 }))).map((p) => (
               <option key={p.purpose} value={p.purpose}>
@@ -241,28 +227,28 @@ export default function DonationsPage() {
                 {p.count ? ` (${p.count})` : ""}
               </option>
             ))}
-          </select>
-          <select value={receipt} onChange={(e) => setReceipt(e.target.value)} className={inputClass}>
+          </Select>
+          <Select value={receipt} onChange={(v) => setReceipt(v)} className="w-full">
             <option value="">Any receipt status</option>
             <option value="true">Receipt issued</option>
             <option value="false">Receipt pending</option>
-          </select>
-          <select value={siteFilter} onChange={(e) => setSiteFilter(e.target.value)} className={inputClass}>
+          </Select>
+          <Select value={siteFilter} onChange={(v) => setSiteFilter(v)} className="w-full">
             <option value="">All sites</option>
             {sources.sites.map((s) => (
               <option key={s.site} value={s.site}>
                 {siteLabel(s.site)} ({s.count})
               </option>
             ))}
-          </select>
-          <select value={pageFilter} onChange={(e) => setPageFilter(e.target.value)} className={inputClass}>
+          </Select>
+          <Select value={pageFilter} onChange={(v) => setPageFilter(v)} className="w-full">
             <option value="">All pages</option>
             {visiblePages.map((p) => (
               <option key={`${p.site}${p.page}`} value={p.page}>
                 {p.page} ({p.count})
               </option>
             ))}
-          </select>
+          </Select>
           <input
             type="date"
             value={fromDate}
@@ -507,7 +493,7 @@ function DonationDetail({ donation, onChanged }: { donation: Donation; onChanged
         {donation.display_purpose &&
           donation.display_purpose.toLowerCase() !== (donation.purpose ?? "").toLowerCase() && (
             /* The donor's site recorded something that describes the input box
-               rather than the gift, so the label above shows the page instead.
+               rather than the donation, so the label above shows the page instead.
                The original is kept visible - it is what that site still holds. */
             <Field label="As recorded on the site" value={donation.purpose} />
           )}
@@ -655,47 +641,47 @@ function RecordDonationModal({ onClose, onSaved }: { onClose: () => void; onSave
         />
 
         <div className="grid grid-cols-2 gap-3">
-          <select
+          <Select
             value={form.type}
-            onChange={(e) => setForm({ ...form, type: e.target.value })}
-            className={`${inputClass} w-full`}
+            onChange={(v) => setForm({ ...form, type: v })}
+            className="w-full"
           >
             <option value="one-time">One-time</option>
             <option value="recurring">Recurring</option>
             <option value="in-kind">In-kind</option>
             <option value="event-sponsorship">Event sponsorship</option>
-          </select>
-          <select
+          </Select>
+          <Select
             value={form.purpose}
-            onChange={(e) => setForm({ ...form, purpose: e.target.value })}
-            className={`${inputClass} w-full`}
+            onChange={(v) => setForm({ ...form, purpose: v })}
+            className="w-full"
           >
             {purposes.map((p) => (
               <option key={p} value={p}>
                 {titleCase(p)}
               </option>
             ))}
-          </select>
-          <select
+          </Select>
+          <Select
             value={form.payment_mode}
-            onChange={(e) => setForm({ ...form, payment_mode: e.target.value })}
-            className={`${inputClass} w-full`}
+            onChange={(v) => setForm({ ...form, payment_mode: v })}
+            className="w-full"
           >
             <option value="cash">Cash</option>
             <option value="upi">UPI</option>
             <option value="card">Card</option>
             <option value="netbanking">Net banking</option>
             <option value="bank_transfer">Bank transfer</option>
-          </select>
-          <select
+          </Select>
+          <Select
             value={form.source}
-            onChange={(e) => setForm({ ...form, source: e.target.value })}
-            className={`${inputClass} w-full`}
+            onChange={(v) => setForm({ ...form, source: v })}
+            className="w-full"
           >
             <option value="offline">Offline</option>
             <option value="website">Website</option>
             <option value="event">Event</option>
-          </select>
+          </Select>
         </div>
 
         <div className="flex gap-3 pt-2">
@@ -719,7 +705,7 @@ function RecordDonationModal({ onClose, onSaved }: { onClose: () => void; onSave
 // site's existing offline path runs: DCC is called, the 80G number comes from
 // that site's own series, the PDF is made and WhatsApp goes out. Identical to
 // using that site's own admin form — which is the point, because there is then
-// still exactly one receipt series per site and DCC sees every gift.
+// still exactly one receipt series per site and DCC sees every donation.
 //
 // What this form adds over those two forms is the thing only DRM can do: type
 // the donor's phone and it fills in the rest from the people already here.
@@ -840,7 +826,7 @@ function OfflineDonationModal({ onClose, onSaved }: { onClose: () => void; onSav
             </button>
             <button
               onClick={() => {
-                // Same donor, next gift — keep who they are, clear the money.
+                // Same donor, next donation — keep who they are, clear the money.
                 setDone(null);
                 setAmount("");
                 setReference("");
@@ -970,12 +956,12 @@ function OfflineDonationModal({ onClose, onSaved }: { onClose: () => void; onSav
             </label>
             <label className="text-xs text-slate-500">
               How it was paid
-              <select value={mode} onChange={(e) => setMode(e.target.value)} className={`${inputClass} w-full mt-1`}>
+              <Select value={mode} onChange={(v) => setMode(v)} className="w-full mt-1">
                 <option value="cash">Cash</option>
                 <option value="cheque">Cheque</option>
                 <option value="upi">UPI</option>
                 <option value="bank">Bank transfer</option>
-              </select>
+              </Select>
             </label>
             <label className="text-xs text-slate-500">
               {mode === "cash"
@@ -1002,7 +988,7 @@ function OfflineDonationModal({ onClose, onSaved }: { onClose: () => void; onSav
           </div>
           <p className="text-[11px] text-slate-400 -mt-2">
             The reference has to be unique — both sites refuse a second entry against the same one,
-            which is what stops the same gift being recorded twice.
+            which is what stops the same donation being recorded twice.
           </p>
 
           <div className="space-y-2 border-t border-[var(--line-soft)] pt-3">

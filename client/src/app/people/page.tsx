@@ -4,21 +4,7 @@ import { useCallback, useEffect, useState, FormEvent } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency, number, relativeDate } from "@/lib/format";
-import {
-  Avatar,
-  Badge,
-  Card,
-  EmptyState,
-  PageHeader,
-  Pagination,
-  SkeletonRows,
-  TableShell,
-  Td,
-  Th,
-  buttonPrimary,
-  buttonSecondary,
-  inputClass,
-} from "@/components/ui";
+import { Avatar, Badge, buttonPrimary, buttonSecondary, Card, EmptyState, inputClass, PageHeader, Pagination, Select, SkeletonRows, TableShell, Td, Th } from "@/components/ui";
 
 interface Person {
   id: string;
@@ -181,42 +167,42 @@ export default function PeoplePage() {
           placeholder="Search name, phone or email…"
           className={`${inputClass} flex-1 min-w-[16rem]`}
         />
-        <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} className={inputClass}>
+        <Select value={roleFilter} onChange={(v) => setRoleFilter(v)} className="w-full">
           <option value="">All roles</option>
           {roleOptions.map((r) => (
             <option key={r} value={r}>
               {r[0].toUpperCase() + r.slice(1)}
             </option>
           ))}
-        </select>
-        <select
+        </Select>
+        <Select
           value={siteFilter}
-          onChange={(e) => setSiteFilter(e.target.value)}
-          className={inputClass}
+          onChange={(v) => setSiteFilter(v)}
+          className="w-full"
           aria-label="Filter by donation site"
         >
           <option value="">All sites</option>
           <option value="hkmv">HKMV site</option>
           <option value="annadan">Annadan site</option>
-        </select>
-        <select
+        </Select>
+        <Select
           value={groupFilter}
-          onChange={(e) => setGroupFilter(e.target.value)}
-          className={inputClass}
+          onChange={(v) => setGroupFilter(v)}
+          className="w-full"
           aria-label="Filter by donation page"
         >
           <option value="">Any page</option>
           <option value="donations">Donations page (incl. nested)</option>
           <option value="donate">Donate — seva campaigns</option>
           <option value="other">Other pages</option>
-        </select>
-        <select value={sort} onChange={(e) => setSort(e.target.value)} className={inputClass}>
+        </Select>
+        <Select value={sort} onChange={(v) => setSort(v)} className="w-full">
           {sortOptions.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
 
       <TableShell>
