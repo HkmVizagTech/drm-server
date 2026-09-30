@@ -974,3 +974,385 @@ ALTER TABLE leads ADD COLUMN IF NOT EXISTS conversion_seen_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_leads_conversion_unseen
   ON leads(assigned_to, converted_at DESC)
   WHERE converted_donation_id IS NOT NULL AND conversion_seen_at IS NULL;
+
+
+-- ===========================================================================
+-- ACCOUNTS
+--
+-- users existed from the first day of DRM with three columns and no way to
+-- manage them: every account was made by hand against the database, and
+-- /api/auth/register was open to the internet and handed out 'admin'. These
+-- columns are what an account screen needs to be honest about who is who.
+-- ===========================================================================
+
+-- Switched off rather than deleted. A caller who leaves still wrote every call
+-- in the log, and deleting the row would either orphan that history or cascade
+-- it away - both worse than a row marked inactive that can no longer sign in.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES users(id) ON DELETE SET NULL;
+
+-- Emails are compared lower-cased when signing in, so they must be unique
+-- lower-cased too - otherwise Ravi@ and ravi@ are two accounts that both think
+-- they are the same person.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower ON users(lower(email));
+
+
+-- ===========================================================================
+-- CALLING LISTS AND SESSIONS
+--
+-- THE PROBLEM THIS SOLVES
+-- "Start calling" used to open one global queue: everything assigned to you or
+-- unassigned, ordered by what was most overdue. That is the right ORDER, but it
+-- is the wrong unit of work. A temple does not call "the queue", it calls the
+-- Janmashtami sheet on Tuesday and the lapsed monthly donors on Wednesday - and
+-- when the caller stops at forty, somebody has to be able to pick it up on
+-- Thursday at forty-one.
+--
+-- A LIST IS A SAVED FILTER, NOT A COPY OF THE LEADS
+-- The obvious design is a table of list members. It is also the wrong one: a
+-- lead that converts, goes do-not-call, or gets assigned to somebody else has
+-- to leave the list, and a copied membership table goes stale the moment any of
+-- that happens. So a list stores the QUESTION - this uploaded sheet, this tag,
+-- this preacher's donors - and the queue answers it fresh on every load.
+-- Progress is then counted, never tracked: "how many of this list still need a
+-- call" is a COUNT, and it is right by construction.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS calling_lists (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name VARCHAR(160) NOT NULL,
+  description TEXT,
+
+  -- What the list selects. Every field is optional and they AND together, so a
+  -- list can be "the March sheet" or "the March sheet, Visakhapatnam, JTMD's
+  -- donors" without needing a different kind of list for each combination.
+  import_batch_id UUID REFERENCES lead_import_batches(id) ON DELETE CASCADE,
+  tag VARCHAR(40),
+  preacher_id UUID REFERENCES preachers(id) ON DELETE SET NULL,
+  status_slug VARCHAR(40),
+  source VARCHAR(40),
+  city VARCHAR(80),
+  -- Lifetime giving from the office's sheets, for "everyone who has given over
+  -- a lakh". NULL means no bound.
+  min_external_total NUMERIC(14,2),
+
+  -- A list built from a sheet upload is created by the importer and named after
+  -- the sheet; one built on the lists screen is 'manual'. Kept apart so a
+  -- re-upload can refresh its own list without touching anything a human made.
+  origin VARCHAR(12) NOT NULL DEFAULT 'manual',
+
+  -- Retired rather than deleted, for the same reason as preachers: sessions
+  -- point at it and "which list was I on in March" has to stay answerable.
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_calling_lists_active ON calling_lists(active, name);
+CREATE INDEX IF NOT EXISTS idx_calling_lists_batch  ON calling_lists(import_batch_id) WHERE import_batch_id IS NOT NULL;
+
+-- One list handed to one caller. The assignment is what makes a list the
+-- caller's default when they sit down; they can still choose another, which is
+-- deliberate - a caller who finishes early should not be stuck.
+CREATE TABLE IF NOT EXISTS calling_list_assignments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  list_id UUID NOT NULL REFERENCES calling_lists(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  assigned_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (list_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_list_assignments_user ON calling_list_assignments(user_id);
+
+-- A caller's run at a list. One row per caller per list, reused every day.
+--
+-- WHY THIS IS NOT A ROW PER DAY
+-- The question a caller asks when they sit down is "where was I", not "what did
+-- I do on Tuesday". Tuesday is already in lead_activities, in full, with who
+-- and when - so a row per shift would be a second, worse copy of it. This holds
+-- only what cannot be recomputed: that this caller has this list open, and when
+-- they last touched it.
+CREATE TABLE IF NOT EXISTS calling_sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  list_id UUID REFERENCES calling_lists(id) ON DELETE CASCADE,
+
+  started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Set when the caller presses Finish. An unfinished session is what "resume"
+  -- offers them tomorrow morning.
+  ended_at TIMESTAMPTZ,
+
+  -- Counted here as well as being derivable from the activity log, because this
+  -- is the number shown on the screen after every call and re-aggregating the
+  -- log for it on each one would be silly. The log stays the source of truth
+  -- for reports; this is a tally for the caller.
+  calls_logged INT NOT NULL DEFAULT 0,
+  connected    INT NOT NULL DEFAULT 0,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- One open session per caller per list. The WHERE makes it a partial index, so
+-- finished sessions pile up as history without colliding.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calling_sessions_open
+  ON calling_sessions(user_id, COALESCE(list_id, '00000000-0000-0000-0000-000000000000'::uuid))
+  WHERE ended_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_calling_sessions_user ON calling_sessions(user_id, last_active_at DESC);
+
+-- Which session a call belonged to, so "you did 47 on the Janmashtami list
+-- yesterday" comes out of the log rather than being taken on trust.
+ALTER TABLE lead_activities ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES calling_sessions(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_activities_session ON lead_activities(session_id) WHERE session_id IS NOT NULL;
+
+
+-- ===========================================================================
+-- PREACHER ID NUMBER
+--
+-- The temple already issues these on paper. DRM stores what it is told and
+-- never invents one: a generated number would look identical to a real one on
+-- screen and there would be no way to tell, afterwards, which preachers had
+-- been given a number by the office and which by a database default.
+--
+-- Unique, but only where present, so the great majority of preachers who have
+-- no number are not all colliding on NULL.
+-- ===========================================================================
+ALTER TABLE preachers ADD COLUMN IF NOT EXISTS id_number VARCHAR(30);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_preachers_id_number
+  ON preachers(id_number) WHERE id_number IS NOT NULL;
+
+
+-- ===========================================================================
+-- ADDRESSES, PROPERLY
+--
+-- people.address was one free-text line, which is why a DRM receipt printed a
+-- single smear where the sites print a laid-out address. Both sites already
+-- hold structure and DRM was throwing it away on the way in:
+--
+--   HKMV donor.savedAddress      street, city, state, pincode, country
+--   HKMV donation.prasadamAddress doorNo, house, street, area,
+--                                 city, state, pincode, country
+--   annadan donation             address, city, state, pincode (flat)
+--
+-- These columns are the superset - the eight-field prasadam shape, which the
+-- other two fit inside. Nothing is invented: there is no landmark or line2
+-- here because neither site has one, and a field DRM alone knows about could
+-- never survive a round trip.
+--
+-- address stays, as written text, and is NOT dropped. It holds what arrived
+-- before the split and whatever annadan sends as one blob, so no address is
+-- ever lost to a migration. Display prefers the parts and falls back to it.
+-- ===========================================================================
+
+ALTER TABLE people ADD COLUMN IF NOT EXISTS address_door    VARCHAR(60);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS address_house   VARCHAR(120);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS address_street  VARCHAR(200);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS address_area    VARCHAR(120);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS address_city    VARCHAR(80);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS address_state   VARCHAR(80);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS address_pincode VARCHAR(10);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS address_country VARCHAR(60) DEFAULT 'India';
+
+-- Where prasadam goes, when it is not where they live. Same eight fields,
+-- because a courier needs a door number quite as much as an accountant does.
+ALTER TABLE people ADD COLUMN IF NOT EXISTS prasadam_door    VARCHAR(60);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS prasadam_house   VARCHAR(120);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS prasadam_street  VARCHAR(200);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS prasadam_area    VARCHAR(120);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS prasadam_city    VARCHAR(80);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS prasadam_state   VARCHAR(80);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS prasadam_pincode VARCHAR(10);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS prasadam_country VARCHAR(60) DEFAULT 'India';
+
+CREATE INDEX IF NOT EXISTS idx_people_pincode ON people(address_pincode) WHERE address_pincode IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_people_city    ON people(lower(address_city)) WHERE address_city IS NOT NULL;
+
+
+-- ===========================================================================
+-- NAMES THE SITES DISAGREE ABOUT
+--
+-- The people upsert never touched `name` on conflict, so whichever site synced
+-- a donor FIRST named them forever. That is how DRM ended up calling somebody
+-- "Myakal Srikanth" while annadan had "Myakala Srikanth" all along - not a
+-- truncation or an encoding fault, simply a first write that nothing could
+-- ever correct.
+--
+-- Newest now wins. But a name silently changing under an admin who fixed it
+-- yesterday is its own bug, so the one that lost is kept, with where it came
+-- from, and the screen says so. A disagreement is information, not noise.
+-- ===========================================================================
+
+ALTER TABLE people ADD COLUMN IF NOT EXISTS name_alt        VARCHAR(255);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS name_alt_source VARCHAR(20);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS name_conflict_at TIMESTAMPTZ;
+-- Set when a human types the name in DRM. A sync may still overwrite it - the
+-- rule chosen is newest-wins - but the screen can then say the name was edited
+-- here and later changed by a site, which is the case worth seeing.
+ALTER TABLE people ADD COLUMN IF NOT EXISTS name_edited_at  TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_people_name_conflict
+  ON people(name_conflict_at DESC) WHERE name_alt IS NOT NULL;
+
+-- When each site last told us anything about this donor, so "newest wins" has
+-- something to compare. Without it, newest means "whichever sync ran last",
+-- which is a property of the cron schedule rather than of the data.
+ALTER TABLE people ADD COLUMN IF NOT EXISTS profile_synced_at TIMESTAMPTZ;
+-- Which way the last profile change travelled, for the audit trail on screen.
+ALTER TABLE people ADD COLUMN IF NOT EXISTS profile_source VARCHAR(20);
+
+-- Pushing a DRM edit back out to the sites. Same shape as the prasadam
+-- write-back: what was attempted, whether it landed, and why not.
+ALTER TABLE people ADD COLUMN IF NOT EXISTS push_status VARCHAR(20);
+ALTER TABLE people ADD COLUMN IF NOT EXISTS push_error  TEXT;
+ALTER TABLE people ADD COLUMN IF NOT EXISTS pushed_at   TIMESTAMPTZ;
+
+
+-- ===========================================================================
+-- PAUSING A CALLING RUN
+--
+-- A run could only be finished, which conflates two different things a caller
+-- does: stepping away for an hour, and stopping for the day. Both used to mean
+-- "end it", and ending it is what makes tomorrow's screen offer a fresh start
+-- instead of the list they were halfway through.
+--
+-- paused_at is set when they step away and cleared when they come back;
+-- ended_at still means done. A paused run is still the open one, so "where you
+-- left off" finds it.
+-- ===========================================================================
+
+ALTER TABLE calling_sessions ADD COLUMN IF NOT EXISTS paused_at TIMESTAMPTZ;
+-- Their own words for why, shown back to them on return: "lunch", "back after
+-- the arati". Optional, and never required to pause.
+ALTER TABLE calling_sessions ADD COLUMN IF NOT EXISTS pause_note VARCHAR(200);
+
+
+-- ===========================================================================
+-- RAZORPAY QR CODES A CALLER CAN SHARE
+--
+-- HOW THE TEMPLE WORKS
+-- Each caller is given QR codes in the Razorpay dashboard. Mid-call a donor
+-- says "send me the QR", and today that happens on the caller's own phone,
+-- outside DRM, so the donation lands in Razorpay with nothing tying it to the
+-- call that produced it. The caller is not credited, the lead is not converted,
+-- and somebody reconciles it by hand a week later.
+--
+-- WHY THE QR IDs ARE STORED AND THE QR IMAGES ARE NOT
+-- A Razorpay QR has a stable id (qr_xxx) and a hosted image URL. DRM keeps the
+-- id, the URL and the label; it does not mint QRs and it does not need API keys
+-- to hand one to a donor. The only thing it needs Razorpay for is reading
+-- payments back, which is a webhook plus a read-only reconcile.
+--
+-- WHY THIS IS NOT JUST ANOTHER SAVED LINK
+-- crm_links are URLs a caller sends. A QR is money: it has an owner, it has to
+-- be matched to a lead, and the match has to survive the donor paying two days
+-- later from a different number. So a share is recorded as its own row with
+-- the lead on it, and payments are matched against those rows.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS razorpay_qrs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  -- Razorpay's own id, exactly as the dashboard shows it. The key everything
+  -- matches on, so it is unique and never generated here.
+  qr_id VARCHAR(60) UNIQUE NOT NULL,
+  -- The hosted image Razorpay serves. Stored rather than fetched so sharing
+  -- works even when Razorpay is slow or DRM has no API credentials at all.
+  image_url TEXT,
+  label VARCHAR(120) NOT NULL,
+  -- What the money is for, when the QR is tied to one purpose.
+  purpose VARCHAR(80),
+  -- A fixed-amount QR, when the temple made one. NULL means the donor types
+  -- the amount.
+  fixed_amount NUMERIC(12,2),
+
+  -- Whose QR it is. NULL means the temple's own, offered to everybody - the
+  -- general one a caller reaches for when no personal QR fits.
+  owner_id UUID REFERENCES users(id) ON DELETE SET NULL,
+
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  notes TEXT,
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_qrs_owner ON razorpay_qrs(owner_id, active) WHERE active;
+
+-- One sharing of one QR with one lead, by one caller, at one moment.
+--
+-- This row is the whole point of the feature: it is what a later payment is
+-- matched against. Without it a QR payment is an anonymous credit in Razorpay,
+-- which is exactly the situation today.
+CREATE TABLE IF NOT EXISTS qr_shares (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  qr_id UUID NOT NULL REFERENCES razorpay_qrs(id) ON DELETE CASCADE,
+  lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+  person_id UUID REFERENCES people(id) ON DELETE SET NULL,
+  shared_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  session_id UUID REFERENCES calling_sessions(id) ON DELETE SET NULL,
+
+  -- The number it went to, last ten digits - the same identity rule as
+  -- everywhere else, and what a payment is matched on.
+  phone VARCHAR(10) NOT NULL,
+  -- What the donor said they would give, if they said. Used to rank candidate
+  -- payments, never to demand an exact match: people round, and people change
+  -- their minds between the call and the payment.
+  expected_amount NUMERIC(12,2),
+  channel VARCHAR(20) NOT NULL DEFAULT 'whatsapp',
+  note TEXT,
+
+  -- Filled in when a payment is matched to this share.
+  matched_payment_id VARCHAR(60),
+  matched_amount NUMERIC(12,2),
+  matched_at TIMESTAMPTZ,
+  -- auto (webhook matched it on the spot) | reconciled (the sweep found it) |
+  -- manual (somebody linked it by hand). The same honesty rule the conversion
+  -- reports follow: a match the system observed and one a person asserted are
+  -- not equal evidence.
+  matched_via VARCHAR(12),
+  matched_by UUID REFERENCES users(id) ON DELETE SET NULL,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_qr_shares_phone   ON qr_shares(phone, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_qr_shares_lead    ON qr_shares(lead_id, created_at DESC) WHERE lead_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_qr_shares_open    ON qr_shares(created_at DESC) WHERE matched_at IS NULL;
+
+-- Every QR payment Razorpay tells us about, matched or not.
+--
+-- Stored even when nothing matches, and that is deliberate: an unmatched
+-- payment is money the temple has received, and a table that only kept the
+-- tidy ones would hide it. The unmatched list is a screen somebody works
+-- through, not rows quietly dropped.
+CREATE TABLE IF NOT EXISTS qr_payments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- Razorpay's payment id. Unique, so a webhook delivered three times (which
+  -- Razorpay does) creates one row, not three donations.
+  payment_id VARCHAR(60) UNIQUE NOT NULL,
+  qr_id VARCHAR(60),
+  amount NUMERIC(12,2) NOT NULL,
+  -- What Razorpay says about who paid. Often a VPA and nothing else.
+  payer_phone VARCHAR(10),
+  payer_vpa VARCHAR(120),
+  payer_name VARCHAR(160),
+  status VARCHAR(20),
+  raw JSONB,
+
+  share_id UUID REFERENCES qr_shares(id) ON DELETE SET NULL,
+  person_id UUID REFERENCES people(id) ON DELETE SET NULL,
+  donation_id UUID REFERENCES donations(id) ON DELETE SET NULL,
+
+  received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_qr_payments_unmatched
+  ON qr_payments(received_at DESC) WHERE share_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_qr_payments_qr ON qr_payments(qr_id, received_at DESC);

@@ -27,6 +27,19 @@ const str = (v: unknown, max = 255): string | null => {
   return s ? s.slice(0, max) : null;
 };
 
+/**
+ * The temple's own ID number for a preacher, as it is written on paper.
+ *
+ * Kept as text, never a number: the office's numbers carry prefixes and leading
+ * zeros ("HKM-118", "0042") and turning those into integers would silently
+ * rewrite somebody's ID. Trimmed and upper-cased only so "hkm-118" and
+ * "HKM-118 " do not become two preachers.
+ */
+export function normalizeIdNumber(v: unknown): string | null {
+  const s = String(v ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+  return s ? s.slice(0, 30) : null;
+}
+
 /** Codes are compared upper-cased and stripped, so "ydrd " and "YDRD" are one. */
 export function normalizeCode(v: unknown): string | null {
   const s = String(v ?? '').trim().toUpperCase().replace(/\s+/g, '');
@@ -69,10 +82,20 @@ export async function preacherIdForCode(
  */
 router.get('/preachers', async (req, res) => {
   const withCounts = req.query.counts !== 'false';
+  // Searched across all three identifiers, because the office knows a preacher
+  // by whichever one is in front of them: the code on a sheet, the name a donor
+  // said, or the ID number on a paper register.
+  const q = String(req.query.q ?? '').trim();
+  const search = q ? `%${q}%` : null;
 
   try {
     if (!withCounts) {
-      const rows = await pool.query(`SELECT * FROM preachers ORDER BY active DESC, code`);
+      const rows = await pool.query(
+        `SELECT * FROM preachers
+          WHERE $1::text IS NULL OR code ILIKE $1 OR name ILIKE $1 OR id_number ILIKE $1
+          ORDER BY active DESC, code`,
+        [search]
+      );
       return res.json({ preachers: rows.rows });
     }
 
@@ -100,7 +123,9 @@ router.get('/preachers', async (req, res) => {
          LEFT JOIN LATERAL (
            SELECT COUNT(*)::int AS donors FROM people pe WHERE pe.preacher_id = p.id
          ) d ON TRUE
-        ORDER BY p.active DESC, l.leads DESC NULLS LAST, p.code`
+        WHERE $1::text IS NULL OR p.code ILIKE $1 OR p.name ILIKE $1 OR p.id_number ILIKE $1
+        ORDER BY p.active DESC, l.leads DESC NULLS LAST, p.code`,
+      [search]
     );
     res.json({ preachers: rows.rows });
   } catch (err) {
@@ -112,17 +137,37 @@ router.get('/preachers', async (req, res) => {
 router.post('/preachers', async (req, res) => {
   const code = normalizeCode(req.body?.code);
   if (!code) return res.status(400).json({ error: 'A preacher needs a code' });
+  const idNumber = normalizeIdNumber(req.body?.id_number);
+
   try {
+    // Said plainly before the insert rather than letting the unique index throw
+    // it back as a constraint name: an ID typed twice is nearly always the
+    // office working from two copies of the same paper list, and the useful
+    // answer names who already has it.
+    if (idNumber) {
+      const clash = await pool.query(
+        `SELECT code, name FROM preachers WHERE id_number = $1 AND code <> $2`,
+        [idNumber, code]
+      );
+      if (clash.rows.length) {
+        const o = clash.rows[0];
+        return res.status(409).json({
+          error: `ID ${idNumber} already belongs to ${o.name || o.code}.`,
+        });
+      }
+    }
+
     const result = await pool.query(
-      `INSERT INTO preachers (code, name, phone, notes)
-       VALUES ($1,$2,$3,$4)
+      `INSERT INTO preachers (code, name, phone, notes, id_number)
+       VALUES ($1,$2,$3,$4,$5)
        ON CONFLICT (code) DO UPDATE SET
-         name  = COALESCE(EXCLUDED.name, preachers.name),
-         phone = COALESCE(EXCLUDED.phone, preachers.phone),
-         notes = COALESCE(EXCLUDED.notes, preachers.notes),
+         name      = COALESCE(EXCLUDED.name, preachers.name),
+         phone     = COALESCE(EXCLUDED.phone, preachers.phone),
+         notes     = COALESCE(EXCLUDED.notes, preachers.notes),
+         id_number = COALESCE(EXCLUDED.id_number, preachers.id_number),
          updated_at = NOW()
        RETURNING *`,
-      [code, str(req.body?.name, 160), str(req.body?.phone, 15), str(req.body?.notes, 2000)]
+      [code, str(req.body?.name, 160), str(req.body?.phone, 15), str(req.body?.notes, 2000), idNumber]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -134,6 +179,21 @@ router.post('/preachers', async (req, res) => {
 router.put('/preachers/:id', async (req, res) => {
   const b = req.body ?? {};
   try {
+    // An empty string means "clear this", which COALESCE alone cannot express
+    // - it would read the empty value as "leave it alone" and the office would
+    // have no way to remove an ID typed in error.
+    const idNumber = b.id_number === undefined ? undefined : normalizeIdNumber(b.id_number);
+    if (idNumber) {
+      const clash = await pool.query(
+        `SELECT code, name FROM preachers WHERE id_number = $1 AND id <> $2`,
+        [idNumber, req.params.id]
+      );
+      if (clash.rows.length) {
+        const o = clash.rows[0];
+        return res.status(409).json({ error: `ID ${idNumber} already belongs to ${o.name || o.code}.` });
+      }
+    }
+
     const result = await pool.query(
       `UPDATE preachers SET
          code   = COALESCE($1, code),
@@ -141,6 +201,7 @@ router.put('/preachers/:id', async (req, res) => {
          phone  = COALESCE($3, phone),
          notes  = COALESCE($4, notes),
          active = COALESCE($5::boolean, active),
+         id_number = CASE WHEN $7::boolean THEN $8 ELSE id_number END,
          updated_at = NOW()
        WHERE id = $6 RETURNING *`,
       [
@@ -150,6 +211,8 @@ router.put('/preachers/:id', async (req, res) => {
         str(b.notes, 2000),
         typeof b.active === 'boolean' ? b.active : null,
         req.params.id,
+        idNumber !== undefined,
+        idNumber ?? null,
       ]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Preacher not found' });

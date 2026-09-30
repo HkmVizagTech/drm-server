@@ -28,12 +28,14 @@
 // gets captured maybe a third of the time. So it is a box right under the
 // outcome buttons, and it saves with the call in the same request.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { apiClient } from "@/lib/api";
-import { currency, dueLabel, relativeDate } from "@/lib/format";
+import { currency, dueLabel, number, relativeDate } from "@/lib/format";
 import { Badge, Card, EmptyState, PageHeader, buttonPrimary, buttonSecondary, inputClass } from "@/components/ui";
 import { SendLink } from "@/components/send-link";
+import { SendQr } from "@/components/send-qr";
 import { useCallingAlerts } from "@/components/calling-alerts";
 
 interface Lead {
@@ -120,7 +122,26 @@ function localInput(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// useSearchParams needs a Suspense boundary around it, so the screen is split:
+// this wrapper reads the URL, the component below does the work.
 export default function CallingQueuePage() {
+  return (
+    <Suspense fallback={<div className="max-w-4xl"><Card><div className="h-40 animate-pulse rounded bg-slate-100" /></Card></div>}>
+      <CallingQueue />
+    </Suspense>
+  );
+}
+
+function CallingQueue() {
+  const router = useRouter();
+  const params = useSearchParams();
+  // Which list this run is against, and which run it is. Both come from the
+  // URL rather than from component state, so a refresh, a back button or a
+  // bookmarked link all land in the same shift instead of silently dropping
+  // the caller back into the global queue.
+  const listId = params.get("list");
+  const sessionId = params.get("session");
+
   const [queue, setQueue] = useState<Lead[]>([]);
   const [dispositions, setDispositions] = useState<Disposition[]>([]);
   const [loading, setLoading] = useState(true);
@@ -130,8 +151,17 @@ export default function CallingQueuePage() {
   // Session tally. Not vanity: a caller doing a two-hour run wants to know
   // where they are in it, and it is the only feedback the screen gives for
   // work that otherwise disappears the moment it is logged.
+  //
+  // Seeded from the server on load rather than starting at zero, which is what
+  // makes "stop today, continue tomorrow" real: the count that comes back is
+  // the whole run, not what has happened since this tab was opened.
   const [done, setDone] = useState(0);
   const [connectedCount, setConnectedCount] = useState(0);
+  // How many of this list are still waiting, counted by the database through
+  // the same filter the queue uses - so it cannot drift from what is about to
+  // be handed over.
+  const [toCall, setToCall] = useState(0);
+  const [listName, setListName] = useState<string | null>(null);
 
   // Per-call inputs, cleared between leads.
   const [note, setNote] = useState("");
@@ -172,19 +202,38 @@ export default function CallingQueuePage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [q, cfg] = await Promise.all([
-        apiClient.get<{ leads: Lead[] }>("/api/crm/queue?limit=25"),
+      const qs = new URLSearchParams({ limit: "25" });
+      if (listId) qs.set("list_id", listId);
+
+      const [q, cfg, sess] = await Promise.all([
+        apiClient.get<{ leads: Lead[]; to_call: number; list: { id: string; name: string } | null }>(
+          `/api/crm/queue?${qs}`
+        ),
         apiClient.get<{ dispositions: Disposition[] }>("/api/crm/config"),
+        // The run's own tally, so reopening the page mid-shift shows the real
+        // total rather than restarting the count at zero.
+        apiClient
+          .get<{ session: { id: string; calls_logged: number; connected: number } | null }>(
+            "/api/crm/sessions/current"
+          )
+          .catch(() => ({ session: null })),
       ]);
+
       setQueue(q.leads);
+      setToCall(q.to_call);
+      setListName(q.list?.name ?? null);
       setDispositions(cfg.dispositions);
+      if (sess.session && sess.session.id === sessionId) {
+        setDone(sess.session.calls_logged);
+        setConnectedCount(sess.session.connected);
+      }
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load the queue");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [listId, sessionId]);
 
   useEffect(() => {
     void load();
@@ -210,6 +259,7 @@ export default function CallingQueuePage() {
       setError(null);
       try {
         const res = await apiClient.post<{ activity: { id: string } }>(`/api/crm/leads/${lead.id}/call`, {
+          session_id: sessionId ?? undefined,
           disposition: d.slug,
           note: note.trim() || undefined,
           duration_seconds: duration ? Number(duration) * 60 : undefined,
@@ -225,6 +275,7 @@ export default function CallingQueuePage() {
         });
 
         setDone((n) => n + 1);
+        setToCall((n) => Math.max(0, n - 1));
         if (d.counts_connected) setConnectedCount((n) => n + 1);
         setLastCall({ lead, activityId: res.activity.id, label: d.label });
 
@@ -239,7 +290,7 @@ export default function CallingQueuePage() {
         setSaving(false);
       }
     },
-    [lead, saving, note, duration, followUp, customDate, remWhen, remOccasion, remAmount]
+    [lead, saving, sessionId, note, duration, followUp, customDate, remWhen, remOccasion, remAmount]
   );
 
   // Refill when the loaded batch runs low, so the caller never hits a spinner
@@ -263,11 +314,36 @@ export default function CallingQueuePage() {
       await apiClient.delete(`/api/crm/activities/${lastCall.activityId}`);
       setQueue((q) => [lastCall.lead, ...q]);
       setDone((n) => Math.max(0, n - 1));
+      // Put it back on the remaining count too — an undone call is a call that
+      // still has to be made, and leaving the number down by one would have the
+      // list quietly shrink every time somebody corrected a mis-tap.
+      setToCall((n) => n + 1);
       setLastCall(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not undo that");
     }
   }, [lastCall]);
+
+  // STOPPING AND PAUSING ARE DIFFERENT THINGS
+  //
+  // Ending a run is what makes tomorrow's screen offer a fresh start rather
+  // than the list somebody was halfway through. So a caller going to lunch
+  // must not end anything - the run stays open, marked as stepped-away, and
+  // "where you left off" still finds it.
+  //
+  // Both leave the screen, because in both cases the caller is going. The
+  // difference is only in what they come back to.
+  async function leave(how: "pause" | "end", note?: string) {
+    if (!sessionId) return router.push("/calling/start");
+    try {
+      await apiClient.post(`/api/crm/sessions/${sessionId}/${how}`, note ? { note } : {});
+    } catch {
+      // Already settled elsewhere, most likely in another tab. Either way the
+      // caller asked to leave, so leaving is the right thing to do.
+    }
+    router.push("/calling/start");
+  }
+
 
   async function copyNumber() {
     if (!lead) return;
@@ -341,19 +417,40 @@ export default function CallingQueuePage() {
   return (
     <div className="max-w-4xl">
       <PageHeader
-        title="Calling"
+        title={listName ?? "Calling"}
         subtitle={
           done > 0
-            ? `${done} logged this session · ${connectedCount} got through · ${queue.length} waiting`
-            : `${queue.length} in the queue`
+            ? `${done} logged · ${connectedCount} got through · ${number(toCall)} still to call`
+            : `${number(toCall)} to call`
         }
         actions={
           <div className="flex flex-wrap gap-2">
+            {/* Finishing is a real action, not just closing the tab: it ends
+                the run so tomorrow's screen offers a fresh start rather than
+                a stale "where you left off" from three weeks ago. */}
+            {sessionId && (
+              <>
+                <button
+                  onClick={() => void leave("pause")}
+                  className={buttonSecondary}
+                  title="Keep your place. This list will be waiting when you come back, today or tomorrow."
+                >
+                  Pause
+                </button>
+                <button
+                  onClick={() => void leave("end")}
+                  className={buttonSecondary}
+                  title="Done with this list for today. Tomorrow you start fresh."
+                >
+                  Stop for today
+                </button>
+              </>
+            )}
+            <Link href="/calling/start" className={buttonSecondary}>
+              Switch list
+            </Link>
             <Link href="/calling/reminders" className={buttonSecondary}>
               Reminders
-            </Link>
-            <Link href="/leads" className={buttonSecondary}>
-              All leads
             </Link>
             <button onClick={() => void load()} className={buttonSecondary}>
               Refresh queue
@@ -476,13 +573,22 @@ export default function CallingQueuePage() {
             title="Nothing left to call"
             message={
               done > 0
-                ? `You logged ${done} call${done === 1 ? "" : "s"}. Everything assigned to you is either done or scheduled for later.`
+                ? `You logged ${done} call${done === 1 ? "" : "s"}${listName ? ` on ${listName}` : ""}. Everything here is either done or scheduled for later.`
+                : listName
+                ? `Nothing in ${listName} is due right now. Another list may have work waiting.`
                 : "No leads are waiting for you. Add some from the leads screen, or pull a list out of your existing donors."
             }
             action={
-              <Link href="/leads" className={buttonPrimary}>
-                Go to leads
-              </Link>
+              <div className="flex flex-wrap justify-center gap-2">
+                {sessionId && (
+                  <button onClick={() => void leave("end")} className={buttonPrimary}>
+                    Finish and pick another list
+                  </button>
+                )}
+                <Link href="/leads" className={buttonSecondary}>
+                  Go to leads
+                </Link>
+              </div>
             }
           />
         </Card>
@@ -640,6 +746,18 @@ export default function CallingQueuePage() {
             <p className="mt-2 text-[11px] text-slate-400">
               Opens WhatsApp on this computer in their chat, with the message ready. Press send there.
             </p>
+
+            {/* The QR sits with the link rather than in its own card: from the
+                caller's side "send them something" is one decision, and a
+                donor who asks for a QR has usually just been offered a link. */}
+            <div className="mt-3 border-t border-[var(--line-soft)] pt-3">
+              <SendQr
+                leadId={lead.id}
+                leadName={lead.name}
+                expectedAmount={lead.expected_amount}
+                sessionId={sessionId}
+              />
+            </div>
           </Card>
 
           {/* ------------------------------------------------ log the outcome */}

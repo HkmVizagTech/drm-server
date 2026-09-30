@@ -525,8 +525,23 @@ router.post('/import/batches/:id/apply', async (req, res) => {
       [added, updated, skipped, listName, req.user?.userId ?? null, req.params.id]
     );
 
+    // Every applied sheet becomes a calling list of its own.
+    //
+    // Without this, uploading a sheet and then calling it would be two
+    // unrelated chores - upload here, go build a matching list there - and the
+    // second one would be skipped, leaving the sheet sitting in the global
+    // queue mixed in with everything else. The list is just the filter
+    // "leads from this batch", so it stays correct as leads convert or go
+    // do-not-call, and it can be retired without touching a single lead.
+    const listRow = await client.query(
+      `INSERT INTO calling_lists (name, import_batch_id, origin, created_by)
+       VALUES ($1, $2::uuid, 'import', $3::uuid)
+       RETURNING id`,
+      [listName.slice(0, 160), req.params.id, req.user?.userId ?? null]
+    );
+
     await client.query('COMMIT');
-    res.json({ added, updated, skipped, list_name: listName });
+    res.json({ added, updated, skipped, list_name: listName, list_id: listRow.rows[0]?.id ?? null });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.applyImport error:', err);

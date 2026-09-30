@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useAuth } from "@/lib/auth-context";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency, currencyCompact, number, relativeDate, titleCase } from "@/lib/format";
@@ -72,15 +74,25 @@ interface Dashboard {
 }
 
 export default function DashboardPage() {
+  const router = useRouter();
+  const { user } = useAuth();
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState("");
 
+  // A caller who lands here - from a stale bookmark, or the browser restoring
+  // yesterday's tab - is sent to their own screen rather than shown a
+  // dashboard whose every request the server will refuse.
   useEffect(() => {
+    if (user?.role === "caller") router.replace("/calling/start");
+  }, [user, router]);
+
+  useEffect(() => {
+    if (user?.role === "caller") return;
     apiClient
       .get<Dashboard>("/api/reports/dashboard")
       .then(setData)
       .catch((e) => setError(e instanceof Error ? e.message : "Could not load dashboard"));
-  }, []);
+  }, [user]);
 
   if (error) {
     return (

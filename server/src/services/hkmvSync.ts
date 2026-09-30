@@ -19,6 +19,8 @@
 import type { PoolClient } from 'pg';
 import pool from '../db/pool';
 import { hkmvMappers, HkmvDonation, HkmvSubscription, HkmvTransaction, SiteKey } from './hkmvClient';
+import { decideName } from './profileSync';
+import { addressValues, fromHkmvSaved } from '../utils/address';
 
 export interface HkmvDonorPayload {
   externalId?: string;
@@ -75,17 +77,51 @@ async function upsertPerson(
   if (!phone) throw new Error('Donor snapshot has no usable mobile number');
 
   const formattedAddress = hkmvMappers.formatSavedAddress(donor.savedAddress ?? null);
+  const structured = fromHkmvSaved((donor.savedAddress ?? null) as Record<string, unknown> | null);
 
-  // COALESCE(people.x, EXCLUDED.x) - existing DRM values win. Staff may have
-  // corrected a name or address here by hand; a routine sync from the website
-  // must not silently overwrite that work. Blank DRM fields get filled in.
+  // THE NAME BUG THIS FIXES
+  // This upsert used to leave `name` out of the DO UPDATE entirely. The
+  // comment said existing DRM values win, but for a name it went further than
+  // that: whichever site synced a donor FIRST named them, permanently, and no
+  // later correction on either site could ever reach DRM. That is how a donor
+  // annadan has always called "Myakala Srikanth" was "Myakal Srikanth" here.
+  //
+  // Newest now wins, decided in decideName() rather than in SQL, because the
+  // interesting cases are not expressible as COALESCE: a placeholder must lose
+  // to a real name, the same name in different case is not a disagreement, and
+  // a genuine disagreement has to be recorded rather than resolved silently.
+  const existing = await client.query(`SELECT name FROM people WHERE phone = $1`, [phone]);
+  const decision = decideName(existing.rows[0]?.name ?? null, donor.name ?? null, site);
+  const chosenName = decision.name || `Donor ${phone}`;
+
+  // The rest keeps COALESCE(people.x, EXCLUDED.x): staff may have corrected an
+  // email or a PAN here by hand, and a routine sync must not undo that.
+  // Addresses are handled separately, by mergeIncomingProfile, which can see
+  // WHEN the site last changed one.
   const result = await client.query(
-    `INSERT INTO people (name, phone, email, pan, prasadam_address, roles, source_sites, created_at)
-     VALUES ($1, $2, $3, $4, $5, ARRAY['donor']::TEXT[], ARRAY[$7]::TEXT[], COALESCE($6::timestamptz, NOW()))
+    `INSERT INTO people (name, phone, email, pan, prasadam_address, roles, source_sites, created_at,
+                         address_door, address_house, address_street, address_area,
+                         address_city, address_state, address_pincode, address_country)
+     VALUES ($1, $2, $3, $4, $5, ARRAY['donor']::TEXT[], ARRAY[$7]::TEXT[], COALESCE($6::timestamptz, NOW()),
+             $8, $9, $10, $11, $12, $13, $14, $15)
      ON CONFLICT (phone) DO UPDATE SET
+       name             = EXCLUDED.name,
+       name_alt         = CASE WHEN $16::boolean THEN $17 ELSE people.name_alt END,
+       name_alt_source  = CASE WHEN $16::boolean THEN $18 ELSE people.name_alt_source END,
+       name_conflict_at = CASE WHEN $16::boolean THEN NOW() ELSE people.name_conflict_at END,
        email            = COALESCE(people.email, EXCLUDED.email),
        pan              = COALESCE(people.pan, EXCLUDED.pan),
        prasadam_address = COALESCE(people.prasadam_address, EXCLUDED.prasadam_address),
+       -- Address parts fill gaps here and are only overwritten by
+       -- mergeIncomingProfile, which knows when the site last changed them.
+       address_door     = COALESCE(people.address_door,    EXCLUDED.address_door),
+       address_house    = COALESCE(people.address_house,   EXCLUDED.address_house),
+       address_street   = COALESCE(people.address_street,  EXCLUDED.address_street),
+       address_area     = COALESCE(people.address_area,    EXCLUDED.address_area),
+       address_city     = COALESCE(people.address_city,    EXCLUDED.address_city),
+       address_state    = COALESCE(people.address_state,   EXCLUDED.address_state),
+       address_pincode  = COALESCE(people.address_pincode, EXCLUDED.address_pincode),
+       address_country  = COALESCE(people.address_country, EXCLUDED.address_country),
        roles            = CASE WHEN 'donor' = ANY(people.roles)
                                THEN people.roles
                                ELSE array_append(people.roles, 'donor') END,
@@ -94,16 +130,22 @@ async function upsertPerson(
        source_sites     = CASE WHEN $7 = ANY(people.source_sites)
                                THEN people.source_sites
                                ELSE array_append(people.source_sites, $7) END,
+       profile_synced_at = NOW(),
+       profile_source    = $7,
        updated_at       = NOW()
      RETURNING id, (xmax = 0) AS created`,
     [
-      donor.name || `Donor ${phone}`,
+      chosenName,
       phone,
       donor.email ?? null,
       donor.panNumber ?? null,
       formattedAddress,
       donor.donorSince ?? null,
       site,
+      ...addressValues(structured),
+      decision.conflict,
+      decision.alt,
+      decision.altSource,
     ]
   );
 

@@ -22,7 +22,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency, number, relativeDate } from "@/lib/format";
-import { Badge, buttonPrimary, buttonSecondary, Card, EmptyState, inputClass, PageHeader, Pagination, Select, SkeletonRows, TableShell, Td, Th } from "@/components/ui";
+import { Badge, buttonPrimary, buttonSecondary, Card, EmptyState, inputClass, Modal, PageHeader, Pagination, Select, SkeletonRows, TableShell, Td, Th } from "@/components/ui";
 import { downloadFromApi, readSpreadsheet, SPREADSHEET_ACCEPT, type ParsedSheet } from "@/lib/spreadsheet";
 
 /* -------------------------------------------------------------------- types */
@@ -1062,28 +1062,3 @@ function Tally({ label, value, tone = "neutral" }: { label: string; value: numbe
   );
 }
 
-function Modal({
-  title,
-  children,
-  onClose,
-  wide = false,
-}: {
-  title: string;
-  children: React.ReactNode;
-  onClose: () => void;
-  wide?: boolean;
-}) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-900/40 p-4 overflow-y-auto">
-      <div className={`mt-12 w-full ${wide ? "max-w-3xl" : "max-w-2xl"} rounded-xl bg-white shadow-xl`}>
-        <div className="flex items-center justify-between border-b border-[var(--line-soft)] px-5 py-3.5">
-          <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-xl leading-none">
-            ×
-          </button>
-        </div>
-        <div className="p-5">{children}</div>
-      </div>
-    </div>
-  );
-}

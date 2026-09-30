@@ -107,7 +107,10 @@ export default function CallingDashboardPage() {
             <Link href="/calling/settings" className={buttonSecondary}>
               Settings
             </Link>
-            <Link href="/calling/queue" className={buttonPrimary}>
+            <Link href="/calling/lists" className={buttonSecondary}>
+              Lists
+            </Link>
+            <Link href="/calling/start" className={buttonPrimary}>
               Start calling
             </Link>
           </div>

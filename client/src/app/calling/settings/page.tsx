@@ -21,7 +21,7 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { apiClient } from "@/lib/api";
-import { Badge, buttonPrimary, buttonSecondary, Card, CardHeader, inputClass, PageHeader, Select, TableShell, Td, Th } from "@/components/ui";
+import { Badge, buttonPrimary, buttonSecondary, Card, CardHeader, inputClass, PageHeader, Select, TableShell, Td, Th, Toggle, Modal } from "@/components/ui";
 import { apiClient as api } from "@/lib/api";
 import { currency, number } from "@/lib/format";
 
@@ -293,6 +293,9 @@ export default function CallingSettingsPage() {
         {/* ------------------------------------------------------ preachers */}
         <PreachersSection />
 
+        {/* --------------------------------------------------------- QR codes */}
+        <QrSection />
+
         {/* ---------------------------------------------------------- links */}
         <LinksSection />
 
@@ -334,6 +337,7 @@ interface PreacherRow {
   code: string;
   name: string | null;
   phone: string | null;
+  id_number: string | null;
   active: boolean;
   leads: number;
   open_leads: number;
@@ -346,37 +350,58 @@ interface PreacherRow {
 function PreachersSection() {
   const [rows, setRows] = useState<PreacherRow[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [newCode, setNewCode] = useState("");
+  const [q, setQ] = useState("");
+  const [adding, setAdding] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const d = await api.get<{ preachers: PreacherRow[] }>("/api/crm/preachers");
+      const d = await api.get<{ preachers: PreacherRow[] }>(
+        `/api/crm/preachers${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ""}`
+      );
       setRows(d.preachers);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load the preachers");
     }
-  }, []);
+  }, [q]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    // Debounced, so typing a name does not fire a request per keystroke.
+    const t = setTimeout(() => void load(), q ? 250 : 0);
+    return () => clearTimeout(t);
+  }, [load, q]);
 
   async function save(id: string, body: Record<string, unknown>) {
+    setError(null);
     try {
       await api.put(`/api/crm/preachers/${id}`, body);
       await load();
     } catch (e) {
+      // Nearly always a duplicate ID number, and the server's message names
+      // who already has it - so it is shown as it came back rather than
+      // replaced with something vaguer.
       setError(e instanceof Error ? e.message : "Could not save that");
+      await load();
     }
   }
 
   return (
     <Card padded={false}>
-      <div className="px-5 pt-5">
+      <div className="flex flex-wrap items-end justify-between gap-3 px-5 pt-5">
         <CardHeader
           title={`Preachers${rows.length ? ` · ${rows.length}` : ""}`}
           subtitle="The Enrolled By codes from your sheets. Give them real names and every caller sees the name instead of the code."
         />
+        <div className="flex flex-wrap gap-2">
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search name, code or ID…"
+            className={`${inputClass} w-52`}
+          />
+          <button onClick={() => setAdding(true)} className={buttonPrimary}>
+            Add a preacher
+          </button>
+        </div>
       </div>
 
       {error && <p className="px-5 pb-3 text-sm text-red-700">{error}</p>}
@@ -386,6 +411,7 @@ function PreachersSection() {
           <tr>
             <Th>Code</Th>
             <Th>Name</Th>
+            <Th>ID number</Th>
             <Th align="right">Leads</Th>
             <Th align="right">Still to call</Th>
             <Th align="right">In temple accounts</Th>
@@ -396,8 +422,10 @@ function PreachersSection() {
         <tbody className="divide-y divide-slate-100">
           {!rows.length ? (
             <tr>
-              <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-400">
-                None yet — they appear automatically when you upload a sheet with an Enrolled By column.
+              <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-400">
+                {q.trim()
+                  ? `Nothing matches “${q.trim()}”.`
+                  : "None yet — add one, or upload a sheet with an Enrolled By column and they appear on their own."}
               </td>
             </tr>
           ) : (
@@ -410,6 +438,20 @@ function PreachersSection() {
                     placeholder="Their name…"
                     onBlur={(e) => e.target.value !== (p.name ?? "") && void save(p.id, { name: e.target.value })}
                     className="w-full bg-transparent text-slate-800 placeholder:text-slate-300 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] rounded px-1 -mx-1"
+                  />
+                </Td>
+                <Td>
+                  {/* Typed in, never generated. A number DRM invented would
+                      look identical on screen to one the office issued, and
+                      afterwards nobody could tell which was which. */}
+                  <input
+                    defaultValue={p.id_number ?? ""}
+                    placeholder="—"
+                    onBlur={(e) =>
+                      e.target.value.trim().toUpperCase() !== (p.id_number ?? "") &&
+                      void save(p.id, { id_number: e.target.value })
+                    }
+                    className="w-24 bg-transparent tabular-nums text-slate-700 placeholder:text-slate-300 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] rounded px-1 -mx-1"
                   />
                 </Td>
                 <Td align="right" className="tabular-nums text-slate-600">{number(p.leads)}</Td>
@@ -427,31 +469,117 @@ function PreachersSection() {
         </tbody>
       </TableShell>
 
-      <div className="px-5 py-4 flex flex-wrap gap-2 border-t border-[var(--line-soft)]">
-        <input
-          value={newCode}
-          onChange={(e) => setNewCode(e.target.value.toUpperCase())}
-          placeholder="Add a code, e.g. JTMD"
-          className={`${inputClass} w-40`}
-        />
-        <button
-          disabled={!newCode.trim()}
-          onClick={async () => {
-            await api.post("/api/crm/preachers", { code: newCode.trim() });
-            setNewCode("");
+      <div className="border-t border-[var(--line-soft)] px-5 py-4">
+        <p className="text-xs text-slate-500">
+          A preacher is somebody the DONOR knows, not somebody who signs in to DRM — which is why this is a separate
+          list from your team. Retiring one keeps every donor they brought in; it only takes the code out of the
+          dropdowns. Name and ID number can be edited straight in the table.
+        </p>
+      </div>
+
+      {adding && (
+        <AddPreacherDialog
+          onClose={() => setAdding(false)}
+          onDone={async () => {
+            setAdding(false);
             await load();
+          }}
+        />
+      )}
+    </Card>
+  );
+}
+
+/**
+ * Adding a preacher by hand.
+ *
+ * The code is the only required field, because the code is what a sheet
+ * carries and what an import matches on — a preacher with a name and no code
+ * would never be found again when the next export arrives. The name and the
+ * ID number are what make the row useful to a human.
+ */
+function AddPreacherDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const [name, setName] = useState("");
+  const [code, setCode] = useState("");
+  const [idNumber, setIdNumber] = useState("");
+  const [phone, setPhone] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <Modal title="Add a preacher" onClose={onClose}>
+      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="text-xs text-slate-500">
+          Their name
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Jagat Tarini Mataji"
+            className={`${inputClass} mt-1 w-full`}
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          Short form (code) <span className="text-red-600">*</span>
+          <input
+            value={code}
+            onChange={(e) => setCode(e.target.value.toUpperCase().replace(/\s+/g, ""))}
+            placeholder="e.g. JTMD"
+            className={`${inputClass} mt-1 w-full tabular-nums`}
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          ID number
+          <input
+            value={idNumber}
+            onChange={(e) => setIdNumber(e.target.value)}
+            placeholder="e.g. 1042 or HKM-118"
+            className={`${inputClass} mt-1 w-full tabular-nums`}
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          Phone (optional)
+          <input
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            inputMode="tel"
+            className={`${inputClass} mt-1 w-full tabular-nums`}
+          />
+        </label>
+      </div>
+
+      <p className="mt-3 text-xs text-slate-500">
+        The code has to match what your sheets put in the <strong>Enrolled By</strong> column — that is how an upload
+        recognises them. The ID number is your own register&apos;s; DRM stores it and never makes one up.
+      </p>
+
+      <div className="mt-5 flex justify-end gap-2">
+        <button onClick={onClose} className={buttonSecondary}>Cancel</button>
+        <button
+          disabled={busy || !code.trim()}
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            try {
+              await api.post("/api/crm/preachers", {
+                code: code.trim(),
+                name: name.trim() || undefined,
+                id_number: idNumber.trim() || undefined,
+                phone: phone.trim() || undefined,
+              });
+              onDone();
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not save that preacher");
+              setBusy(false);
+            }
           }}
           className={buttonPrimary}
         >
-          Add
+          {busy ? "Saving…" : "Add them"}
         </button>
-        <p className="w-full text-xs text-slate-500 mt-1">
-          A preacher is somebody the DONOR knows, not somebody who signs in to DRM — which is why this is a separate
-          list from your users. Retiring one keeps every donor they brought in; it only takes the code out of the
-          dropdowns.
-        </p>
       </div>
-    </Card>
+    </Modal>
   );
 }
 
@@ -629,15 +757,272 @@ function LinksSection() {
   );
 }
 
-function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+
+
+/**
+ * The Razorpay QR codes callers can share.
+ *
+ * The QRs themselves are made in the Razorpay dashboard - DRM does not mint
+ * them and needs no API key to hand one to a donor. What it needs is the id,
+ * so a payment reported later can be traced back to the call that produced it.
+ *
+ * Assigning one to a caller is what makes a donation creditable. Without an
+ * owner a QR is the temple's, offered to everybody, and a payment through it
+ * can still be matched to a lead but not to a person's work.
+ */
+interface QrRow {
+  id: string;
+  qr_id: string;
+  label: string;
+  image_url: string | null;
+  purpose: string | null;
+  fixed_amount: string | null;
+  owner_id: string | null;
+  owner_name: string | null;
+  active: boolean;
+  shares: number;
+  matched: number;
+  raised: string;
+}
+
+function QrSection() {
+  const [rows, setRows] = useState<QrRow[]>([]);
+  const [users, setUsers] = useState<{ id: string; name: string }[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const [q, cfg] = await Promise.all([
+        api.get<{ qrs: QrRow[] }>("/api/crm/qrs?all=true"),
+        api.get<{ users: { id: string; name: string }[] }>("/api/crm/config"),
+      ]);
+      setRows(q.qrs);
+      setUsers(cfg.users);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load the QR codes");
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function save(id: string, body: Record<string, unknown>) {
+    setError(null);
+    try {
+      await api.put(`/api/crm/qrs/${id}`, body);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save that");
+      await load();
+    }
+  }
+
   return (
-    <button
-      role="switch"
-      aria-checked={on}
-      onClick={() => onChange(!on)}
-      className={`inline-flex h-5 w-9 items-center rounded-full transition-colors ${on ? "bg-[var(--accent)]" : "bg-slate-200"}`}
-    >
-      <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${on ? "translate-x-4.5" : "translate-x-1"}`} />
-    </button>
+    <Card padded={false}>
+      <div className="flex flex-wrap items-end justify-between gap-3 px-5 pt-5">
+        <CardHeader
+          title={`Razorpay QR codes${rows.length ? ` \u00b7 ${rows.length}` : ""}`}
+          subtitle="Make them in the Razorpay dashboard, then paste each one's id here and say whose it is."
+        />
+        <button onClick={() => setAdding(true)} className={buttonPrimary}>
+          Add a QR
+        </button>
+      </div>
+
+      {error && <p className="px-5 pb-2 text-sm text-red-700">{error}</p>}
+      {notice && <p className="px-5 pb-2 text-sm text-amber-800">{notice}</p>}
+
+      <TableShell>
+        <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
+          <tr>
+            <Th>Label</Th>
+            <Th>Razorpay id</Th>
+            <Th>Whose</Th>
+            <Th align="right">Sent</Th>
+            <Th align="right">Paid</Th>
+            <Th align="right">Raised</Th>
+            <Th align="center">In use</Th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {!rows.length ? (
+            <tr>
+              <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-400">
+                None yet. A caller sees no QR option until one is added here.
+              </td>
+            </tr>
+          ) : (
+            rows.map((q) => (
+              <tr key={q.id} className={`hover:bg-slate-50/60 ${q.active ? "" : "opacity-60"}`}>
+                <Td>
+                  <input
+                    defaultValue={q.label}
+                    onBlur={(e) => e.target.value.trim() && e.target.value !== q.label && void save(q.id, { label: e.target.value })}
+                    className="w-full bg-transparent font-medium text-slate-900 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] rounded px-1 -mx-1"
+                  />
+                  {q.purpose && <p className="text-[11px] text-slate-500">{q.purpose}</p>}
+                </Td>
+                <Td className="font-mono text-xs text-slate-500">{q.qr_id}</Td>
+                <Td>
+                  <Select
+                    value={q.owner_id ?? ""}
+                    onChange={(v) => void save(q.id, { owner_id: v || null })}
+                    className="min-w-[10rem]"
+                    options={[
+                      { value: "", label: "The temple's (everyone)" },
+                      ...users.map((u) => ({ value: u.id, label: u.name })),
+                    ]}
+                  />
+                </Td>
+                <Td align="right" className="tabular-nums text-slate-600">{number(q.shares)}</Td>
+                <Td align="right" className="tabular-nums text-slate-700">
+                  {q.matched ? number(q.matched) : <span className="text-slate-300">\u2014</span>}
+                </Td>
+                <Td align="right" className="tabular-nums font-medium text-slate-900">
+                  {Number(q.raised) ? currency(Number(q.raised)) : <span className="text-slate-300">\u2014</span>}
+                </Td>
+                <Td align="center">
+                  <Toggle on={q.active} onChange={(v) => void save(q.id, { active: v })} label={`${q.label} in use`} />
+                </Td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </TableShell>
+
+      <div className="border-t border-[var(--line-soft)] px-5 py-4">
+        <p className="text-xs text-slate-500">
+          When a caller shares a QR, DRM records who it went to. Razorpay then reports the payment to
+          <span className="font-mono"> /api/crm/qr/webhook</span>, and DRM matches it back to that lead by the QR,
+          the timing and the amount. A payment it cannot place with confidence waits on the unmatched list rather
+          than being credited to a guess.
+        </p>
+      </div>
+
+      {adding && (
+        <AddQrDialog
+          users={users}
+          onClose={() => setAdding(false)}
+          onDone={async (warning) => {
+            setAdding(false);
+            setNotice(warning);
+            await load();
+          }}
+        />
+      )}
+    </Card>
+  );
+}
+
+function AddQrDialog({
+  users,
+  onClose,
+  onDone,
+}: {
+  users: { id: string; name: string }[];
+  onClose: () => void;
+  onDone: (warning: string | null) => void;
+}) {
+  const [qrId, setQrId] = useState("");
+  const [label, setLabel] = useState("");
+  const [imageUrl, setImageUrl] = useState("");
+  const [purpose, setPurpose] = useState("");
+  const [owner, setOwner] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <Modal title="Add a Razorpay QR" onClose={onClose}>
+      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+
+      <p className="mb-4 text-sm text-slate-600">
+        In Razorpay, open the QR you want to use and copy its id and image link. DRM never creates or changes a QR
+        \u2014 it only needs to recognise payments that come through one.
+      </p>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="text-xs text-slate-500">
+          What the caller will see <span className="text-red-600">*</span>
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="e.g. Annadan \u2014 Ravi"
+            className={`${inputClass} mt-1 w-full`}
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          Razorpay QR id <span className="text-red-600">*</span>
+          <input
+            value={qrId}
+            onChange={(e) => setQrId(e.target.value.trim())}
+            placeholder="qr_XXXXXXXXXXXX"
+            className={`${inputClass} mt-1 w-full font-mono`}
+          />
+        </label>
+        <label className="text-xs text-slate-500 sm:col-span-2">
+          QR image link
+          <input
+            value={imageUrl}
+            onChange={(e) => setImageUrl(e.target.value.trim())}
+            placeholder="https://\u2026"
+            className={`${inputClass} mt-1 w-full`}
+          />
+          <span className="mt-0.5 block text-[11px] text-slate-400">
+            This is what the donor receives on WhatsApp, so it has to be a link anyone can open.
+          </span>
+        </label>
+        <label className="text-xs text-slate-500">
+          What it is for
+          <input
+            value={purpose}
+            onChange={(e) => setPurpose(e.target.value)}
+            placeholder="e.g. Annadan Seva"
+            className={`${inputClass} mt-1 w-full`}
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          Whose QR is it
+          <Select
+            value={owner}
+            onChange={setOwner}
+            className="mt-1 w-full"
+            options={[
+              { value: "", label: "The temple's (everyone)" },
+              ...users.map((u) => ({ value: u.id, label: u.name })),
+            ]}
+          />
+        </label>
+      </div>
+
+      <div className="mt-5 flex justify-end gap-2">
+        <button onClick={onClose} className={buttonSecondary}>Cancel</button>
+        <button
+          disabled={busy || !qrId.trim() || !label.trim()}
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            try {
+              const r = await api.post<{ warning: string | null }>("/api/crm/qrs", {
+                qr_id: qrId.trim(),
+                label: label.trim(),
+                image_url: imageUrl.trim() || undefined,
+                purpose: purpose.trim() || undefined,
+                owner_id: owner || undefined,
+              });
+              onDone(r.warning ?? null);
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not save that QR");
+              setBusy(false);
+            }
+          }}
+          className={buttonPrimary}
+        >
+          {busy ? "Saving\u2026" : "Add it"}
+        </button>
+      </div>
+    </Modal>
   );
 }

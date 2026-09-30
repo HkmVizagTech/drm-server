@@ -15,6 +15,8 @@
 
 export type SiteKey = 'hkmv' | 'annadan';
 
+import { toAnnadan, type Address } from '../utils/address';
+
 export interface SiteConfig {
   key: SiteKey;
   label: string;
@@ -369,6 +371,17 @@ export interface OfflineDonationInput {
   wantCertificate?: boolean;
   wantPrasadam?: boolean;
   prasadamAddress?: string | null;
+  /**
+   * The address in parts, which is what the sites' receipts actually render.
+   *
+   * HKMV's donation.prasadamAddress is an OBJECT of eight fields, and DRM was
+   * sending a plain string into it - so every part its receipt template reads
+   * (doorNo, house, street, area, city, state, pincode) came back undefined
+   * and the address printed as one smear, or as "---". annadan is the same
+   * story with its flat address/city/state/pincode columns.
+   */
+  prasadamParts?: Address | null;
+  billingParts?: Address | null;
   note?: string | null;
   /** Shown on the source site's record so staff there know where it came from. */
   enteredByName?: string | null;
@@ -400,6 +413,29 @@ const ANNADAN_MODES: Record<string, string> = {
 };
 
 function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<string, unknown> {
+  // Parsed once, used by whichever branch runs.
+  const parts = input.prasadamParts ?? null;
+  const billing = input.billingParts ?? parts;
+
+  const prasadamFlat = parts ? toAnnadan(parts) : ({} as Record<string, string>);
+  const billingFlat = billing ? toAnnadan(billing) : ({} as Record<string, string>);
+  const hkmvPrasadamObject = parts
+    ? {
+        doorNo: parts.door ?? undefined,
+        house: parts.house ?? undefined,
+        street: parts.street ?? undefined,
+        area: parts.area ?? undefined,
+        city: parts.city ?? undefined,
+        state: parts.state ?? undefined,
+        pincode: parts.pincode ?? undefined,
+        country: parts.country ?? 'India',
+      }
+    : input.prasadamAddress
+    ? // Nothing structured to send, so the whole string goes in street. That
+      // still prints an address, where every-part-undefined prints "---".
+      { street: input.prasadamAddress, country: 'India' }
+    : undefined;
+
   if (site === 'annadan') {
     return {
       name: input.donorName,
@@ -413,8 +449,17 @@ function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<st
       panNumber: input.panNumber || '',
       occasion: input.sevaName || '',
       mahaprasadam: !!input.wantPrasadam,
+      // annadan keeps the address flat on the donation and its receipt reads
+      // address/city/state/pincode separately, so sending only a blob is what
+      // makes that receipt print ", ,  - ".
       prasadamAddress: input.wantPrasadam ? input.prasadamAddress || '' : '',
-      address: input.prasadamAddress || '',
+      ...(input.wantPrasadam && prasadamFlat.city ? { prasadamCity: prasadamFlat.city } : {}),
+      ...(input.wantPrasadam && prasadamFlat.state ? { prasadamState: prasadamFlat.state } : {}),
+      ...(input.wantPrasadam && prasadamFlat.pincode ? { prasadamPincode: prasadamFlat.pincode } : {}),
+      address: billingFlat.address ?? input.prasadamAddress ?? '',
+      ...(billingFlat.city ? { city: billingFlat.city } : {}),
+      ...(billingFlat.state ? { state: billingFlat.state } : {}),
+      ...(billingFlat.pincode ? { pincode: billingFlat.pincode } : {}),
       enteredByName: input.enteredByName || undefined,
     };
   }
@@ -432,7 +477,10 @@ function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<st
     panNumber: input.panNumber || undefined,
     certificate: !!input.wantCertificate,
     wantPrasadam: !!input.wantPrasadam,
-    prasadamAddress: input.wantPrasadam ? input.prasadamAddress || undefined : undefined,
+    // The object shape HKMV's schema and receipt template expect. The original
+    // wording travels alongside so nothing is lost.
+    prasadamAddress: input.wantPrasadam ? hkmvPrasadamObject : undefined,
+    prasadamAddressText: input.wantPrasadam ? input.prasadamAddress || undefined : undefined,
     manualEntryNote: input.note || undefined,
     enteredByName: input.enteredByName || undefined,
   };
@@ -623,5 +671,76 @@ export async function updatePrasadamStatus(
     applied: body?.applied === undefined ? true : body.applied === true,
     notified: body?.notified === true,
     message: typeof body?.message === 'string' ? body.message : null,
+  };
+}
+
+/* ------------------------------------------------------- profile write-back */
+
+export interface ProfileWriteBack {
+  name?: string | null;
+  email?: string | null;
+  pan?: string | null;
+  address?: Record<string, string>;
+}
+
+export interface ProfileWriteBackResult {
+  /** Whether the site actually stored it. False is a real answer, not an error. */
+  applied: boolean;
+  message: string | null;
+  /** annadan only: which donation the address was written onto. */
+  donationId?: string | null;
+}
+
+/**
+ * Push a corrected profile out to a site.
+ *
+ * WHAT EACH SITE CAN ACTUALLY ACCEPT
+ * HKMV has a donor collection, so a profile edit is a profile edit: name,
+ * email, PAN and savedAddress all land on the donor record and every future
+ * receipt and prasadam label picks them up.
+ *
+ * annadan has NO donor collection. A donor there is a phone number that
+ * several donations happen to share, and an address lives on each donation
+ * row. So there is nothing to write a profile to, and the honest thing is to
+ * update the most recent donation - which is what the next receipt reprint and
+ * any pending delivery will read - and to leave older donations exactly as the
+ * receipts that were already issued describe them.
+ *
+ * That difference is why this returns `applied` rather than throwing on a
+ * partial write: "annadan took the address but has nowhere to put a PAN" is
+ * information the screen should show, not a failure.
+ */
+export async function updateDonorProfile(
+  site: SiteKey,
+  phone: string,
+  input: ProfileWriteBack
+): Promise<ProfileWriteBackResult> {
+  const cfg = getSite(site);
+  const res = await siteFetch(cfg, `/api/internal/drm/donors/by-mobile/${encodeURIComponent(phone)}/profile`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: input.name ?? undefined,
+      email: input.email ?? undefined,
+      panNumber: input.pan ?? undefined,
+      address: input.address && Object.keys(input.address).length ? input.address : undefined,
+    }),
+  });
+
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+
+  if (!res.ok || body?.success === false) {
+    const message =
+      (typeof body?.message === 'string' && body.message) ||
+      `${siteLabelFor(site)} returned ${res.status} updating the donor profile.`;
+    const err = new Error(message) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
+
+  return {
+    applied: body?.applied === undefined ? true : body.applied === true,
+    message: typeof body?.message === 'string' ? body.message : null,
+    donationId: typeof body?.donationId === 'string' ? body.donationId : null,
   };
 }

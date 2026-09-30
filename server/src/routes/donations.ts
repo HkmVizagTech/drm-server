@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import pool from '../db/pool';
+import { normalizeAddress, type Address } from '../utils/address';
 import { authenticate, authorize } from '../middleware/auth';
 import {
   createOfflineDonation,
@@ -258,6 +259,11 @@ router.post('/offline', async (req, res) => {
       wantCertificate: !!want_certificate,
       wantPrasadam: !!want_prasadam,
       prasadamAddress: prasadam_address ? String(prasadam_address).trim() : null,
+      // The parts, so the site's receipt renders a laid-out address instead of
+      // one line. Sent as given, or taken from the donor's saved address when
+      // the form did not supply them.
+      prasadamParts: normalizeAddress(req.body?.prasadam_parts as Partial<Address>),
+      billingParts: normalizeAddress(req.body?.address_parts as Partial<Address>),
       note: note ? String(note).trim() : null,
       enteredByName,
     });

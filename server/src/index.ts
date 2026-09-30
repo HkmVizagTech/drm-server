@@ -33,7 +33,11 @@ import crmRemindersRoutes from './routes/crmReminders';
 import crmLinksRoutes from './routes/crmLinks';
 import crmPreachersRoutes from './routes/crmPreachers';
 import crmImportRoutes from './routes/crmImport';
+import crmListsRoutes from './routes/crmLists';
+import crmQrRoutes, { webhookRouter as razorpayWebhook } from './routes/crmQr';
+import profilesRoutes from './routes/profiles';
 import filesRoutes from './routes/files';
+import { denyRole, readOnlyFor } from './middleware/auth';
 import { scheduleBirthdayAnniversaryCheck } from './utils/cron';
 
 dotenv.config();
@@ -77,7 +81,18 @@ app.use(cors());
 // 25mb, not the 100kb default. The office uploads its donor workbooks through
 // this API - the real one is 8,569 rows across two sheets - and the default
 // limit would reject them with a bare 413 that reads like the server is broken.
-app.use(express.json({ limit: '25mb' }));
+app.use(
+  express.json({
+    limit: '25mb',
+    // Keep the bytes exactly as they arrived, for the Razorpay webhook.
+    // Its signature is an HMAC over the raw body, and verifying against
+    // re-serialised JSON fails on key order and number formatting alone -
+    // which looks like a wrong secret and is very hard to diagnose.
+    verify: (req, _res, buf) => {
+      (req as unknown as { rawBody?: Buffer }).rawBody = buf;
+    },
+  })
+);
 
 // Health check
 app.get('/health', (_req, res) => {
@@ -86,14 +101,22 @@ app.get('/health', (_req, res) => {
 
 // Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/people', peopleRoutes);
-app.use('/api/donations', donationsRoutes);
-app.use('/api/seva', sevaRoutes);
-app.use('/api/events', eventsRoutes);
-app.use('/api/triggers', triggersRoutes);
-app.use('/api/reports', reportsRoutes);
-app.use('/api/subscriptions', subscriptionsRoutes);
-app.use('/api/prasadam', prasadamRoutes);
+// A caller may open People and Donations to look a donor up, and may not
+// change anything there. Enforced here, ahead of the routers, rather than on
+// each handler: a guard you have to remember to add to the next endpoint is a
+// guard that will be missing from it.
+app.use('/api/people', readOnlyFor('caller'), peopleRoutes);
+// Reconciling who a donor is across DRM, HKMV and annadan. Its own prefix
+// rather than another /api/people route, because it acts on the sites as much
+// as on DRM and a caller has no business running a sweep.
+app.use('/api/profiles', denyRole('caller'), profilesRoutes);
+app.use('/api/donations', readOnlyFor('caller'), donationsRoutes);
+app.use('/api/seva', denyRole('caller'), sevaRoutes);
+app.use('/api/events', denyRole('caller'), eventsRoutes);
+app.use('/api/triggers', denyRole('caller'), triggersRoutes);
+app.use('/api/reports', denyRole('caller'), reportsRoutes);
+app.use('/api/subscriptions', denyRole('caller'), subscriptionsRoutes);
+app.use('/api/prasadam', denyRole('caller'), prasadamRoutes);
 
 // Reading an uploaded spreadsheet, for the screens that map its columns in the
 // browser. Not tied to one feature, because the point of it is that every
@@ -116,6 +139,18 @@ app.use('/api/crm', crmRemindersRoutes);
 app.use('/api/crm', crmLinksRoutes);
 app.use('/api/crm', crmPreachersRoutes);
 app.use('/api/crm', crmImportRoutes);
+app.use('/api/crm', crmListsRoutes);
+app.use('/api/crm', crmQrRoutes);
+
+// Razorpay's QR payment webhook. Mounted here, ahead of the JWT-protected
+// groups and outside /api/crm, because Razorpay has no token and because a
+// router-level authenticate() inside crmRoutes would refuse it before it ever
+// reached its handler. It verifies its own HMAC signature instead.
+// Its own prefix rather than a path under /api/webhooks: a router mounted
+// on a parent prefix runs its middleware for every path beneath it, so
+// sharing a prefix with another router is how this endpoint quietly starts
+// answering 401 or 503 to Razorpay instead of accepting a payment.
+app.use('/api/razorpay', razorpayWebhook);
 
 // Inbound webhooks from hkmsite2.0-server. Mounted outside the JWT-protected
 // groups above on purpose - these are server-to-server calls with no logged-in

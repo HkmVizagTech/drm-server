@@ -4,6 +4,8 @@ import { authenticate, authorize } from '../middleware/auth';
 import { fetchDonorSnapshot, fetchDonorPage, fetchTransactionPage, configuredSites, SITE_KEYS, SiteKey, isSiteConfigured, SITE_IMPORT_MODE } from '../services/hkmvClient';
 import { upsertDonorSnapshot, upsertTransactionBatch } from '../services/hkmvSync';
 import { groupPredicateSql, isPageGroup } from '../utils/pageGroups';
+import { normalizeAddress, addressValues, type Address } from '../utils/address';
+import { pushProfileToSites } from '../services/profileSync';
 
 const router = Router();
 router.use(authenticate);
@@ -199,28 +201,181 @@ router.post('/:id/notes', async (req, res) => {
   res.status(201).json(withAuthor.rows[0]);
 });
 
+/* --------------------------------------------------------- reading a person */
+
+// THE BUG THIS REPLACES
+// Both handlers below used to pass req.body straight into the query. An empty
+// date field arrives from a browser form as "", Postgres cannot cast "" to
+// DATE, and the whole save died with `invalid input syntax for type date: ""`.
+// Since nearly every donor has no anniversary on file, that was most saves -
+// and because the form had no error handling, the dialog simply sat there and
+// nothing happened. "Save does nothing" was this, every time.
+//
+// So: one reader, used by both, that turns a browser form into database values
+// and says plainly what is wrong rather than letting Postgres say it.
+
+/** "" and "   " mean "not given", not "the empty string". */
+const text = (v: unknown, max: number): string | null => {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s ? s.slice(0, max) : null;
+};
+
+/**
+ * A date from a form, or null.
+ *
+ * Returns undefined for something that is neither empty nor a date, so the
+ * caller can refuse it by name instead of storing a surprise.
+ */
+function formDate(v: unknown): string | null | undefined {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  // <input type="date"> always gives YYYY-MM-DD. Anything else has come from
+  // an import or somebody's hand, and is checked rather than trusted.
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return s.slice(0, 10);
+}
+
+const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+const ROLES = ['donor', 'volunteer', 'folk', 'congregation'];
+
+interface PersonBody {
+  values: unknown[];
+  error?: string;
+}
+
+/**
+ * Turn a request body into the values for people's columns, in a fixed order,
+ * or explain what is wrong with it.
+ *
+ * The order here is the order of COLUMNS below; the two are written together
+ * and must be changed together.
+ */
+function readPersonBody(b: Record<string, unknown>, partial: boolean): PersonBody {
+  const name = text(b.name, 255);
+  if (!partial && !name) return { values: [], error: 'A name is needed' };
+
+  const phoneRaw = text(b.phone, 20);
+  const phone = phoneRaw ? phoneRaw.replace(/\D/g, '').slice(-10) : null;
+  if (!partial && (!phone || phone.length !== 10)) {
+    return { values: [], error: 'A ten-digit phone number is needed' };
+  }
+
+  const email = text(b.email, 255);
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { values: [], error: 'That does not look like an email address' };
+  }
+
+  const pan = text(b.pan, 10)?.toUpperCase() ?? null;
+  if (pan && !PAN_RE.test(pan)) {
+    return { values: [], error: 'A PAN looks like ABCDE1234F' };
+  }
+
+  const dob = formDate(b.date_of_birth);
+  if (dob === undefined) return { values: [], error: "That date of birth isn't a date" };
+  const anniversary = formDate(b.anniversary_date);
+  if (anniversary === undefined) return { values: [], error: "That anniversary isn't a date" };
+
+  const roles = Array.isArray(b.roles)
+    ? [...new Set(b.roles.map(String).filter((r) => ROLES.includes(r)))]
+    : [];
+
+  // Structured address, with the free-text line kept alongside. Neither
+  // replaces the other: the line holds whatever arrived before DRM had parts,
+  // and display prefers the parts when they exist.
+  const home = normalizeAddress(b.address_parts as Partial<Address>);
+  const prasadam = normalizeAddress(b.prasadam_parts as Partial<Address>);
+
+  return {
+    values: [
+      name,
+      phone,
+      email,
+      text(b.address, 2000),
+      pan,
+      roles.length ? roles : ['donor'],
+      dob,
+      anniversary,
+      text(b.prasadam_address, 2000),
+      ...addressValues(home),
+      ...addressValues(prasadam),
+    ],
+  };
+}
+
+const COLUMNS = `name, phone, email, address, pan, roles, date_of_birth, anniversary_date, prasadam_address,
+  address_door, address_house, address_street, address_area,
+  address_city, address_state, address_pincode, address_country,
+  prasadam_door, prasadam_house, prasadam_street, prasadam_area,
+  prasadam_city, prasadam_state, prasadam_pincode, prasadam_country`;
+
+const COLUMN_LIST = COLUMNS.split(',').map((c) => c.trim()).filter(Boolean);
+
 // Create person
 router.post('/', async (req, res) => {
-  const { name, phone, email, address, pan, roles, date_of_birth, anniversary_date, prasadam_address } = req.body;
-  const result = await pool.query(
-    `INSERT INTO people (name, phone, email, address, pan, roles, date_of_birth, anniversary_date, prasadam_address)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-    [name, phone, email, address, pan, roles || [], date_of_birth, anniversary_date, prasadam_address ?? null]
-  );
-  res.status(201).json(result.rows[0]);
+  const parsed = readPersonBody(req.body ?? {}, false);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+  const placeholders = parsed.values.map((_, i) => `$${i + 1}`).join(', ');
+  try {
+    const result = await pool.query(
+      `INSERT INTO people (${COLUMNS}) VALUES (${placeholders}) RETURNING *`,
+      parsed.values
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    if ((err as { code?: string }).code === '23505') {
+      return res.status(409).json({ error: 'Somebody with that phone number is already here' });
+    }
+    console.error('people.create error:', err);
+    res.status(500).json({ error: 'Could not save that person' });
+  }
 });
 
 // Update person
 router.put('/:id', async (req, res) => {
-  const { id } = req.params;
-  const { name, phone, email, address, pan, roles, date_of_birth, anniversary_date, prasadam_address } = req.body;
-  const result = await pool.query(
-    `UPDATE people SET name=$1, phone=$2, email=$3, address=$4, pan=$5, roles=$6,
-     date_of_birth=$7, anniversary_date=$8, prasadam_address=$9, updated_at=NOW() WHERE id=$10 RETURNING *`,
-    [name, phone, email, address, pan, roles, date_of_birth, anniversary_date, prasadam_address ?? null, id]
-  );
-  if (!result.rows.length) return res.status(404).json({ error: 'Person not found' });
-  res.json(result.rows[0]);
+  const parsed = readPersonBody(req.body ?? {}, false);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+  const assignments = COLUMN_LIST.map((c, i) => `${c} = $${i + 1}`).join(', ');
+  const idIdx = parsed.values.length + 1;
+
+  try {
+    // A name typed here is a human's decision, and the screen says so
+    // afterwards even if a site later overwrites it - see name_edited_at in
+    // schema.sql and the newest-wins rule in hkmvSync.
+    const before = await pool.query('SELECT name FROM people WHERE id = $1', [req.params.id]);
+    if (!before.rows.length) return res.status(404).json({ error: 'Person not found' });
+    const renamed = text(req.body?.name, 255) !== before.rows[0].name;
+
+    const result = await pool.query(
+      `UPDATE people SET ${assignments},
+         name_edited_at = CASE WHEN $${idIdx + 1}::boolean THEN NOW() ELSE name_edited_at END,
+         profile_source = 'drm',
+         updated_at = NOW()
+       WHERE id = $${idIdx} RETURNING *`,
+      [...parsed.values, req.params.id, renamed]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Person not found' });
+
+    // Send the correction out to the sites. Deliberately not awaited: the
+    // admin has finished and should not watch a spinner while two Mongo
+    // servers are contacted, and a site being down must not fail the save that
+    // has already happened here. Outcome lands in push_status.
+    void pushProfileToSites(result.rows[0]).catch((e) =>
+      console.error('people.push error:', e)
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    if ((err as { code?: string }).code === '23505') {
+      return res.status(409).json({ error: 'Somebody else already has that phone number' });
+    }
+    console.error('people.update error:', err);
+    res.status(500).json({ error: 'Could not save that person' });
+  }
 });
 
 // Delete person

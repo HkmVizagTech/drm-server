@@ -34,6 +34,9 @@ import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { fetchAbandonedPage, isSiteConfigured, type SiteKey } from '../services/hkmvClient';
 import { buildWorkbook } from '../utils/spreadsheet';
+// The queue's filter lives with the lists it belongs to, so a change to what
+// counts as callable changes the queue and every list's count together.
+import { CALLABLE, DUE_NOW, listPredicate, loadList, maxAttempts } from './crmLists';
 
 const router = Router();
 router.use(authenticate);
@@ -288,6 +291,24 @@ function buildLeadFilters(q: Record<string, unknown>, startIdx = 1): Filters {
   const arr = (v: unknown): string[] =>
     Array.isArray(v) ? v.map(String) : String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 
+  // A calling list, by id. Expanded into the list's own conditions rather than
+  // joined, so the leads screen and the queue select exactly the same people -
+  // "See them" on a list card has to show what the caller is about to be given.
+  if (q.list) {
+    conditions.push(`l.id IN (
+      SELECT l2.id FROM leads l2, calling_lists cl
+       WHERE cl.id = $${i}::uuid
+         AND (cl.import_batch_id IS NULL OR l2.import_batch_id = cl.import_batch_id)
+         AND (cl.tag         IS NULL OR cl.tag = ANY(l2.tags))
+         AND (cl.preacher_id IS NULL OR l2.preacher_id = cl.preacher_id)
+         AND (cl.status_slug IS NULL OR l2.status = cl.status_slug)
+         AND (cl.source      IS NULL OR l2.source = cl.source)
+         AND (cl.city        IS NULL OR l2.city ILIKE '%' || cl.city || '%')
+         AND (cl.min_external_total IS NULL OR l2.external_total_donated >= cl.min_external_total)
+    )`);
+    values.push(String(q.list));
+    i++;
+  }
   if (q.status) {
     conditions.push(`l.status = ANY($${i++})`);
     values.push(arr(q.status));
@@ -699,11 +720,25 @@ router.post('/leads/:id/call', async (req, res) => {
     const connected = typeof b.connected === 'boolean' ? b.connected : d.rows[0].counts_connected;
     const duration = num(b.duration_seconds);
 
+    // Which run at which list this call belonged to. Verified against the
+    // caller rather than trusted from the body, so one caller's shift can never
+    // have another's calls counted into it. An unknown or finished session is
+    // dropped to NULL rather than refused: losing the tally is a small thing
+    // beside refusing to record a call that has already happened.
+    const sessionId = str(b.session_id, 36);
+    const session = sessionId
+      ? await client.query(
+          `SELECT id FROM calling_sessions WHERE id = $1 AND user_id = $2 AND ended_at IS NULL`,
+          [sessionId, req.user?.userId ?? null]
+        )
+      : null;
+    const activeSession = session?.rows[0]?.id ?? null;
+
     const activity = await client.query(
       `INSERT INTO lead_activities
          (lead_id, user_id, kind, direction, disposition, connected, duration_seconds,
-          source, provider_call_id, recording_url, note, occurred_at, undo_payload)
-       VALUES ($1,$2,'call',COALESCE($3,'outbound'),$4,$5,$6,COALESCE($7,'manual'),$8,$9,$10,COALESCE($11::timestamptz, NOW()),$12::jsonb)
+          source, provider_call_id, recording_url, note, occurred_at, undo_payload, session_id)
+       VALUES ($1,$2,'call',COALESCE($3,'outbound'),$4,$5,$6,COALESCE($7,'manual'),$8,$9,$10,COALESCE($11::timestamptz, NOW()),$12::jsonb,$13::uuid)
        RETURNING *`,
       [
         req.params.id,
@@ -718,8 +753,20 @@ router.post('/leads/:id/call', async (req, res) => {
         str(b.note, 2000),
         asDate(b.occurred_at),
         JSON.stringify(lead.rows[0]),
+        activeSession,
       ]
     );
+
+    if (activeSession) {
+      await client.query(
+        `UPDATE calling_sessions SET
+           calls_logged   = calls_logged + 1,
+           connected      = connected + CASE WHEN $2 THEN 1 ELSE 0 END,
+           last_active_at = NOW()
+         WHERE id = $1`,
+        [activeSession, connected === true]
+      );
+    }
 
     const nextStatus = str(b.status, 30) ?? d.rows[0].suggests_status ?? lead.rows[0].status;
     const followUp = b.next_follow_up_at === null ? null : asDate(b.next_follow_up_at);
@@ -1329,19 +1376,26 @@ async function exportLeadsCsv(req: import('express').Request, res: import('expre
 router.get('/queue', async (req, res) => {
   const limit = Math.min(100, Number(req.query.limit) || 25);
   const mine = req.query.mine !== 'false';
+  const listId = String(req.query.list_id ?? '').trim();
 
   try {
-    const settings = await pool.query(`SELECT value FROM crm_settings WHERE key = 'max_attempts'`);
-    const maxAttempts = Number(settings.rows[0]?.value ?? 6);
+    const attempts = await maxAttempts();
+
+    // A list narrows the queue without changing its order. That separation is
+    // the point: the caller chooses WHICH work, DRM still decides WHO is most
+    // urgent within it, so choosing a list can never put an overdue promise
+    // behind a stranger nobody has rung.
+    const list = listId ? await loadList(listId) : null;
+    if (listId && !list) return res.status(404).json({ error: 'That list is not available' });
+    const pred = listPredicate(list, 4);
 
     const rows = await pool.query(
       `SELECT ${LEAD_COLUMNS} ${LEAD_JOINS}
-        WHERE l.do_not_call = FALSE
-          AND COALESCE(s.is_open, TRUE) = TRUE
-          AND l.invalid_reason IS NULL
+        WHERE ${CALLABLE}
           AND l.call_attempts < $1
           AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL)
-          AND (l.next_follow_up_at IS NULL OR l.next_follow_up_at < NOW() + INTERVAL '1 day')
+          AND ${DUE_NOW}
+          ${pred.sql}
         ORDER BY
           -- Overdue promises first, then today, then never-touched, then age.
           CASE WHEN l.next_follow_up_at < NOW() THEN 0
@@ -1351,10 +1405,28 @@ router.get('/queue', async (req, res) => {
           l.next_follow_up_at ASC NULLS LAST,
           l.created_at ASC
         LIMIT $3`,
-      [maxAttempts, mine ? req.user?.userId ?? null : null, limit]
+      [attempts, mine ? req.user?.userId ?? null : null, limit, ...pred.values]
     );
 
-    res.json({ leads: rows.rows });
+    // How much of this list is left, counted the same way. Sent with the queue
+    // so the caller's progress bar is a fact about the database rather than a
+    // number the browser has been adding up since the page loaded - which is
+    // what made it vanish on every refresh.
+    const remaining = await pool.query(
+      `SELECT COUNT(*)::int AS to_call ${LEAD_JOINS}
+        WHERE ${CALLABLE}
+          AND l.call_attempts < $1
+          AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL)
+          AND ${DUE_NOW}
+          ${listPredicate(list, 3).sql}`,
+      [attempts, mine ? req.user?.userId ?? null : null, ...pred.values]
+    );
+
+    res.json({
+      leads: rows.rows,
+      to_call: remaining.rows[0].to_call,
+      list: list ? { id: list.id, name: list.name } : null,
+    });
   } catch (err) {
     console.error('crm.queue error:', err);
     res.status(500).json({ error: 'Could not load the calling queue' });
@@ -1436,6 +1508,20 @@ router.delete('/activities/:id', async (req, res) => {
                              AND $2::timestamptz + INTERVAL '2 seconds'`,
       [a.lead_id, a.created_at]
     );
+    // Take the call back off the session's tally, or the counter on the
+    // caller's screen creeps upward every time somebody fixes a slip. GREATEST
+    // guards the floor: a session whose counters were somehow already at zero
+    // must not go negative and start showing "-1 calls".
+    if (a.session_id) {
+      await client.query(
+        `UPDATE calling_sessions SET
+           calls_logged = GREATEST(0, calls_logged - 1),
+           connected    = GREATEST(0, connected - CASE WHEN $2 THEN 1 ELSE 0 END)
+         WHERE id = $1`,
+        [a.session_id, a.connected === true]
+      );
+    }
+
     await client.query(`DELETE FROM lead_activities WHERE id = $1`, [req.params.id]);
 
     await client.query('COMMIT');

@@ -628,3 +628,93 @@ export function Select({
     </div>
   );
 }
+
+
+/**
+ * A dialog.
+ *
+ * Lived privately inside the leads screen until three screens wanted one and
+ * the choice was to copy it twice more or move it here. Deliberately plain:
+ * no focus trap or portal, because every use is a short form inside the admin
+ * shell and the browser's own behaviour is adequate for that.
+ *
+ * Escape closes it, and the backdrop does not — a mis-click while filling in a
+ * list of assignees should not throw the form away.
+ */
+export function Modal({
+  title,
+  children,
+  onClose,
+  wide = false,
+}: {
+  title: string;
+  children: ReactNode;
+  onClose: () => void;
+  wide?: boolean;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-900/40 p-4 overflow-y-auto">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className={`mt-12 w-full ${wide ? "max-w-3xl" : "max-w-2xl"} rounded-xl bg-white shadow-xl`}
+      >
+        <div className="flex items-center justify-between border-b border-[var(--line-soft)] px-5 py-3.5">
+          <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="text-slate-400 hover:text-slate-600 text-xl leading-none"
+          >
+            ×
+          </button>
+        </div>
+        <div className="p-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+
+/**
+ * An on/off switch.
+ *
+ * role="switch" with aria-checked rather than a styled checkbox: a screen
+ * reader then says "on"/"off" instead of "checked", which is what the control
+ * actually means everywhere it is used here — an account that can sign in, a
+ * preacher still in the dropdowns.
+ */
+export function Toggle({
+  on,
+  onChange,
+  label,
+}: {
+  on: boolean;
+  onChange: (v: boolean) => void;
+  label?: string;
+}) {
+  return (
+    <button
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      onClick={() => onChange(!on)}
+      className={`inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+        on ? "bg-[var(--accent)]" : "bg-slate-200"
+      }`}
+    >
+      <span
+        className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+          on ? "translate-x-4.5" : "translate-x-1"
+        }`}
+      />
+    </button>
+  );
+}

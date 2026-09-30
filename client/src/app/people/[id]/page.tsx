@@ -16,6 +16,72 @@ interface Person {
   date_of_birth?: string;
   anniversary_date?: string;
   prasadam_address?: string;
+
+  // The address in parts. `address` above stays as the free-text line that
+  // arrived before DRM had these, and is what display falls back to.
+  address_door?: string; address_house?: string; address_street?: string; address_area?: string;
+  address_city?: string; address_state?: string; address_pincode?: string; address_country?: string;
+  prasadam_door?: string; prasadam_house?: string; prasadam_street?: string; prasadam_area?: string;
+  prasadam_city?: string; prasadam_state?: string; prasadam_pincode?: string; prasadam_country?: string;
+
+  // When the sites disagree about their name.
+  name_alt?: string | null;
+  name_alt_source?: string | null;
+  name_conflict_at?: string | null;
+  name_edited_at?: string | null;
+  // How the last correction travelled, and whether it reached the sites.
+  profile_source?: string | null;
+  push_status?: string | null;
+  push_error?: string | null;
+  pushed_at?: string | null;
+  source_sites?: string[];
+}
+
+/** The eight parts, as the form and the sites both hold them. */
+interface AddressParts {
+  door: string; house: string; street: string; area: string;
+  city: string; state: string; pincode: string; country: string;
+}
+
+const emptyAddress = (): AddressParts => ({
+  door: "", house: "", street: "", area: "", city: "", state: "", pincode: "", country: "India",
+});
+
+const readParts = (p: Person, prefix: "address" | "prasadam"): AddressParts => ({
+  door: (p[`${prefix}_door` as keyof Person] as string) ?? "",
+  house: (p[`${prefix}_house` as keyof Person] as string) ?? "",
+  street: (p[`${prefix}_street` as keyof Person] as string) ?? "",
+  area: (p[`${prefix}_area` as keyof Person] as string) ?? "",
+  city: (p[`${prefix}_city` as keyof Person] as string) ?? "",
+  state: (p[`${prefix}_state` as keyof Person] as string) ?? "",
+  pincode: (p[`${prefix}_pincode` as keyof Person] as string) ?? "",
+  country: (p[`${prefix}_country` as keyof Person] as string) ?? "India",
+});
+
+const hasParts = (a: AddressParts) =>
+  !!(a.door || a.house || a.street || a.area || a.city || a.state || a.pincode);
+
+/**
+ * The address on several lines, the way an Indian postal address is read.
+ *
+ * Falsy parts are dropped BEFORE joining, which is the whole difference
+ * between this and what a receipt printed before: building a line from
+ * `${street}, ${city}, ${state} - ${pincode}` unconditionally gives
+ * "123 Main St, ,  - " when only the street is known.
+ */
+function addressLines(a: AddressParts, fallback?: string | null): string[] {
+  const lines: string[] = [];
+  const building = [a.door, a.house].filter(Boolean).join(", ");
+  if (building) lines.push(building);
+  if (a.street) lines.push(a.street);
+  if (a.area) lines.push(a.area);
+  const town = [a.city, a.state].filter(Boolean).join(", ");
+  const withPin = a.pincode ? (town ? `${town} - ${a.pincode}` : a.pincode) : town;
+  if (withPin) lines.push(withPin);
+  if (a.country && a.country.toLowerCase() !== "india") lines.push(a.country);
+  if (lines.length) return lines;
+  const raw = (fallback ?? "").trim();
+  return raw ? raw.split(/\s*,\s*/).filter(Boolean) : [];
 }
 
 interface Donation {
@@ -244,15 +310,64 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
             <p className="text-gray-500">Anniversary</p>
             <p className="font-medium">{fmtDate(person.anniversary_date)}</p>
           </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
           <div>
             <p className="text-gray-500">Address</p>
-            <p className="font-medium">{person.address || "—"}</p>
+            {(() => {
+              const lines = addressLines(readParts(person, "address"), person.address);
+              return lines.length ? (
+                <div className="font-medium leading-snug">
+                  {lines.map((l, i) => (
+                    <p key={i}>{l}</p>
+                  ))}
+                </div>
+              ) : (
+                <p className="font-medium text-slate-400">Not set</p>
+              );
+            })()}
+          </div>
+          <div>
+            <p className="text-gray-500">Prasadam delivery address</p>
+            {(() => {
+              const own = readParts(person, "prasadam");
+              const lines = hasParts(own)
+                ? addressLines(own, person.prasadam_address)
+                : addressLines(readParts(person, "address"), person.prasadam_address || person.address);
+              const sameAsHome = !hasParts(own) && !person.prasadam_address;
+              return lines.length ? (
+                <div className="font-medium leading-snug">
+                  {lines.map((l, i) => (
+                    <p key={i}>{l}</p>
+                  ))}
+                  {sameAsHome && <p className="mt-0.5 text-xs text-slate-400">Same as their address</p>}
+                </div>
+              ) : (
+                <p className="font-medium text-slate-400">Not set</p>
+              );
+            })()}
           </div>
         </div>
-        <div className="mt-4 text-sm">
-          <p className="text-gray-500">Prasadam delivery address</p>
-          <p className="font-medium">{person.prasadam_address || person.address || "Not set"}</p>
-        </div>
+
+        {/* The sites disagree about this donor's name. Worth showing on the
+            record rather than only in the edit form: somebody reading the page
+            should know the spelling is contested before they read it out on a
+            call. */}
+        {person.name_alt && (
+          <div className="mt-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <strong>{person.name_alt_source === "annadan" ? "annadan" : "The donation site"}</strong> has this donor
+            as <strong>{person.name_alt}</strong>. Open Edit profile to settle which spelling is right — it will be
+            sent to both sites.
+          </div>
+        )}
+
+        {person.push_status === "failed" || person.push_status === "partial" ? (
+          <div className="mt-3 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-800">
+            The last change here did not reach {person.push_status === "partial" ? "every site" : "the sites"}.
+            {person.push_error && <span className="block text-xs mt-0.5">{person.push_error}</span>}
+          </div>
+        ) : null}
       </div>
 
       {resendNote && (
@@ -500,23 +615,39 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
   );
 }
 
-function ModalShell({ title, children, onClose, onSubmit }: {
+function ModalShell({ title, children, onClose, onSubmit, busy = false, wide = false }: {
   title: string;
   children: React.ReactNode;
   onClose: () => void;
   onSubmit: (e: FormEvent) => void;
+  busy?: boolean;
+  wide?: boolean;
 }) {
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <form onSubmit={onSubmit} className="bg-white rounded-2xl p-8 w-full max-w-md space-y-4">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4">
+      <form
+        onSubmit={onSubmit}
+        className={`my-8 w-full ${wide ? "max-w-3xl" : "max-w-xl"} space-y-4 rounded-2xl bg-white p-8`}
+      >
         <h2 className="text-xl font-bold">{title}</h2>
         {children}
         <div className="flex gap-3 pt-2">
-          <button type="button" onClick={onClose} className="flex-1 px-4 py-2.5 border border-slate-300 rounded-lg hover:bg-gray-50">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="flex-1 rounded-lg border border-slate-300 px-4 py-2.5 hover:bg-gray-50 disabled:opacity-50"
+          >
             Cancel
           </button>
-          <button type="submit" className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg hover:bg-[var(--accent-hover)]">
-            Save
+          {/* Disabled while saving: the old form let a second click fire a
+              second request, and a slow network turned one edit into two. */}
+          <button
+            type="submit"
+            disabled={busy}
+            className="flex-1 rounded-lg bg-[var(--accent)] px-4 py-2.5 text-white hover:bg-[var(--accent-hover)] disabled:opacity-60"
+          >
+            {busy ? "Saving…" : "Save"}
           </button>
         </div>
       </form>
@@ -526,57 +657,183 @@ function ModalShell({ title, children, onClose, onSubmit }: {
 
 const inputClass = "w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--accent)]";
 
+/**
+ * Editing a donor.
+ *
+ * WHAT WAS WRONG WITH THE OLD ONE
+ *   - Save did nothing. It posted whatever the form held, and a blank date
+ *     field posts "" - which Postgres cannot cast to DATE, so the request
+ *     500'd. There was no try/catch, so the dialog simply sat there and the
+ *     donor was never saved. That is now fixed on both sides: the server
+ *     reads "" as "not given", and this shows what went wrong when something
+ *     does.
+ *   - Two unlabelled date boxes. They were date of birth and anniversary, but
+ *     nothing on screen said so, so nobody could know which was which.
+ *   - One address box, where both sites hold eight fields. A receipt printed
+ *     from DRM had nothing to lay out.
+ */
 function EditProfileModal({ person, onClose, onSaved }: { person: Person; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState({
     name: person.name,
     phone: person.phone,
     email: person.email || "",
-    address: person.address || "",
     pan: person.pan || "",
     date_of_birth: person.date_of_birth?.slice(0, 10) || "",
     anniversary_date: person.anniversary_date?.slice(0, 10) || "",
-    prasadam_address: person.prasadam_address || "",
   });
+  const [home, setHome] = useState<AddressParts>(() => readParts(person, "address"));
+  const [prasadam, setPrasadam] = useState<AddressParts>(() => readParts(person, "prasadam"));
+  // Kept and sent back untouched. It holds whatever arrived before DRM had
+  // parts, and throwing it away on the first save would lose addresses nobody
+  // has got round to splitting yet.
+  const [legacy] = useState(person.address || "");
+  const [legacyPrasadam] = useState(person.prasadam_address || "");
+  const [samePrasadam, setSamePrasadam] = useState(!hasParts(readParts(person, "prasadam")));
   const [roles, setRoles] = useState<string[]>(person.roles);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const roleOptions = ["donor", "volunteer", "folk", "congregation"];
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    await apiClient.put(`/api/people/${person.id}`, { ...form, roles });
-    onSaved();
-    onClose();
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await apiClient.put(`/api/people/${person.id}`, {
+        ...form,
+        address: legacy,
+        prasadam_address: legacyPrasadam,
+        address_parts: home,
+        prasadam_parts: samePrasadam ? emptyAddress() : prasadam,
+        roles,
+      });
+      onSaved();
+      onClose();
+    } catch (err) {
+      // Shown, not swallowed. The server's wording is the useful one - it
+      // names the field, and a message like "A PAN looks like ABCDE1234F" is
+      // worth more than "could not save".
+      setError(err instanceof Error ? err.message : "Could not save that");
+      setSaving(false);
+    }
   };
 
-  return (
-    <ModalShell title="Edit Profile" onClose={onClose} onSubmit={submit}>
-      <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Full name" className={inputClass} />
-      <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="Phone" className={inputClass} />
-      <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="Email" className={inputClass} />
-      <input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} placeholder="Address" className={inputClass} />
-      <input value={form.pan} onChange={(e) => setForm({ ...form, pan: e.target.value })} placeholder="PAN" className={inputClass} />
-      <textarea
-        value={form.prasadam_address}
-        onChange={(e) => setForm({ ...form, prasadam_address: e.target.value })}
-        placeholder="Prasadam delivery address (leave blank to use home address)"
-        className={inputClass}
-        rows={2}
+  const field = (
+    label: string,
+    value: string,
+    onChange: (v: string) => void,
+    opts: { type?: string; placeholder?: string; wide?: boolean; hint?: string } = {}
+  ) => (
+    <label className={`block text-xs text-slate-500 ${opts.wide ? "sm:col-span-2" : ""}`}>
+      {label}
+      <input
+        type={opts.type ?? "text"}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={opts.placeholder}
+        className={`${inputClass} mt-1`}
       />
-      <div className="grid grid-cols-2 gap-3">
-        <input type="date" value={form.date_of_birth} onChange={(e) => setForm({ ...form, date_of_birth: e.target.value })} className={inputClass} />
-        <input type="date" value={form.anniversary_date} onChange={(e) => setForm({ ...form, anniversary_date: e.target.value })} className={inputClass} />
+      {opts.hint && <span className="mt-0.5 block text-[11px] text-slate-400">{opts.hint}</span>}
+    </label>
+  );
+
+  const addressGrid = (a: AddressParts, set: (v: AddressParts) => void, idPrefix: string) => (
+    <div key={idPrefix} className="grid gap-3 sm:grid-cols-2">
+      {field("Door / flat no.", a.door, (v) => set({ ...a, door: v }), { placeholder: "e.g. 12-3-45" })}
+      {field("Building or house name", a.house, (v) => set({ ...a, house: v }))}
+      {field("Street", a.street, (v) => set({ ...a, street: v }), { wide: true })}
+      {field("Area or locality", a.area, (v) => set({ ...a, area: v }), { wide: true })}
+      {field("City", a.city, (v) => set({ ...a, city: v }), { placeholder: "Visakhapatnam" })}
+      {field("State", a.state, (v) => set({ ...a, state: v }), { placeholder: "Andhra Pradesh" })}
+      {field("Pincode", a.pincode, (v) => set({ ...a, pincode: v.replace(/\D/g, "").slice(0, 6) }), {
+        placeholder: "530017",
+      })}
+      {field("Country", a.country, (v) => set({ ...a, country: v }))}
+    </div>
+  );
+
+  return (
+    <ModalShell title="Edit profile" onClose={onClose} onSubmit={submit} busy={saving}>
+      {error && (
+        <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+      )}
+
+      {person.name_alt && (
+        <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          {person.name_alt_source === "annadan" ? "annadan" : "The site"} calls them{" "}
+          <strong>{person.name_alt}</strong>. Saving here settles it and sends your spelling to both sites.
+        </p>
+      )}
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        {field("Full name", form.name, (v) => setForm({ ...form, name: v }), { wide: true })}
+        {field("Phone", form.phone, (v) => setForm({ ...form, phone: v }), {
+          hint: "The number everything is matched on, here and on both sites.",
+        })}
+        {field("Email", form.email, (v) => setForm({ ...form, email: v }), { type: "email" })}
+        {field("PAN", form.pan, (v) => setForm({ ...form, pan: v.toUpperCase() }), {
+          placeholder: "ABCDE1234F",
+          hint: "Needed for an 80G certificate.",
+        })}
+        {field("Date of birth", form.date_of_birth, (v) => setForm({ ...form, date_of_birth: v }), {
+          type: "date",
+        })}
+        {field("Wedding anniversary", form.anniversary_date, (v) => setForm({ ...form, anniversary_date: v }), {
+          type: "date",
+          hint: "Both are optional, and are what the greeting reminders use.",
+        })}
       </div>
-      <div className="flex gap-2 flex-wrap">
+
+      <div className="pt-2">
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Address</p>
+        {addressGrid(home, setHome, "home")}
+        {legacy && !hasParts(home) && (
+          <p className="mt-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+            Currently on file as one line: &ldquo;{legacy}&rdquo;. Split it into the boxes above and the receipts
+            will lay it out properly.
+          </p>
+        )}
+      </div>
+
+      <div className="pt-2">
+        <label className="flex items-center gap-2 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            checked={samePrasadam}
+            onChange={(e) => setSamePrasadam(e.target.checked)}
+            className="rounded border-slate-300"
+          />
+          Send prasadam to the same address
+        </label>
+        {!samePrasadam && (
+          <div className="mt-3">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+              Prasadam delivery address
+            </p>
+            {addressGrid(prasadam, setPrasadam, "prasadam")}
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-2 pt-2">
         {roleOptions.map((role) => (
           <button
             key={role}
             type="button"
             onClick={() => setRoles((prev) => (prev.includes(role) ? prev.filter((r) => r !== role) : [...prev, role]))}
-            className={`px-3 py-1.5 rounded-full text-sm ${roles.includes(role) ? "bg-[var(--accent)] text-white" : "bg-gray-100 text-gray-700"}`}
+            className={`rounded-full px-3 py-1.5 text-sm capitalize ${
+              roles.includes(role) ? "bg-[var(--accent)] text-white" : "bg-slate-100 text-slate-700"
+            }`}
           >
             {role}
           </button>
         ))}
       </div>
+
+      <p className="text-xs text-slate-500">
+        Saving also sends the correction to the donation sites this donor is known to.
+      </p>
     </ModalShell>
   );
 }

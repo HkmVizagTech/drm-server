@@ -19,7 +19,22 @@ export type TriggerType =
   | 'prasadam_delivered';
 export type TriggerStatus = 'pending' | 'sent' | 'failed';
 
-export type UserRole = 'admin' | 'accountant' | 'volunteer_coordinator';
+// 'caller' is the phone team: the Calling section, plus donor records they can
+// read but not change. Everything else — donations, prasadam, settings, making
+// other accounts — is closed to them, in the nav and at the route.
+export type UserRole = 'admin' | 'accountant' | 'volunteer_coordinator' | 'caller';
+
+/** Who may create, edit and deactivate accounts. */
+export const ADMIN_ROLES: UserRole[] = ['admin'];
+
+/**
+ * Roles that may only read the donor records, never write them.
+ *
+ * A caller needs the donor's history in front of them — you cannot ring someone
+ * about their giving without seeing it — but a phone shift is not the place to
+ * edit a donation. So the screens open and the writes are refused.
+ */
+export const READ_ONLY_ROLES: UserRole[] = ['caller'];
 
 export type SubscriptionFrequency = 'monthly' | 'quarterly' | 'yearly';
 export type SubscriptionStatus = 'active' | 'paused' | 'cancelled';

@@ -45,7 +45,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const res = await apiClient.post<{ token: string; user: User }>("/api/auth/login", { email, password });
     localStorage.setItem("token", res.token);
     setUser(res.user);
-    router.push("/dashboard");
+    // Land people where their work is. A caller has no use for the dashboard -
+    // it is donation totals and fulfilment, none of which they can act on -
+    // and starting them on an empty screen they cannot use is a poor first
+    // impression of a tool they will open every morning.
+    router.push(res.user.role === "caller" ? "/calling/start" : "/dashboard");
   };
 
   const logout = () => {
