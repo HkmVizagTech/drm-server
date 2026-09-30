@@ -31,7 +31,7 @@
 
 import { Router } from 'express';
 import pool from '../db/pool';
-import { authenticate } from '../middleware/auth';
+import { authenticate, authorize } from '../middleware/auth';
 import { fetchAbandonedPage, isSiteConfigured, type SiteKey } from '../services/hkmvClient';
 import { buildWorkbook } from '../utils/spreadsheet';
 // The queue's filter lives with the lists it belongs to, so a change to what
@@ -495,7 +495,7 @@ router.get('/leads/:id', async (req, res) => {
     const lead = await pool.query(`SELECT ${LEAD_COLUMNS} ${LEAD_JOINS} WHERE l.id = $1`, [req.params.id]);
     if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
 
-    const [activities, donations] = await Promise.all([
+    const [activities, donations, reminders] = await Promise.all([
       pool.query(
         `SELECT a.*, u.name AS user_name, d.label AS disposition_label
            FROM lead_activities a
@@ -512,9 +512,34 @@ router.get('/leads/:id', async (req, res) => {
             [lead.rows[0].person_id]
           )
         : Promise.resolve({ rows: [] as Record<string, unknown>[] }),
+      // This lead's promises. Sent with the lead rather than fetched
+      // separately, because a reminder is part of what somebody needs to see
+      // before ringing - "he already said Govardhan Puja" changes the call -
+      // and a second request would mean the page could show the history while
+      // still not knowing about the promise.
+      //
+      // Open ones first, in the order they fall due; everything settled after,
+      // most recent first, so the record of what was promised and what came of
+      // it stays readable without a filter.
+      pool.query(
+        `SELECT r.*, u.name AS assigned_to_name
+           FROM lead_reminders r
+           LEFT JOIN users u ON r.assigned_to = u.id
+          WHERE r.lead_id = $1
+          ORDER BY (r.status = 'open') DESC,
+                   CASE WHEN r.status = 'open' THEN r.due_at END ASC,
+                   r.due_at DESC
+          LIMIT 50`,
+        [req.params.id]
+      ),
     ]);
 
-    res.json({ lead: lead.rows[0], activities: activities.rows, donations: donations.rows });
+    res.json({
+      lead: lead.rows[0],
+      activities: activities.rows,
+      donations: donations.rows,
+      reminders: reminders.rows,
+    });
   } catch (err) {
     console.error('crm.getLead error:', err);
     res.status(500).json({ error: 'Could not load that lead' });
@@ -749,6 +774,86 @@ function promiseLeadTimes(v: unknown): number[] {
     .filter((n) => Number.isFinite(n) && n >= 0 && n <= 43200);
   return [...new Set(cleaned)].sort((a, b) => b - a);
 }
+
+/**
+ * GET /leads/:id/removal - what deleting this lead would take with it.
+ *
+ * Asked before the confirmation is shown, so the warning names real numbers
+ * rather than describing the idea of deletion. "This removes 4 calls and 1
+ * promise" is a decision; "this cannot be undone" is a shrug.
+ */
+router.get('/leads/:id/removal', authorize('admin'), async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT l.name, l.phone,
+              (SELECT COUNT(*)::int FROM lead_activities a WHERE a.lead_id = l.id) AS activities,
+              (SELECT COUNT(*)::int FROM lead_reminders  m WHERE m.lead_id = l.id) AS reminders,
+              (SELECT COUNT(*)::int FROM qr_shares       s WHERE s.lead_id = l.id) AS qr_shares,
+              (SELECT COUNT(*)::int FROM qr_shares       s
+                WHERE s.lead_id = l.id AND s.matched_at IS NOT NULL) AS qr_paid,
+              l.converted_donation_id IS NOT NULL AS has_donation
+         FROM leads l WHERE l.id = $1`,
+      [req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Lead not found' });
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('crm.removalPreview error:', err);
+    res.status(500).json({ error: 'Could not check that lead' });
+  }
+});
+
+/**
+ * DELETE /leads/:id - remove a lead entirely.
+ *
+ * WHY THIS EXISTS AND WHY IT IS ADMIN-ONLY
+ * Mostly for what put it here: a test lead somebody added to try the QR flow,
+ * and the odd genuine mistake - a wrong number typed in, the same person
+ * entered twice under two spellings. Callers do not get it. A caller who
+ * cannot reach somebody should mark them so, not make them disappear; a lead
+ * deleted to tidy a queue is a donor the temple then has no record of ever
+ * having spoken to.
+ *
+ * WHAT GOES AND WHAT STAYS
+ * The lead, its calls and notes, and its reminders go - those describe this
+ * lead and mean nothing without it.
+ *
+ * Donations do NOT. They belong to the person and to the site that receipted
+ * them, they are synced from there, and DRM deleting one would put it back on
+ * the next sync while the 80G receipt stayed issued regardless.
+ *
+ * A QR share stays too, with its link to this lead cleared. A share that was
+ * paid is a record of money arriving, and money that arrived must never
+ * disappear because somebody tidied up the lead beside it. It stays on the QR
+ * payments screen, still attached to the person if it ever was.
+ */
+router.delete('/leads/:id', authorize('admin'), async (req, res) => {
+  try {
+    const r = await pool.query(
+      `DELETE FROM leads WHERE id = $1 RETURNING id, name, phone, converted_donation_id`,
+      [req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Lead not found' });
+
+    // The only trace left once the rows are gone. Worth having: "who deleted
+    // the lead for this number" is a question somebody eventually asks, and
+    // the activity log that would have answered it is deleted along with it.
+    console.log(
+      `crm.deleteLead: ${req.user?.userId ?? 'unknown'} removed lead ${r.rows[0].phone}` +
+        `${r.rows[0].name ? ` (${r.rows[0].name})` : ''}`
+    );
+
+    res.json({
+      removed: true,
+      phone: r.rows[0].phone,
+      // Said back plainly, because it is the part people assume went too.
+      donation_kept: !!r.rows[0].converted_donation_id,
+    });
+  } catch (err) {
+    console.error('crm.deleteLead error:', err);
+    res.status(500).json({ error: 'Could not remove that lead' });
+  }
+});
 
 router.put('/leads/:id', async (req, res) => {
   const b = req.body ?? {};

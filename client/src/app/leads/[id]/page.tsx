@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import { currency, number, relativeDate, shortDate } from "@/lib/format";
 import { AlertPicker, Badge, buttonPrimary, buttonSecondary, Card, CardHeader, EmptyState, inputClass, Modal, PageHeader, Select } from "@/components/ui";
 import { SendLink } from "@/components/send-link";
@@ -103,12 +104,18 @@ interface Donation {
 export default function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  // Removing a lead is an admin's job, so the link is not shown to anyone
+  // else. The server refuses it either way; this is so a caller is not
+  // offered a button that answers 403.
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
 
   const [lead, setLead] = useState<Lead | null>(null);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [donations, setDonations] = useState<Donation[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [remindOpen, setRemindOpen] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const [config, setConfig] = useState<{
     statuses: { slug: string; label: string }[];
     users: { id: string; name: string }[];
@@ -469,8 +476,30 @@ export default function LeadDetailPage() {
               </ul>
             )}
           </Card>
+
+          {/* ---------------------------------------------------- removal */}
+          {/* Last thing in the column, quiet, and not a button: a plain link
+              that opens something that tells you what you are about to lose.
+              Mostly used for a test lead somebody added to try the QR flow,
+              or a wrong number typed in — not for tidying a queue. */}
+          {isAdmin && (
+            <button
+              onClick={() => setRemoving(true)}
+              className="w-full rounded-lg px-3 py-2 text-xs text-slate-400 hover:bg-red-50 hover:text-red-700"
+            >
+              Remove this lead
+            </button>
+          )}
         </div>
       </div>
+
+      {removing && (
+        <RemoveLeadDialog
+          leadId={lead.id}
+          onClose={() => setRemoving(false)}
+          onDone={() => router.push("/leads")}
+        />
+      )}
 
       {remindOpen && (
         <AddReminderDialog
@@ -651,6 +680,128 @@ function AddReminderDialog({
           className={buttonPrimary}
         >
           {busy ? "Saving…" : "Add it"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Confirming the removal of a lead.
+ *
+ * WHY IT ASKS THE SERVER FIRST
+ * "This cannot be undone" is a sentence people click past. The counts are
+ * fetched before the question is put, so what somebody reads is four calls and
+ * a promise they are about to lose, or nothing at all - which is the ordinary
+ * case for a test lead, and worth saying, because knowing there is nothing to
+ * lose is as useful as knowing there is.
+ */
+function RemoveLeadDialog({
+  leadId,
+  onClose,
+  onDone,
+}: {
+  leadId: string;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [what, setWhat] = useState<{
+    name: string | null;
+    phone: string;
+    activities: number;
+    reminders: number;
+    qr_shares: number;
+    qr_paid: number;
+    has_donation: boolean;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiClient
+      .get<typeof what>(`/api/crm/leads/${leadId}/removal`)
+      .then(setWhat)
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not check that lead"));
+  }, [leadId]);
+
+  const nothing =
+    what && !what.activities && !what.reminders && !what.qr_shares && !what.has_donation;
+
+  return (
+    <Modal title="Remove this lead?" onClose={onClose}>
+      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+
+      {!what ? (
+        <div className="h-20 animate-pulse rounded-lg bg-slate-100" />
+      ) : (
+        <>
+          <p className="text-sm text-slate-700">
+            {what.name || what.phone} will be removed from DRM. This cannot be undone.
+          </p>
+
+          {nothing ? (
+            <p className="mt-2 text-sm text-slate-500">
+              Nothing has been recorded against them yet, so there is nothing else to lose.
+            </p>
+          ) : (
+            <ul className="mt-3 space-y-1 text-sm text-slate-600">
+              {what.activities > 0 && (
+                <li>
+                  {number(what.activities)} call{what.activities === 1 ? "" : "s"} and note
+                  {what.activities === 1 ? "" : "s"} go with them
+                </li>
+              )}
+              {what.reminders > 0 && (
+                <li>
+                  {number(what.reminders)} promise{what.reminders === 1 ? "" : "s"} they made will stop
+                  reminding anybody
+                </li>
+              )}
+            </ul>
+          )}
+
+          {/* What survives, said plainly. People assume deletion takes the
+              money with it, and the money is the part that must not move. */}
+          {(what.has_donation || what.qr_paid > 0 || what.qr_shares > 0) && (
+            <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2.5 text-xs text-slate-600">
+              <p className="font-medium text-slate-700">What stays</p>
+              {what.has_donation && (
+                <p className="mt-0.5">
+                  Their donation and its receipt are untouched — those belong to the site that issued them.
+                </p>
+              )}
+              {what.qr_shares > 0 && (
+                <p className="mt-0.5">
+                  {number(what.qr_shares)} QR{what.qr_shares === 1 ? "" : "s"} shared with them
+                  {what.qr_paid > 0 ? `, ${number(what.qr_paid)} of which was paid,` : ""} stay on the QR
+                  payments screen. Money that arrived is never removed.
+                </p>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      <div className="mt-5 flex justify-end gap-2">
+        <button onClick={onClose} className={buttonSecondary}>
+          Keep them
+        </button>
+        <button
+          disabled={busy || !what}
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            try {
+              await apiClient.delete(`/api/crm/leads/${leadId}`);
+              onDone();
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not remove that lead");
+              setBusy(false);
+            }
+          }}
+          className="rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+        >
+          {busy ? "Removing…" : "Remove"}
         </button>
       </div>
     </Modal>

@@ -14,6 +14,9 @@ import http from 'http';
 import pool from '../src/db/pool';
 import { generateToken } from '../src/middleware/auth';
 import crmRoutes from '../src/routes/crm';
+// Mounted the same way index.ts does it: several routers on one prefix, so a
+// path this test calls resolves exactly as it would in production.
+import crmRemindersRoutes from '../src/routes/crmReminders';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
 if (!/_test$/.test(dbName)) {
@@ -27,13 +30,14 @@ if (!/_test$/.test(dbName)) {
 const app = express();
 app.use(express.json());
 app.use('/api/crm', crmRoutes);
+app.use('/api/crm', crmRemindersRoutes);
 
 let base = '';
 const ADMIN = '11111111-1111-1111-1111-111111111111';
 const ANA = '22222222-2222-2222-2222-222222222222';
 
 function call(
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'DELETE',
   path: string,
   body?: unknown,
   as = { userId: ADMIN, role: 'admin' }
@@ -217,6 +221,88 @@ async function main() {
   });
   check('the call was logged', r.status === 201, r.body);
   check('and the reminder took the temple default', String(r.body.reminder?.lead_times) === '4320,1440', r.body.reminder?.lead_times);
+
+  console.log("\n7. a reminder raised from the lead's own page");
+  await reset();
+  const lp = await pool.query(
+    `INSERT INTO leads (phone, name, assigned_to) VALUES ('9555000000','Sita',$1::uuid) RETURNING id`,
+    [ANA]
+  );
+  r = await call('POST', `/api/crm/leads/${lp.rows[0].id}/reminders`, {
+    title: 'Said she would give at Kartik',
+    occasion: 'Kartik',
+    due_at: inDays(40),
+    expected_amount: 5100,
+    lead_times: [10080, 1440],
+  });
+  check('201', r.status === 201, r.body);
+  check('the alerts chosen are kept', String(r.body.lead_times) === '10080,1440', r.body.lead_times);
+  check(
+    'it falls to whoever the lead belongs to when nobody is named',
+    r.body.assigned_to === ANA,
+    r.body.assigned_to
+  );
+
+  r = await call('GET', `/api/crm/leads/${lp.rows[0].id}`);
+  check('and the lead page is sent it with the lead', r.body.reminders?.length === 1, r.body.reminders);
+  check('with the caller name resolved', r.body.reminders[0].assigned_to_name === 'Ana', r.body.reminders[0]);
+
+  // Settled ones sort below open ones, which is what keeps the card readable.
+  await pool.query(
+    `INSERT INTO lead_reminders (lead_id, title, due_at, status)
+     VALUES ($1::uuid,'An old one', NOW() - INTERVAL '30 days', 'done')`,
+    [lp.rows[0].id]
+  );
+  r = await call('GET', `/api/crm/leads/${lp.rows[0].id}`);
+  check('open first, settled after', r.body.reminders[0].status === 'open', r.body.reminders.map((x: any) => x.status));
+
+  console.log('\n8. removing a lead');
+  await reset();
+  const del = await pool.query(
+    `INSERT INTO leads (phone, name) VALUES ('9666000000','Test Me') RETURNING id`
+  );
+  await pool.query(
+    `INSERT INTO lead_activities (lead_id, kind, note) VALUES ($1::uuid,'note','a note')`,
+    [del.rows[0].id]
+  );
+  await pool.query(
+    `INSERT INTO lead_reminders (lead_id, title, due_at) VALUES ($1::uuid,'a promise', NOW() + INTERVAL '2 days')`,
+    [del.rows[0].id]
+  );
+  await pool.query(
+    `INSERT INTO razorpay_qrs (id, qr_id, label, active)
+     VALUES ('55555555-5555-5555-5555-555555555555','qr_DELTEST001','Test QR',TRUE)`
+  );
+  await pool.query(
+    `INSERT INTO qr_shares (qr_id, lead_id, shared_by, phone, channel, matched_payment_id, matched_amount, matched_at)
+     VALUES ('55555555-5555-5555-5555-555555555555',$1::uuid,NULL,'9666000000','whatsapp','pay_DEL1',1000,NOW())`,
+    [del.rows[0].id]
+  );
+
+  r = await call('GET', `/api/crm/leads/${del.rows[0].id}/removal`);
+  check('the preview counts what goes', r.body.activities === 1 && r.body.reminders === 1, r.body);
+  check('and what was shared', r.body.qr_shares === 1 && r.body.qr_paid === 1, r.body);
+
+  r = await call('DELETE', `/api/crm/leads/${del.rows[0].id}`, undefined, { userId: ANA, role: 'caller' });
+  check('a caller may not remove a lead', r.status === 403, r.status);
+
+  r = await call('DELETE', `/api/crm/leads/${del.rows[0].id}`);
+  check('an admin may', r.status === 200, r.body);
+  check('the lead is gone', (await pool.query(`SELECT COUNT(*)::int c FROM leads`)).rows[0].c === 0);
+  check(
+    'its calls and notes went with it',
+    (await pool.query(`SELECT COUNT(*)::int c FROM lead_activities`)).rows[0].c === 0
+  );
+  check(
+    'and its reminders',
+    (await pool.query(`SELECT COUNT(*)::int c FROM lead_reminders`)).rows[0].c === 0
+  );
+  const share = await pool.query(`SELECT * FROM qr_shares`);
+  check('but the paid QR share survives', share.rows.length === 1, share.rows.length);
+  check('with its lead link cleared, not its money', share.rows[0].lead_id === null && Number(share.rows[0].matched_amount) === 1000, share.rows[0]);
+
+  r = await call('DELETE', `/api/crm/leads/${del.rows[0].id}`);
+  check('removing it twice is a 404, not a crash', r.status === 404, r.status);
 
   console.log(failures ? `\n${failures} FAILURE(S)\n` : '\nall green\n');
   server.close();
