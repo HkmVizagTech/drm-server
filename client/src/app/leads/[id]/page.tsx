@@ -15,8 +15,9 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { currency, number, relativeDate, shortDate } from "@/lib/format";
-import { Badge, buttonPrimary, buttonSecondary, Card, CardHeader, EmptyState, inputClass, PageHeader, Select } from "@/components/ui";
+import { AlertPicker, Badge, buttonPrimary, buttonSecondary, Card, CardHeader, EmptyState, inputClass, Modal, PageHeader, Select } from "@/components/ui";
 import { SendLink } from "@/components/send-link";
+import { ALERT_OPTIONS, DEFAULT_ALERTS, alertSummary, cleanAlerts } from "@/lib/reminders";
 
 interface Preacher { id: string; code: string; name: string | null }
 
@@ -75,6 +76,20 @@ interface Activity {
   user_name: string | null;
 }
 
+/** A promise this donor made, at a moment they named. */
+interface Reminder {
+  id: string;
+  title: string;
+  note: string | null;
+  occasion: string | null;
+  due_at: string;
+  expected_amount: string | null;
+  lead_times: number[];
+  status: string;
+  snooze_count: number;
+  assigned_to_name: string | null;
+}
+
 interface Donation {
   id: string;
   amount: string;
@@ -92,7 +107,13 @@ export default function LeadDetailPage() {
   const [lead, setLead] = useState<Lead | null>(null);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [donations, setDonations] = useState<Donation[]>([]);
-  const [config, setConfig] = useState<{ statuses: { slug: string; label: string }[]; users: { id: string; name: string }[] } | null>(null);
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [remindOpen, setRemindOpen] = useState(false);
+  const [config, setConfig] = useState<{
+    statuses: { slug: string; label: string }[];
+    users: { id: string; name: string }[];
+    settings?: Record<string, unknown>;
+  } | null>(null);
   const [preachers, setPreachers] = useState<Preacher[]>([]);
   const [donatedOpen, setDonatedOpen] = useState(false);
   const [donatedAmount, setDonatedAmount] = useState("");
@@ -103,10 +124,16 @@ export default function LeadDetailPage() {
 
   const load = useCallback(async () => {
     try {
-      const d = await apiClient.get<{ lead: Lead; activities: Activity[]; donations: Donation[] }>(`/api/crm/leads/${id}`);
+      const d = await apiClient.get<{
+        lead: Lead;
+        activities: Activity[];
+        donations: Donation[];
+        reminders: Reminder[];
+      }>(`/api/crm/leads/${id}`);
       setLead(d.lead);
       setActivities(d.activities);
       setDonations(d.donations);
+      setReminders(d.reminders ?? []);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load that lead");
@@ -444,7 +471,189 @@ export default function LeadDetailPage() {
           </Card>
         </div>
       </div>
+
+      {remindOpen && (
+        <AddReminderDialog
+          leadId={lead.id}
+          leadName={lead.name}
+          expectedAmount={lead.expected_amount}
+          users={config?.users ?? []}
+          defaultAlerts={
+            Array.isArray(config?.settings?.reminder_lead_times)
+              ? cleanAlerts((config.settings.reminder_lead_times as number[]).map(Number))
+              : DEFAULT_ALERTS
+          }
+          onClose={() => setRemindOpen(false)}
+          onDone={async () => {
+            setRemindOpen(false);
+            await load();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Recording a promise from the lead's own page.
+ *
+ * The third place a reminder can be raised, after the calling screen and the
+ * follow-ups board - and the one that was missing. It is the case where
+ * somebody is reading a donor's history rather than working a queue: a donor
+ * rang back, or a preacher passed word along, and the person with the
+ * information is not on a call.
+ *
+ * Deliberately the same fields and the same alert chips as the other two. A
+ * reminder that means something different depending on which screen raised it
+ * would be worse than not having this at all.
+ */
+function AddReminderDialog({
+  leadId,
+  leadName,
+  expectedAmount,
+  users,
+  defaultAlerts,
+  onClose,
+  onDone,
+}: {
+  leadId: string;
+  leadName: string | null;
+  expectedAmount: string | null;
+  users: { id: string; name: string }[];
+  defaultAlerts: number[];
+  onClose: () => void;
+  onDone: () => Promise<void> | void;
+}) {
+  const [title, setTitle] = useState("");
+  const [occasion, setOccasion] = useState("");
+  const [note, setNote] = useState("");
+  const [amount, setAmount] = useState(expectedAmount ? String(Math.round(Number(expectedAmount))) : "");
+  const [assignee, setAssignee] = useState("");
+  const [when, setWhen] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 7);
+    d.setHours(10, 0, 0, 0);
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  });
+  const [alerts, setAlerts] = useState<number[]>(defaultAlerts);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <Modal title={leadName ? `A promise from ${leadName}` : "Add a reminder"} onClose={onClose}>
+      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+
+      <p className="mb-4 text-sm text-slate-600">
+        For a moment this donor named — a festival, a salary date, after a family event. It will reach whoever is to
+        ring them, before the day arrives.
+      </p>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="text-xs text-slate-500 sm:col-span-2">
+          What to remember
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Said he would give at Govardhan Puja"
+            className={`${inputClass} mt-1 w-full`}
+          />
+        </label>
+
+        <label className="text-xs text-slate-500">
+          When <span className="text-red-600">*</span>
+          <input
+            type="datetime-local"
+            value={when}
+            onChange={(e) => setWhen(e.target.value)}
+            className={`${inputClass} mt-1 w-full`}
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          How much they said
+          <input
+            value={amount}
+            onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
+            placeholder="Optional"
+            inputMode="numeric"
+            className={`${inputClass} mt-1 w-full tabular-nums`}
+          />
+        </label>
+
+        <label className="text-xs text-slate-500">
+          The occasion they named
+          <input
+            value={occasion}
+            onChange={(e) => setOccasion(e.target.value)}
+            placeholder="e.g. Govardhan Puja"
+            className={`${inputClass} mt-1 w-full`}
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          Who should ring them
+          <Select
+            value={assignee}
+            onChange={setAssignee}
+            className="mt-1 w-full"
+            options={[
+              { value: "", label: "Whoever this lead belongs to" },
+              ...users.map((u) => ({ value: u.id, label: u.name })),
+            ]}
+          />
+        </label>
+
+        <label className="text-xs text-slate-500 sm:col-span-2">
+          What they said, in their words
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            rows={2}
+            placeholder="Read back on the call — worth the extra few seconds now."
+            className={`${inputClass} mt-1 w-full`}
+          />
+        </label>
+
+        <div className="text-xs text-slate-500 sm:col-span-2">
+          Warn me
+          <div className="mt-1.5">
+            <AlertPicker value={alerts} onChange={setAlerts} options={ALERT_OPTIONS} />
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-5 flex justify-end gap-2">
+        <button onClick={onClose} className={buttonSecondary}>
+          Cancel
+        </button>
+        <button
+          disabled={busy || !when}
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            try {
+              await apiClient.post(`/api/crm/leads/${leadId}/reminders`, {
+                // The server needs a title; if nobody typed one, the occasion
+                // or a plain statement of the fact is better than refusing to
+                // save a promise somebody just heard.
+                title: title.trim() || (occasion.trim() ? `Said they would give at ${occasion.trim()}` : "Said they would donate"),
+                occasion: occasion.trim() || undefined,
+                note: note.trim() || undefined,
+                due_at: new Date(when).toISOString(),
+                expected_amount: amount ? Number(amount) : undefined,
+                assigned_to: assignee || undefined,
+                lead_times: alerts,
+              });
+              await onDone();
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not save that reminder");
+              setBusy(false);
+            }
+          }}
+          className={buttonPrimary}
+        >
+          {busy ? "Saving…" : "Add it"}
+        </button>
+      </div>
+    </Modal>
   );
 }
 

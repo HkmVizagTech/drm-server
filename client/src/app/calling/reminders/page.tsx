@@ -17,6 +17,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency, number, shortDate } from "@/lib/format";
+import { alertSummary } from "@/lib/reminders";
 import { Badge, Card, CardHeader, EmptyState, PageHeader, buttonPrimary, buttonSecondary } from "@/components/ui";
 
 interface Reminder {
@@ -74,13 +75,7 @@ function whenText(iso: string): string {
   return `${shortDate(iso)} at ${clock}`;
 }
 
-// The alert schedule, said the way a person would.
-function leadTimeText(mins: number[]): string {
-  if (!mins?.length) return "no alerts";
-  const one = (m: number) =>
-    m === 0 ? "at the time" : m < 60 ? `${m} min` : m < 1440 ? `${Math.round(m / 60)} hr` : `${Math.round(m / 1440)} day`;
-  return `alerts ${mins.map(one).join(", ")} before`;
-}
+
 
 export default function RemindersPage() {
   const [board, setBoard] = useState<Board | null>(null);
@@ -220,7 +215,7 @@ export default function RemindersPage() {
                             <span className={b.tone === "danger" ? "text-red-700 font-medium" : b.tone === "warn" ? "text-amber-700 font-medium" : ""}>
                               {whenText(r.due_at)}
                             </span>
-                            <span className="text-slate-400"> · {leadTimeText(r.lead_times)}</span>
+                            <span className="text-slate-400"> · {`alerts ${alertSummary(r.lead_times)}`}</span>
                             {r.assigned_to_name && <span className="text-slate-400"> · {r.assigned_to_name}</span>}
                             {r.donation_count ? (
                               <span className="text-slate-400"> · has given {currency(Number(r.total_donated ?? 0))}</span>

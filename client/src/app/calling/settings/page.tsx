@@ -22,7 +22,8 @@
 import { Fragment, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiClient } from "@/lib/api";
-import { Badge, buttonPrimary, buttonSecondary, Card, CardHeader, inputClass, PageHeader, Select, TableShell, Td, Th, Toggle, Modal } from "@/components/ui";
+import { AlertPicker, Badge, buttonPrimary, buttonSecondary, Card, CardHeader, inputClass, PageHeader, Select, TableShell, Td, Th, Toggle, Modal } from "@/components/ui";
+import { ALERT_OPTIONS, DEFAULT_ALERTS, cleanAlerts } from "@/lib/reminders";
 import { apiClient as api } from "@/lib/api";
 import { currency, number } from "@/lib/format";
 import { toBase64 } from "@/lib/spreadsheet";
@@ -93,6 +94,7 @@ const SETTING_COPY: Record<string, { label: string; help: string; kind: "number"
 const TABS = [
   { key: "queue", label: "Queue" },
   { key: "stages", label: "Stages & outcomes" },
+  { key: "reminders", label: "Reminders" },
   { key: "preachers", label: "Preachers" },
   { key: "qr", label: "QR codes" },
   { key: "links", label: "Links" },
@@ -358,6 +360,51 @@ function CallingSettings() {
         </Card>
 
           </>
+        )}
+        {tab === "reminders" && (
+          <Card>
+            <CardHeader
+              title="When reminders reach you"
+              subtitle="A reminder is a promise a donor made at a moment they chose. These are the warnings raised before that moment arrives."
+            />
+
+            <p className="text-sm text-slate-600">
+              The temple&apos;s default, used whenever a caller does not pick their own. A caller can always change
+              it on the call, and on a promise recorded from the follow-ups screen.
+            </p>
+            <div className="mt-3">
+              <AlertPicker
+                value={
+                  Array.isArray(config?.settings.reminder_lead_times)
+                    ? (config.settings.reminder_lead_times as number[])
+                    : DEFAULT_ALERTS
+                }
+                onChange={(next) => void saveSetting("reminder_lead_times", cleanAlerts(next))}
+                options={ALERT_OPTIONS}
+                emptyWarning="With nothing chosen, a reminder booked without its own alerts will never warn anybody."
+              />
+            </div>
+
+            <div className="mt-5 flex flex-wrap items-start justify-between gap-4 border-t border-slate-100 pt-4">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-slate-900">Desktop notifications</p>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Raises a notification outside the browser when a reminder falls due, so a caller who has DRM in a
+                  background tab still hears about it. Each caller&apos;s browser asks their permission the first
+                  time.
+                </p>
+              </div>
+              <button
+                disabled={saving === "reminder_desktop_alerts"}
+                onClick={() =>
+                  void saveSetting("reminder_desktop_alerts", !config?.settings.reminder_desktop_alerts)
+                }
+                className={config?.settings.reminder_desktop_alerts ? buttonPrimary : buttonSecondary}
+              >
+                {config?.settings.reminder_desktop_alerts ? "On" : "Off"}
+              </button>
+            </div>
+          </Card>
         )}
         {tab === "preachers" && <PreachersSection />}
         {tab === "qr" && <QrSection />}
@@ -1040,14 +1087,29 @@ function AddQrDialog({
   const [site, setSite] = useState("hkmv");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The picture, as a file. Held until the QR row exists, because the upload
+  // endpoint stores it against a QR id - so this dialog does the two steps in
+  // order rather than making the admin come back and do the second one.
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  // The object URL is revoked when it is replaced or the dialog closes;
+  // without this every re-pick leaks a blob for the life of the tab.
+  useEffect(() => {
+    if (!file) return setPreview(null);
+    const url = URL.createObjectURL(file);
+    setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
 
   return (
     <Modal title="Add a Razorpay QR" onClose={onClose}>
       {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
 
       <p className="mb-4 text-sm text-slate-600">
-        In Razorpay, open the QR you want to use and copy its id and image link. DRM never creates or changes a QR
-        — it only needs to recognise payments that come through one.
+        In Razorpay, open the QR you want to use and copy its id. DRM never creates or changes a QR — it only needs
+        to recognise payments that come through one.
       </p>
 
       <div className="grid gap-3 sm:grid-cols-2">
@@ -1069,18 +1131,66 @@ function AddQrDialog({
             className={`${inputClass} mt-1 w-full font-mono`}
           />
         </label>
-        <label className="text-xs text-slate-500 sm:col-span-2">
-          QR image link
-          <input
-            value={imageUrl}
-            onChange={(e) => setImageUrl(e.target.value.trim())}
-            placeholder="https://…"
-            className={`${inputClass} mt-1 w-full`}
-          />
-          <span className="mt-0.5 block text-[11px] text-slate-400">
-            This is what the donor receives on WhatsApp, so it has to be a link anyone can open.
-          </span>
-        </label>
+        {/* The picture. A file first, because that is what the temple
+            actually has - the designed QR with the seva name and the deity on
+            it, sitting in someone's Downloads folder. Pasting a link is still
+            there underneath for the case where the image already lives
+            somewhere public. */}
+        <div className="text-xs text-slate-500 sm:col-span-2">
+          The QR picture
+          <div className="mt-1 flex items-center gap-3">
+            {preview ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={preview}
+                alt=""
+                className="h-16 w-16 rounded-lg border border-[var(--line)] object-contain bg-white"
+              />
+            ) : (
+              <div className="grid h-16 w-16 place-items-center rounded-lg border border-dashed border-[var(--line)] text-slate-300">
+                <svg viewBox="0 0 24 24" className="h-6 w-6" fill="currentColor" aria-hidden>
+                  <path d="M3 11h8V3H3v8zm2-6h4v4H5V5zM3 21h8v-8H3v8zm2-6h4v4H5v-4zM13 3v8h8V3h-8zm6 6h-4V5h4v4zM13 13h2v2h-2zM17 13h2v2h-2zM15 15h2v2h-2zM13 17h2v2h-2zM17 17h2v2h-2zM19 15h2v2h-2zM19 19h2v2h-2z" />
+                </svg>
+              </div>
+            )}
+            <div className="min-w-0">
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (!f) return;
+                  if (f.size > 2 * 1024 * 1024) {
+                    setError("That image is over 2 MB. A QR image should be far smaller.");
+                    return;
+                  }
+                  setError(null);
+                  setFile(f);
+                }}
+              />
+              <button type="button" onClick={() => fileRef.current?.click()} className={buttonSecondary}>
+                {file ? "Choose a different picture" : "Choose a picture"}
+              </button>
+              <p className="mt-1 truncate text-[11px] text-slate-400">
+                {file ? file.name : "PNG or JPG, under 2 MB — this is what the donor receives on WhatsApp."}
+              </p>
+            </div>
+          </div>
+
+          {!file && (
+            <label className="mt-2 block text-xs text-slate-500">
+              Or paste a link to an image that is already online
+              <input
+                value={imageUrl}
+                onChange={(e) => setImageUrl(e.target.value.trim())}
+                placeholder="https://…"
+                className={`${inputClass} mt-1 w-full`}
+              />
+            </label>
+          )}
+        </div>
         <label className="text-xs text-slate-500">
           What it is for
           <input
@@ -1129,7 +1239,7 @@ function AddQrDialog({
             setBusy(true);
             setError(null);
             try {
-              const r = await api.post<{ warning: string | null }>("/api/crm/qrs", {
+              const r = await api.post<{ warning: string | null; qr: { id: string } }>("/api/crm/qrs", {
                 qr_id: qrId.trim(),
                 label: label.trim(),
                 image_url: imageUrl.trim() || undefined,
@@ -1137,7 +1247,25 @@ function AddQrDialog({
                 owner_id: owner || undefined,
                 receipt_site: site || undefined,
               });
-              onDone(r.warning ?? null);
+
+              // The picture, second, against the row that now exists. A failure
+              // here is reported as its own thing rather than rolled back: the
+              // QR is saved and usable, and losing the id and the label because
+              // an image would not upload would be the worse outcome.
+              let warning = r.warning ?? null;
+              if (file) {
+                try {
+                  await api.post(`/api/crm/qrs/${r.qr.id}/image`, {
+                    filename: file.name,
+                    base64: toBase64(await file.arrayBuffer()),
+                  });
+                } catch (e) {
+                  warning = `${label.trim()} is saved, but the picture did not upload: ${
+                    e instanceof Error ? e.message : "unknown error"
+                  } You can try again with Upload on its row.`;
+                }
+              }
+              onDone(warning);
             } catch (e) {
               setError(e instanceof Error ? e.message : "Could not save that QR");
               setBusy(false);

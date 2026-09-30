@@ -138,11 +138,21 @@ async function reconcileConversions(force = false): Promise<number> {
 // all four before it can show anything.
 router.get('/config', async (_req, res) => {
   try {
-    const [statuses, dispositions, settings, users] = await Promise.all([
+    const [statuses, dispositions, settings, users, batches, preachers] = await Promise.all([
       pool.query(`SELECT * FROM crm_statuses WHERE active ORDER BY sort_order, label`),
       pool.query(`SELECT * FROM crm_dispositions WHERE active ORDER BY sort_order, label`),
       pool.query(`SELECT key, value FROM crm_settings`),
       pool.query(`SELECT id, name, email, role FROM users ORDER BY name`),
+      // The sheets, for anywhere a screen wants to narrow to one of them.
+      // Only those that actually produced leads: a draft nobody committed is
+      // an entry in the upload history, not something to filter a board by.
+      pool.query(
+        `SELECT id, filename, sheet_name, label, leads_added, created_at
+           FROM lead_import_batches
+          WHERE leads_added > 0
+          ORDER BY created_at DESC LIMIT 60`
+      ),
+      pool.query(`SELECT id, code, name FROM preachers WHERE active ORDER BY code`),
     ]);
 
     res.json({
@@ -150,6 +160,8 @@ router.get('/config', async (_req, res) => {
       dispositions: dispositions.rows,
       settings: Object.fromEntries(settings.rows.map((r) => [r.key, r.value])),
       users: users.rows,
+      batches: batches.rows,
+      preachers: preachers.rows,
     });
   } catch (err) {
     console.error('crm.config error:', err);
@@ -333,6 +345,17 @@ function buildLeadFilters(q: Record<string, unknown>, startIdx = 1): Filters {
   if (q.tag) {
     conditions.push(`l.tags && $${i++}`);
     values.push(arr(q.tag));
+  }
+  // The sheet a lead came in on. The office thinks in workbooks - "the
+  // Janmashtami file", "last year's general donations" - and until now the only
+  // way to see one sheet's leads was to build a calling list for it, which is a
+  // heavier thing than someone asking which of the March people owe a callback.
+  if (q.batch) {
+    if (String(q.batch) === 'none') conditions.push(`l.import_batch_id IS NULL`);
+    else {
+      conditions.push(`l.import_batch_id = ANY($${i++}::uuid[])`);
+      values.push(arr(q.batch));
+    }
   }
   // "Ring everyone Jagat Tarini Mataji brought in" is one of the commonest
   // ways the office builds a list, so the preacher is a first-class filter.
@@ -591,6 +614,142 @@ router.post('/leads', async (req, res) => {
   }
 });
 
+/**
+ * POST /promises - somebody rang US and said they would give.
+ *
+ * WHY THIS IS NOT JUST "ADD A LEAD"
+ * The temple's phone rings and a donor says "I will give ten thousand on
+ * Govardhan Puja". Until now that took three separate acts in DRM - find or
+ * create the lead, set a callback on it, raise a reminder - each on a
+ * different screen, which in practice meant it was written on paper and
+ * remembered by whoever answered. A promise made to the temple deserves better
+ * than somebody's memory.
+ *
+ * So this is one call that does all three:
+ *   - finds the lead by phone, or creates one
+ *   - books the callback so the follow-ups board shows it
+ *   - raises a reminder, which is what actually alerts somebody in time
+ *
+ * The reminder is the point. A follow-up date is a working note; a reminder
+ * carries lead times and raises an alert before the moment passes, which is
+ * the difference between ringing on the morning they said and ringing a week
+ * later to apologise.
+ */
+router.post('/promises', async (req, res) => {
+  const b = req.body ?? {};
+  const due = b.due_at ? new Date(String(b.due_at)) : null;
+  if (!due || Number.isNaN(due.getTime())) {
+    return res.status(400).json({ error: 'When did they say they would give?' });
+  }
+  if (!normalizePhone(b.phone)) {
+    return res.status(400).json({ error: 'A phone number is required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // upsertLead runs on the pool, not on this client, so the lead is NOT
+    // inside the transaction below. That is deliberate and it is the lesser
+    // evil: it owns the matching rules - phone normalisation, the link to an
+    // existing person - and a second copy of those rules here would drift from
+    // the first within a month. The cost is that a failure further down leaves
+    // a lead with no reminder on it, which is a lead somebody can still ring;
+    // the reverse, a reminder pointing at no lead, would be a broken row.
+    const { lead, created } = await upsertLead(
+      {
+        phone: b.phone,
+        name: b.name,
+        city: b.city,
+        email: b.email,
+        source_detail: str(b.source_detail, 255) ?? 'Rang the temple',
+        expected_amount: b.expected_amount ?? null,
+        assigned_to: b.assigned_to ?? req.user?.userId ?? null,
+      },
+      req.user?.userId ?? null
+    );
+
+    const title =
+      str(b.title, 200) ??
+      (b.expected_amount
+        ? `Promised ₹${Number(b.expected_amount).toLocaleString('en-IN')}`
+        : 'Said they would donate');
+
+    // The callback, so it appears on the follow-ups board alongside everything
+    // else owed. Only moved earlier, never later: if this lead is already due a
+    // call before this date, that earlier promise still stands.
+    await client.query(
+      `UPDATE leads SET
+         next_follow_up_at = CASE
+           WHEN next_follow_up_at IS NULL OR next_follow_up_at > $2::timestamptz
+           THEN $2::timestamptz ELSE next_follow_up_at END,
+         follow_up_note  = COALESCE($3, follow_up_note),
+         expected_amount = COALESCE($4::numeric, expected_amount),
+         updated_at = NOW()
+       WHERE id = $1`,
+      [lead.id, due.toISOString(), title, b.expected_amount ?? null]
+    );
+
+    const reminder = await client.query(
+      `INSERT INTO lead_reminders
+         (lead_id, title, note, occasion, due_at, expected_amount, lead_times, assigned_to, created_by)
+       VALUES ($1::uuid,$2,$3,$4,$5::timestamptz,$6::numeric,$7::int[],
+               COALESCE($8::uuid, (SELECT assigned_to FROM leads WHERE id = $1::uuid)), $9::uuid)
+       RETURNING *`,
+      [
+        lead.id,
+        title,
+        str(b.note, 2000),
+        str(b.occasion, 120),
+        due.toISOString(),
+        b.expected_amount ?? null,
+        promiseLeadTimes(b.lead_times),
+        str(b.assigned_to, 36),
+        req.user?.userId ?? null,
+      ]
+    );
+
+    await client.query(
+      `INSERT INTO lead_activities (lead_id, user_id, kind, to_value, note)
+       VALUES ($1::uuid,$2::uuid,'reminder',$3,$4)`,
+      [
+        lead.id,
+        req.user?.userId ?? null,
+        due.toISOString(),
+        `They rang and said they would give. ${title}${b.occasion ? ` — ${String(b.occasion)}` : ''}`,
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({ lead, created, reminder: reminder.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    const status = (err as { status?: number }).status ?? 500;
+    if (status === 400) return res.status(400).json({ error: (err as Error).message });
+    console.error('crm.promise error:', err);
+    res.status(500).json({ error: 'Could not record that promise' });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * Minutes-before values for a promise's alerts.
+ *
+ * Kept identical to the reminders route's own rule rather than shared through
+ * an import, because the two files would otherwise have to import each other:
+ * up to thirty days ahead, de-duplicated, largest first. The default here is
+ * wider than a reminder booked mid-call - two days, one day, one hour - because
+ * a promise made weeks out needs warning long before the morning it falls due.
+ */
+function promiseLeadTimes(v: unknown): number[] {
+  const raw = Array.isArray(v) && v.length ? v : [2880, 1440, 60];
+  const cleaned = raw
+    .map((n) => Math.round(Number(n)))
+    .filter((n) => Number.isFinite(n) && n >= 0 && n <= 43200);
+  return [...new Set(cleaned)].sort((a, b) => b - a);
+}
+
 router.put('/leads/:id', async (req, res) => {
   const b = req.body ?? {};
   try {
@@ -838,7 +997,17 @@ router.post('/leads/:id/call', async (req, res) => {
           `INSERT INTO lead_reminders
              (lead_id, title, note, occasion, due_at, expected_amount, lead_times, assigned_to, created_by)
            VALUES ($1,$2,$3,$4,$5::timestamptz,$6::numeric,
-                   COALESCE($7::int[], '{1440,60,15}'),
+                   -- What the caller chose, else the temple's own default from
+                   -- Calling setup, else the built-in. Read here rather than in
+                   -- code so changing the setting changes the next reminder,
+                   -- with nothing to redeploy and no copy of the default left
+                   -- behind in a second place to disagree with it.
+                   COALESCE(
+                     $7::int[],
+                     (SELECT ARRAY(SELECT jsonb_array_elements_text(value)::int)
+                        FROM crm_settings WHERE key = 'reminder_lead_times'),
+                     '{1440,60,15}'
+                   ),
                    COALESCE((SELECT assigned_to FROM leads WHERE id = $1), $8::uuid), $8::uuid)
            RETURNING *`,
           [

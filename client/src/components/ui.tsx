@@ -718,3 +718,59 @@ export function Toggle({
     </button>
   );
 }
+
+/**
+ * Choosing when to be warned about a reminder.
+ *
+ * Chips rather than a multi-select, because the answer is almost always two or
+ * three of a short list and a caller is doing this mid-call with a donor
+ * waiting. Each one is a real toggle button with aria-pressed, so it announces
+ * as on or off rather than as an unlabelled control.
+ *
+ * The empty case says out loud what silence means. A reminder with no alerts
+ * is a row on a board nobody will look at in time, and that is worth one line
+ * of warning rather than letting somebody discover it a month later.
+ */
+export function AlertPicker({
+  value,
+  onChange,
+  options,
+  emptyWarning = "With nothing ticked this is only a date on a board — nothing will alert you.",
+}: {
+  value: number[];
+  onChange: (next: number[]) => void;
+  options: { minutes: number; label: string }[];
+  emptyWarning?: string;
+}) {
+  return (
+    <div>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((o) => {
+          const on = value.includes(o.minutes);
+          return (
+            <button
+              key={o.minutes}
+              type="button"
+              aria-pressed={on}
+              onClick={() =>
+                onChange(
+                  on
+                    ? value.filter((m) => m !== o.minutes)
+                    : [...value, o.minutes].sort((a, b) => b - a)
+                )
+              }
+              className={`rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+                on
+                  ? "border-[var(--accent)] bg-[var(--accent-wash)] font-medium text-[var(--accent)]"
+                  : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+              }`}
+            >
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+      {!value.length && <p className="mt-1 text-[11px] text-amber-700">{emptyWarning}</p>}
+    </div>
+  );
+}

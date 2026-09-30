@@ -33,7 +33,8 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { currency, dueLabel, number, relativeDate } from "@/lib/format";
-import { Badge, Card, EmptyState, PageHeader, buttonPrimary, buttonSecondary, inputClass } from "@/components/ui";
+import { AlertPicker, Badge, Card, EmptyState, PageHeader, buttonPrimary, buttonSecondary, inputClass } from "@/components/ui";
+import { ALERT_OPTIONS, DEFAULT_ALERTS, cleanAlerts } from "@/lib/reminders";
 import { SendLink } from "@/components/send-link";
 import { SendQr } from "@/components/send-qr";
 import { useCallingAlerts } from "@/components/calling-alerts";
@@ -175,6 +176,10 @@ function CallingQueue() {
   const [remOccasion, setRemOccasion] = useState("");
   const [remWhen, setRemWhen] = useState("");
   const [remAmount, setRemAmount] = useState("");
+  // When to be warned. Defaults to the temple's own setting once config loads;
+  // until then, the wider default, so a caller who opens the reminder box in
+  // the first second after a refresh does not silently get something narrower.
+  const [remAlerts, setRemAlerts] = useState<number[]>(DEFAULT_ALERTS);
 
   // What was just logged, so a misclick is one keystroke away from being fixed
   // rather than a trip to the lead page.
@@ -209,7 +214,7 @@ function CallingQueue() {
         apiClient.get<{ leads: Lead[]; to_call: number; list: { id: string; name: string } | null }>(
           `/api/crm/queue?${qs}`
         ),
-        apiClient.get<{ dispositions: Disposition[] }>("/api/crm/config"),
+        apiClient.get<{ dispositions: Disposition[]; settings?: Record<string, unknown> }>("/api/crm/config"),
         // The run's own tally, so reopening the page mid-shift shows the real
         // total rather than restarting the count at zero.
         apiClient
@@ -223,6 +228,12 @@ function CallingQueue() {
       setToCall(q.to_call);
       setListName(q.list?.name ?? null);
       setDispositions(cfg.dispositions);
+      // The temple's default alert times, so a promise taken mid-call warns
+      // whoever set it up expects - not a default baked into this screen.
+      const fromSettings = cfg.settings?.reminder_lead_times;
+      if (Array.isArray(fromSettings) && fromSettings.length) {
+        setRemAlerts(cleanAlerts(fromSettings.map(Number)));
+      }
       if (sess.session && sess.session.id === sessionId) {
         setDone(sess.session.calls_logged);
         setConnectedCount(sess.session.connected);
@@ -269,6 +280,7 @@ function CallingQueue() {
                 occasion: remOccasion.trim() || undefined,
                 due_at: new Date(remWhen).toISOString(),
                 expected_amount: remAmount ? Number(remAmount) : undefined,
+                lead_times: remAlerts,
                 note: note.trim() || undefined,
               }
             : undefined,
@@ -290,7 +302,7 @@ function CallingQueue() {
         setSaving(false);
       }
     },
-    [lead, saving, sessionId, note, duration, followUp, customDate, remWhen, remOccasion, remAmount]
+    [lead, saving, sessionId, note, duration, followUp, customDate, remWhen, remOccasion, remAmount, remAlerts]
   );
 
   // Refill when the loaded batch runs low, so the caller never hits a spinner
@@ -878,7 +890,7 @@ function CallingQueue() {
                     </button>
                   </div>
                   <p className="text-[11px] text-slate-500 mt-0.5">
-                    You&apos;ll be alerted a day before, an hour before and fifteen minutes before.
+                    A promise the donor made at a moment they chose. Pick when it should reach you.
                   </p>
                   <div className="mt-2 grid gap-2 sm:grid-cols-3">
                     <input
@@ -899,6 +911,14 @@ function CallingQueue() {
                       onChange={(e) => setRemAmount(e.target.value)}
                       placeholder="₹ they said"
                       className={`${inputClass} w-full text-sm`}
+                    />
+                  </div>
+                  <div className="mt-2">
+                    <AlertPicker
+                      value={remAlerts}
+                      onChange={setRemAlerts}
+                      options={ALERT_OPTIONS}
+                      emptyWarning="Nothing ticked means nothing will alert you — it will only sit on the reminders board."
                     />
                   </div>
                   <div className="mt-2 flex flex-wrap gap-1.5">
