@@ -102,6 +102,27 @@ async function reconcileConversions(force = false): Promise<number> {
   if (!force && Date.now() - lastReconcileAt < 60_000) return 0;
   lastReconcileAt = Date.now();
 
+  // STEP ONE, AND THE REASON THIS USED TO DO NOTHING FOR NEW DONORS
+  //
+  // The match below needs the lead to be linked to a person. That link is made
+  // when the lead is created - but only if the person already existed then. A
+  // lead typed in from a slip of paper, or imported from a sheet, is usually
+  // somebody DRM has never seen, so person_id is NULL.
+  //
+  // Then they give. The site receipts it, the sync brings the donation across
+  // and creates the person - and the lead is still sitting there with a NULL,
+  // matching nothing, for ever. The caller rang them, they gave, and every
+  // report said the call achieved nothing.
+  //
+  // So the link is repaired first, on the one identity DRM trusts everywhere
+  // else: the last ten digits of the phone number.
+  await pool.query(
+    `UPDATE leads l SET person_id = p.id, updated_at = NOW()
+       FROM people p
+      WHERE l.person_id IS NULL
+        AND right(regexp_replace(p.phone, '\\D', '', 'g'), 10) = l.phone`
+  );
+
   const result = await pool.query(
     `WITH first_gift AS (
        SELECT DISTINCT ON (l.id)
@@ -122,11 +143,31 @@ async function reconcileConversions(force = false): Promise<number> {
        -- caller asserting it, because the two are not equally good evidence
        -- and the reports say which.
        converted_via         = 'auto',
+       -- The chase stops the moment the money lands. Leaving the callback set
+       -- put a donor who had already given back on the follow-ups board the
+       -- next morning as somebody the temple still owed a call.
+       next_follow_up_at     = NULL,
+       follow_up_note        = NULL,
+       awaiting_qr_at        = NULL,
        updated_at            = NOW()
      FROM first_gift f
      WHERE l.id = f.lead_id
      RETURNING l.id`
   );
+
+  // And the promises they had made are kept. Closed rather than deleted, so
+  // what was promised and what came of it both stay on the record - and so
+  // nobody is alerted at nine tomorrow morning to chase a donation that
+  // arrived yesterday.
+  if (result.rowCount) {
+    await pool.query(
+      `UPDATE lead_reminders
+          SET status = 'done', completed_at = NOW(), updated_at = NOW()
+        WHERE status = 'open' AND lead_id = ANY($1::uuid[])`,
+      [result.rows.map((r) => r.id)]
+    );
+  }
+
   return result.rowCount ?? 0;
 }
 
@@ -1062,6 +1103,16 @@ router.post('/leads/:id/call', async (req, res) => {
              ELSE NULL END,
          follow_up_note    = CASE WHEN $4::timestamptz IS NOT NULL THEN $6 ELSE follow_up_note END,
          do_not_call       = do_not_call OR $7::boolean,
+         -- "They said they would pay by the QR I just sent."
+         --
+         -- Set here, on the call, because that is the only moment anybody
+         -- knows it. It is what lets the screen that attributes an unmatched
+         -- payment show the handful of people who actually said they would
+         -- pay, instead of everyone who was ever sent a QR. Cleared the
+         -- moment money arrives, so the list is always "still waiting".
+         awaiting_qr_at    = CASE
+             WHEN $10::boolean THEN NOW()
+             ELSE awaiting_qr_at END,
          updated_at        = NOW()
        WHERE id = $8 RETURNING *`,
       [
@@ -1074,8 +1125,25 @@ router.post('/leads/:id/call', async (req, res) => {
         disposition === 'do_not_call',
         req.params.id,
         retryAfterDays,
+        disposition === 'will_pay_qr',
       ]
     );
+
+    // And the share they were sent is marked as awaited too, which is what the
+    // matcher reads. The most recent unmatched one for this lead: a caller
+    // choosing this outcome has just pressed send, and marking an older share
+    // they never mentioned would put weight on the wrong row.
+    if (disposition === 'will_pay_qr') {
+      await client.query(
+        `UPDATE qr_shares SET awaiting_payment_at = NOW()
+          WHERE id = (
+            SELECT id FROM qr_shares
+             WHERE lead_id = $1::uuid AND matched_at IS NULL
+             ORDER BY created_at DESC LIMIT 1
+          )`,
+        [req.params.id]
+      );
+    }
 
     if (nextStatus !== lead.rows[0].status) {
       await client.query(
@@ -2099,6 +2167,250 @@ router.post('/leads/sync-abandoned', async (req, res) => {
   } catch (err) {
     console.error('crm.syncAbandoned error:', err);
     res.status(500).json({ error: 'Could not fetch unfinished donations from the sites' });
+  }
+});
+
+/* ------------------------------------------------- unfinished donations */
+
+interface AbandonedRow {
+  externalId: string;
+  name: string | null;
+  phone: string;
+  email: string | null;
+  amount: number | null;
+  purpose: string | null;
+  sourcePage: string | null;
+  status: string;
+  attemptedAt: string;
+  sourceSite: string;
+  attempts: number;
+  /** Filled in below, from DRM's own records rather than the sites'. */
+  gave_anyway?: boolean;
+  lead_id?: string | null;
+  lead_status?: string | null;
+}
+
+/**
+ * Everything both sites know about donations that were started and never
+ * finished, with what DRM knows laid over the top.
+ *
+ * WHY DRM HAS TO BE THE ONE TO JUDGE
+ * A site hands over its own failed attempts and will do so for ever - it has
+ * no way of knowing the person retried successfully on the OTHER site, or gave
+ * by cash a week later. DRM holds the completed donations from both, so it is
+ * the only place that can say "this one is settled, leave them alone". Ringing
+ * a donor to chase money they have already given is the single worst thing
+ * this feature could do.
+ *
+ * Cached briefly. Each call is up to twenty HTTP round trips to two Mongo
+ * sites, and a caller flicking between screens should not set that off again.
+ */
+const abandonedCache = new Map<string, { at: number; rows: AbandonedRow[]; siteErrors: { site: string; error: string }[] }>();
+const ABANDONED_TTL = 3 * 60_000;
+
+async function loadAbandoned(
+  days: number,
+  minMinutes: number,
+  sites: SiteKey[],
+  fresh = false
+): Promise<{ rows: AbandonedRow[]; siteErrors: { site: string; error: string }[]; cached: boolean }> {
+  const key = `${days}:${minMinutes}:${sites.join(',')}`;
+  const hit = abandonedCache.get(key);
+  if (!fresh && hit && Date.now() - hit.at < ABANDONED_TTL) {
+    return { rows: hit.rows, siteErrors: hit.siteErrors, cached: true };
+  }
+
+  const since = new Date(Date.now() - days * 86_400_000).toISOString();
+  const found: Record<string, unknown>[] = [];
+  const siteErrors: { site: string; error: string }[] = [];
+
+  for (const site of sites) {
+    if (!isSiteConfigured(site)) continue;
+    try {
+      for (let page = 1; page <= 10; page++) {
+        const result = await fetchAbandonedPage(site, { page, limit: 200, since, minMinutes });
+        for (const d of result.donations) {
+          const phone = normalizePhone(d.mobile);
+          if (isDialable(phone)) found.push({ ...d, phone });
+        }
+        if (!result.hasMore) break;
+      }
+    } catch (err) {
+      siteErrors.push({ site, error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  }
+
+  // One row per person. Somebody who tried three times is one phone call, and
+  // the attempt worth mentioning on it is the most recent.
+  const byPhone = new Map<string, AbandonedRow>();
+  for (const d of found) {
+    const phone = String(d.phone);
+    const seen = byPhone.get(phone);
+    const row: AbandonedRow = {
+      externalId: String(d.externalId ?? ''),
+      name: (d.name as string) ?? null,
+      phone,
+      email: (d.email as string) ?? null,
+      amount: d.amount === null || d.amount === undefined ? null : Number(d.amount),
+      purpose: (d.purpose as string) ?? null,
+      sourcePage: (d.sourcePage as string) ?? null,
+      status: String(d.status ?? ''),
+      attemptedAt: String(d.attemptedAt ?? ''),
+      sourceSite: String(d.sourceSite ?? ''),
+      attempts: 1,
+    };
+    if (!seen) byPhone.set(phone, row);
+    else if (new Date(row.attemptedAt) > new Date(seen.attemptedAt)) {
+      byPhone.set(phone, { ...row, attempts: seen.attempts + 1 });
+    } else {
+      seen.attempts += 1;
+    }
+  }
+
+  const rows = [...byPhone.values()];
+  if (rows.length) {
+    const phones = rows.map((r) => r.phone);
+
+    const [gave, leads] = await Promise.all([
+      pool.query(
+        `SELECT right(regexp_replace(p.phone,'\\D','','g'), 10) AS phone10, MAX(d.created_at) AS last_gift
+           FROM people p JOIN donations d ON d.person_id = p.id
+          WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = ANY($1::text[])
+          GROUP BY 1`,
+        [phones]
+      ),
+      pool.query(`SELECT id, phone, status FROM leads WHERE phone = ANY($1::text[])`, [phones]),
+    ]);
+
+    const lastGift = new Map(gave.rows.map((r) => [r.phone10, new Date(r.last_gift)]));
+    const leadByPhone = new Map(leads.rows.map((r) => [r.phone, r]));
+
+    for (const r of rows) {
+      const last = lastGift.get(r.phone);
+      r.gave_anyway = last !== undefined && last >= new Date(r.attemptedAt);
+      const lead = leadByPhone.get(r.phone);
+      r.lead_id = lead?.id ?? null;
+      r.lead_status = lead?.status ?? null;
+    }
+  }
+
+  rows.sort((a, b) => new Date(b.attemptedAt).getTime() - new Date(a.attemptedAt).getTime());
+  abandonedCache.set(key, { at: Date.now(), rows, siteErrors });
+  return { rows, siteErrors, cached: false };
+}
+
+/**
+ * GET /leads/abandoned - the list a caller works through.
+ *
+ * Open to callers, unlike the bulk import below. The whole point is that a
+ * caller can see who nearly gave and ring them; making them ask an admin to
+ * run a sync first is how a list like this goes stale and stops being used.
+ *
+ * By default it hides the people who have since given and shows the ones who
+ * have not. Both counts come back either way, so the screen can say "and 12
+ * of these have since given" rather than silently dropping them.
+ */
+router.get('/leads/abandoned', async (req, res) => {
+  const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+  const minMinutes = Math.max(15, Number(req.query.min_minutes) || 60);
+  const includeSettled = req.query.include_settled === 'true';
+  const sites = (String(req.query.sites ?? '').split(',').filter(Boolean) as SiteKey[]);
+
+  try {
+    const { rows, siteErrors, cached } = await loadAbandoned(
+      days,
+      minMinutes,
+      sites.length ? sites : (['hkmv', 'annadan'] as SiteKey[]),
+      req.query.fresh === 'true'
+    );
+
+    const settled = rows.filter((r) => r.gave_anyway);
+    const open = rows.filter((r) => !r.gave_anyway);
+    const shown = includeSettled ? rows : open;
+
+    res.json({
+      rows: shown.slice(0, 500),
+      total: rows.length,
+      open: open.length,
+      gave_anyway: settled.length,
+      already_leads: open.filter((r) => r.lead_id).length,
+      // What walked away, over the people still worth ringing. This is the
+      // number that decides whether the list is worth a shift.
+      value_at_stake: open.reduce((sum, r) => sum + (r.amount ?? 0), 0),
+      cached,
+      site_errors: siteErrors,
+    });
+  } catch (err) {
+    console.error('crm.abandoned error:', err);
+    res.status(500).json({ error: 'Could not fetch unfinished donations from the sites' });
+  }
+});
+
+/**
+ * POST /leads/abandoned/adopt - turn one of them into a lead, ready to ring.
+ *
+ * One at a time and by a caller, because that is how the list is actually
+ * worked: read a row, decide it is worth a call, take it. The bulk sync below
+ * stays for the office deciding to work a whole month at once.
+ *
+ * Refuses somebody who has since given. The client hides them, but a stale
+ * screen must not be able to create the one lead this feature exists to avoid.
+ */
+router.post('/leads/abandoned/adopt', async (req, res) => {
+  const b = req.body ?? {};
+  const phone = normalizePhone(b.phone);
+  if (!isDialable(phone)) return res.status(400).json({ error: 'That is not a number DRM can ring' });
+
+  try {
+    const gave = await pool.query(
+      `SELECT MAX(d.created_at) AS last_gift
+         FROM people p JOIN donations d ON d.person_id = p.id
+        WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = $1`,
+      [phone]
+    );
+    const last = gave.rows[0]?.last_gift ? new Date(gave.rows[0].last_gift) : null;
+    if (last && b.attempted_at && last >= new Date(String(b.attempted_at))) {
+      return res.status(409).json({
+        error: 'They gave after that attempt — there is nothing to chase. Refresh the list.',
+      });
+    }
+
+    const { lead, created } = await upsertLead(
+      {
+        phone,
+        name: b.name,
+        email: b.email,
+        source: 'website',
+        source_detail: `Unfinished donation${b.source_page ? ` on ${b.source_page}` : ''}`,
+        source_site: b.source_site,
+        expected_amount: b.amount ?? null,
+        // Theirs to ring, since they are the one who took it off the list.
+        assigned_to: b.assigned_to ?? req.user?.userId ?? null,
+        tags: ['abandoned'],
+      },
+      req.user?.userId ?? null
+    );
+
+    if (created) {
+      await pool.query(
+        `INSERT INTO lead_activities (lead_id, user_id, kind, note, occurred_at)
+         VALUES ($1,$2,'import',$3,COALESCE($4::timestamptz, NOW()))`,
+        [
+          lead.id,
+          req.user?.userId ?? null,
+          `Started a donation of ${b.amount ?? '?'}${b.purpose ? ` for ${b.purpose}` : ''} and did not complete it` +
+            (Number(b.attempts) > 1 ? ` (${b.attempts} attempts)` : ''),
+          b.attempted_at ?? null,
+        ]
+      );
+    }
+
+    res.status(created ? 201 : 200).json({ lead, created });
+  } catch (err) {
+    const status = (err as { status?: number }).status ?? 500;
+    if (status === 400) return res.status(400).json({ error: (err as Error).message });
+    console.error('crm.adoptAbandoned error:', err);
+    res.status(500).json({ error: 'Could not add that person as a lead' });
   }
 });
 

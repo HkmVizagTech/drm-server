@@ -17,6 +17,7 @@ import crmRoutes from '../src/routes/crm';
 // Mounted the same way index.ts does it: several routers on one prefix, so a
 // path this test calls resolves exactly as it would in production.
 import crmRemindersRoutes from '../src/routes/crmReminders';
+import crmReportsRoutes from '../src/routes/crmReports';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
 if (!/_test$/.test(dbName)) {
@@ -31,6 +32,7 @@ const app = express();
 app.use(express.json());
 app.use('/api/crm', crmRoutes);
 app.use('/api/crm', crmRemindersRoutes);
+app.use('/api/crm', crmReportsRoutes);
 
 let base = '';
 const ADMIN = '11111111-1111-1111-1111-111111111111';
@@ -85,7 +87,7 @@ const inDays = (n: number) => {
 async function reset() {
   await pool.query(
     `TRUNCATE lead_reminders, lead_activities, lead_import_rows, lead_import_batches,
-              leads, users, crm_settings RESTART IDENTITY CASCADE`
+              donations, people, leads, users, crm_settings RESTART IDENTITY CASCADE`
   );
   await pool.query(
     `INSERT INTO users (id, name, email, password_hash, role) VALUES
@@ -303,6 +305,76 @@ async function main() {
 
   r = await call('DELETE', `/api/crm/leads/${del.rows[0].id}`);
   check('removing it twice is a 404, not a crash', r.status === 404, r.status);
+
+  console.log('\n9. a lead who gives DAYS LATER, on the website');
+  // The flow the user asked about: caller rings, donor says "I will give
+  // later", and later they do. Nobody goes back into DRM. This used to fail
+  // silently for every new donor, because the lead was created before the
+  // person existed and its person_id stayed NULL for ever.
+  await reset();
+  const later = await pool.query(
+    `INSERT INTO leads (phone, name, assigned_to, next_follow_up_at, status)
+     VALUES ('9777000000','Later Giver',$1::uuid, NOW() + INTERVAL '3 days','callback') RETURNING id, created_at`,
+    [ANA]
+  );
+  await pool.query(
+    `INSERT INTO lead_reminders (lead_id, title, due_at)
+     VALUES ($1::uuid,'Said he would give at Kartik', NOW() + INTERVAL '3 days')`,
+    [later.rows[0].id]
+  );
+  check('the lead starts with no person behind it', true);
+
+  // Now the donation arrives from the site, creating the person and donation.
+  const person = await pool.query(
+    `INSERT INTO people (name, phone) VALUES ('Later Giver','+91 97770 00000') RETURNING id`
+  );
+  await pool.query(
+    `INSERT INTO donations (person_id, amount, purpose, payment_mode, source_site, external_ref, created_at)
+     VALUES ($1::uuid, 5000, 'general', 'upi', 'hkmv', 'ext_later_1', NOW())`,
+    [person.rows[0].id]
+  );
+
+  // A dashboard load is what triggers reconciliation in real use.
+  r = await call('GET', '/api/crm/config'); // unrelated, just to keep the server warm
+  const { reconcileConversions } = await import('../src/routes/crm');
+  await reconcileConversions(true);
+
+  const conv = (await pool.query(`SELECT * FROM leads WHERE id = $1`, [later.rows[0].id])).rows[0];
+  check('the lead is linked to the person by phone', conv.person_id === person.rows[0].id, conv.person_id);
+  check('and converted', conv.status === 'converted', conv.status);
+  check('with the donation attached', !!conv.converted_donation_id, conv.converted_donation_id);
+  check('the amount recorded', Number(conv.converted_amount) === 5000, conv.converted_amount);
+  check('evidenced as auto, not a caller\'s word', conv.converted_via === 'auto', conv.converted_via);
+  check('the callback is cleared', conv.next_follow_up_at === null, conv.next_follow_up_at);
+  const remLater = (await pool.query(`SELECT status FROM lead_reminders`)).rows[0];
+  check('and the promise is closed', remLater.status === 'done', remLater.status);
+
+  console.log('\n10. the dashboard counts money it used to hide');
+  await reset();
+  // One conversion with a receipt behind it, one without (a QR payment).
+  const p1 = await pool.query(`INSERT INTO people (name, phone) VALUES ('A','9811100000') RETURNING id`);
+  const d1 = await pool.query(
+    `INSERT INTO donations (person_id, amount, purpose, payment_mode, source_site, external_ref)
+     VALUES ($1::uuid, 2000, 'general', 'upi', 'hkmv', 'ext_a') RETURNING id`,
+    [p1.rows[0].id]
+  );
+  await pool.query(
+    `INSERT INTO leads (phone, name, assigned_to, status, converted_at, converted_amount,
+                        converted_donation_id, converted_via, person_id)
+     VALUES ('9811100000','A',$1::uuid,'converted', NOW(), 2000, $2::uuid, 'auto', $3::uuid)`,
+    [ANA, d1.rows[0].id, p1.rows[0].id]
+  );
+  await pool.query(
+    `INSERT INTO leads (phone, name, assigned_to, status, converted_at, converted_amount, converted_via)
+     VALUES ('9822200000','B',$1::uuid,'converted', NOW(), 1, 'manual')`,
+    [ANA]
+  );
+
+  r = await call('GET', '/api/crm/dashboard?preset=today');
+  check('both conversions counted', r.body.leads.converted === 2, r.body.leads);
+  check('the QR rupee is in the total', Number(r.body.leads.raised) === 2001, r.body.leads.raised);
+  check('and the receipted part is named separately', Number(r.body.leads.raised_receipted) === 2000, r.body.leads);
+  check('with one conversion having no receipt yet', r.body.leads.converted_unreceipted === 1, r.body.leads);
 
   console.log(failures ? `\n${failures} FAILURE(S)\n` : '\nall green\n');
   server.close();

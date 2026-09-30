@@ -72,6 +72,9 @@ interface Share {
   expected_amount: string | null;
   created_at: string;
   matched_at: string | null;
+  /** They said on the call that they would pay by this QR. */
+  awaiting_payment_at: string | null;
+  awaiting_qr_at: string | null;
 }
 
 export default function QrPaymentsPage() {
@@ -325,13 +328,21 @@ function AttachDialog({
   const [chosen, setChosen] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Start with the people who actually said they would pay. Most shares went
+  // to people who said nothing, and scrolling past forty of those to reach the
+  // three who promised is how the wrong one gets picked.
+  const [promisedOnly, setPromisedOnly] = useState(true);
 
   useEffect(() => {
     apiClient
-      .get<{ shares: Share[] }>("/api/crm/qr/shares?mine=false")
-      .then((d) => setShares(d.shares.filter((s) => !s.matched_at)))
+      .get<{ shares: Share[] }>(
+        `/api/crm/qr/shares?mine=false&unmatched=true${promisedOnly ? "&awaiting=true" : ""}`
+      )
+      .then((d) => setShares(d.shares))
       .catch((e) => setError(e instanceof Error ? e.message : "Could not load the shares"));
-  }, []);
+  }, [promisedOnly]);
+
+  const promised = (s: Share) => !!(s.awaiting_payment_at || s.awaiting_qr_at);
 
   return (
     <Modal title={`Who sent ${currency(Number(payment.amount))}?`} onClose={onClose}>
@@ -344,8 +355,26 @@ function AttachDialog({
         the lead and raise the receipt.
       </p>
 
+      <div className="mb-2 flex items-center justify-between gap-3 text-xs">
+        <span className="text-slate-500">
+          {promisedOnly ? "Showing people who said they would pay" : "Showing everyone who was sent a QR"}
+        </span>
+        <button
+          onClick={() => setPromisedOnly((v) => !v)}
+          className="text-[var(--accent)] hover:underline"
+        >
+          {promisedOnly ? "Show everyone" : "Only those who promised"}
+        </button>
+      </div>
+
       <div className="max-h-72 space-y-1 overflow-y-auto scroll-slim">
-        {!shares.length && <p className="py-6 text-center text-sm text-slate-400">No unmatched QR shares waiting.</p>}
+        {!shares.length && (
+          <p className="py-6 text-center text-sm text-slate-400">
+            {promisedOnly
+              ? "Nobody is down as having promised to pay. Show everyone to pick from every QR sent."
+              : "No unmatched QR shares waiting."}
+          </p>
+        )}
         {shares.map((s) => (
           <label
             key={s.id}
@@ -367,6 +396,7 @@ function AttachDialog({
                 {s.expected_amount && ` · said ${currency(Number(s.expected_amount))}`}
               </span>
             </span>
+            {promised(s) && <Badge tone="info">said they would</Badge>}
             {s.expected_amount && Math.abs(Number(s.expected_amount) - Number(payment.amount)) < 1 && (
               <Badge tone="good">amount matches</Badge>
             )}

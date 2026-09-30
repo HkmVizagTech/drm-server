@@ -1398,6 +1398,33 @@ ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS receipt_number VARCHAR(80);
 ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS external_donation_id VARCHAR(80);
 ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS receipt_site   VARCHAR(20);
 
+-- The donor said, on the call, that they would pay by the QR just sent.
+--
+-- WHY THIS IS WORTH A COLUMN
+-- Without it, the screen where somebody attributes an unmatched payment has to
+-- offer every QR ever shared. Most of those people never said they would pay;
+-- a handful did, and one of them is almost certainly who this payment is from.
+-- Recorded at the moment they say it, on the call, because that is the only
+-- moment anybody knows.
+--
+-- Cleared when they pay, so the list is always "still waiting", never a
+-- history of everyone who ever promised.
+ALTER TABLE leads      ADD COLUMN IF NOT EXISTS awaiting_qr_at TIMESTAMPTZ;
+ALTER TABLE qr_shares  ADD COLUMN IF NOT EXISTS awaiting_payment_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_leads_awaiting_qr
+  ON leads(awaiting_qr_at DESC) WHERE awaiting_qr_at IS NOT NULL;
+
+-- The outcome a caller picks when the donor says they will pay by QR.
+--
+-- suggests_status 'callback' rather than a stage of its own: they have not
+-- given yet, and a stage that reads like they have is how a pipeline starts
+-- lying. wants_follow_up TRUE, because somebody who says "I'll pay tonight"
+-- and does not is exactly who needs ringing back.
+INSERT INTO crm_dispositions (slug, label, counts_connected, suggests_status, wants_follow_up, sort_order) VALUES
+  ('will_pay_qr', 'Will pay by QR', TRUE, 'callback', TRUE, 25)
+ON CONFLICT (slug) DO NOTHING;
+
 -- Why a payment is, or is not, attached to a share.
 --
 -- An unmatched payment on a screen with no explanation is a question nobody

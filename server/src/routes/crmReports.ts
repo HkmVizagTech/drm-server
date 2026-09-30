@@ -109,9 +109,32 @@ router.get('/dashboard', async (req, res) => {
 
     const [leads, calls, pipeline, followUps, byStatus, bySource, callers, qr] = await Promise.all([
       pool.query(
+        // WHAT COUNTS AS A CONVERSION, AND WHY THIS CHANGED
+        //
+        // This used to count only leads carrying converted_donation_id - a
+        // link to a donation row synced from one of the sites. Everything else
+        // read as zero. So a QR payment Razorpay had confirmed showed nothing,
+        // and cash a caller recorded at the counter showed nothing, and the
+        // screen told a caller who had raised real money that they had raised
+        // none. The user who reported this had watched their own test donation
+        // arrive, be matched, and be receipted - and still show as zero.
+        //
+        // A conversion is now any lead that converted. What differs between
+        // them is not whether they happened but how well DRM can evidence
+        // them, so that is reported alongside rather than by silently
+        // discarding two thirds of the money: 'auto' is a donation the site
+        // receipted and DRM matched, 'manual' is a QR payment or a caller's
+        // word. Both are real; only one is independently verifiable, and the
+        // screen says which is which.
         `SELECT COUNT(*)::int AS received,
-                COUNT(*) FILTER (WHERE converted_donation_id IS NOT NULL)::int AS converted,
-                COALESCE(SUM(converted_amount) FILTER (WHERE converted_donation_id IS NOT NULL), 0)::numeric AS raised
+                COUNT(*) FILTER (WHERE converted_at IS NOT NULL)::int AS converted,
+                COALESCE(SUM(converted_amount) FILTER (WHERE converted_at IS NOT NULL), 0)::numeric AS raised,
+                COALESCE(SUM(converted_amount) FILTER (
+                  WHERE converted_at IS NOT NULL AND converted_donation_id IS NOT NULL
+                ), 0)::numeric AS raised_receipted,
+                COUNT(*) FILTER (
+                  WHERE converted_at IS NOT NULL AND converted_donation_id IS NULL
+                )::int AS converted_unreceipted
            FROM leads
           WHERE ${WINDOW('created_at', 1, 2)}
             AND ($3::uuid IS NULL OR assigned_to = $3::uuid)`,
@@ -163,7 +186,7 @@ router.get('/dashboard', async (req, res) => {
       ),
       pool.query(
         `SELECT source, COUNT(*)::int AS n,
-                COUNT(*) FILTER (WHERE converted_donation_id IS NOT NULL)::int AS converted
+                COUNT(*) FILTER (WHERE converted_at IS NOT NULL)::int AS converted
            FROM leads
           WHERE ${WINDOW('created_at', 1, 2)}
             AND ($3::uuid IS NULL OR assigned_to = $3::uuid)
@@ -216,6 +239,12 @@ router.get('/dashboard', async (req, res) => {
         // rate, not diluted by every lead the temple has ever had.
         conversion_rate: l.received ? Math.round((l.converted / l.received) * 1000) / 10 : 0,
         raised: Number(l.raised),
+        // Of that total, how much has a receipt behind it from one of the
+        // sites. The gap is QR payments and cash - real money, not yet tied to
+        // a receipt row - and naming it stops the total looking either
+        // overstated or mysteriously small.
+        raised_receipted: Number(l.raised_receipted),
+        converted_unreceipted: l.converted_unreceipted,
       },
       calls: {
         made: c.made,

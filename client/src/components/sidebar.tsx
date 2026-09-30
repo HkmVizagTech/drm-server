@@ -76,6 +76,10 @@ const navGroups: { heading: string; items: NavItem[]; roles?: string[] }[] = [
       { href: "/calling/reminders", label: "Reminders", icon: "M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0" },
       // A caller's own presets, set up before a shift rather than mid-call.
       { href: "/calling/links", label: "My links", icon: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" },
+      // Donations started on the sites and never finished. High in the group
+      // on purpose: it is the warmest list a caller can work, and a list
+      // nobody finds is a list nobody rings.
+      { href: "/calling/pending", label: "Nearly gave", icon: "M12 8v4l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM3 3l18 18" },
       { href: "/calling/payments", label: "QR payments", icon: "M3 11h8V3H3v8zm2-6h4v4H5V5zM3 21h8v-8H3v8zm2-6h4v4H5v-4zM13 3v8h8V3h-8zm6 6h-4V5h4v4zM13 13h2v2h-2zM17 13h2v2h-2zM15 15h2v2h-2zM13 17h2v2h-2zM17 17h2v2h-2zM19 15h2v2h-2zM19 19h2v2h-2z" },
       { href: "/calling/uploads", label: "Uploaded sheets", icon: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" },
     ],

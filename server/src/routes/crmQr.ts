@@ -426,6 +426,9 @@ interface ShareRow {
   created_at: string;
   lead_id: string | null;
   person_id: string | null;
+  awaiting_payment_at: string | null;
+  /** The lead's own expected amount, when the share carries none. */
+  lead_expected_amount: string | null;
 }
 
 /**
@@ -440,7 +443,11 @@ interface ShareRow {
  * required: donors round up, donors give less than they said, and a donor who
  * promised ₹5,000 and sent ₹5,100 is still that donor.
  */
-function scoreShare(share: ShareRow, payment: { amount: number; payer_phone: string | null; received_at: Date }): number | null {
+function scoreShare(
+  share: ShareRow,
+  payment: { amount: number; payer_phone: string | null; received_at: Date },
+  context: { alone: boolean }
+): number | null {
   const shared = new Date(share.created_at);
   const hours = (payment.received_at.getTime() - shared.getTime()) / 3_600_000;
   // Before the share, or more than a week after, is somebody else's payment.
@@ -449,7 +456,35 @@ function scoreShare(share: ShareRow, payment: { amount: number; payer_phone: str
   let score = 0;
   if (payment.payer_phone && payment.payer_phone === share.phone) score += 100;
 
-  const expected = share.expected_amount ? Number(share.expected_amount) : null;
+  // NOTHING ELSE IT COULD BE
+  //
+  // This is the case the first version of the scoring got wrong, and it is the
+  // ordinary one. A UPI payment carries no phone number, and a caller mid-call
+  // rarely stops to type an amount - so a QR shared four minutes ago scored 25
+  // against a bar of 60 and sat waiting for a human to attribute the obvious.
+  //
+  // What the score was failing to represent is that this QR belongs to one
+  // caller, they shared it with exactly one person in the window, and money
+  // then arrived through it. There is no other candidate; there is no rival
+  // explanation. That is stronger evidence than a matching round-number
+  // amount, and it is now weighted like it.
+  //
+  // It is not conclusive - a donor could forward the picture to somebody else
+  // - which is why it does not simply assert the match, and why a second share
+  //   on the same QR removes it entirely and sends both to a human.
+  if (context.alone) score += 40;
+
+  // They said on the call that they would pay by this QR. A person who said so
+  // twenty minutes ago is a likelier source of this money than one who was
+  // sent a QR and said nothing.
+  if (share.awaiting_payment_at) score += 20;
+
+  // The amount. The share's own figure first - what the caller heard them say
+  // - and failing that the lead's standing expectation, which is often the
+  // ask the list was built around.
+  const expected =
+    (share.expected_amount ? Number(share.expected_amount) : null) ??
+    (share.lead_expected_amount ? Number(share.lead_expected_amount) : null);
   if (expected) {
     const diff = Math.abs(payment.amount - expected) / expected;
     if (diff < 0.005) score += 40;
@@ -493,6 +528,70 @@ interface MatchResult {
  * a near-miss score is one click of human judgement. The screen can only say
  * which if the matcher says which.
  */
+/**
+ * Everything that must happen to a lead when their money arrives.
+ *
+ * WHY THIS IS ONE FUNCTION
+ * There were two copies of this - the automatic match and the one a human
+ * links by hand - and they had already drifted: both wrote a stage that does
+ * not exist, neither cleared the callback, and neither closed the promise the
+ * donor had made. So a donor who paid was still in the queue to be rung, still
+ * on the follow-ups board as owed a call, and still had a reminder that would
+ * alert somebody to chase a donation that had already arrived. Three different
+ * people would have contacted them about it.
+ *
+ * Paying is the end of the chase. Everything that exists to make somebody ring
+ * this person has to stop at the same moment, and doing that in one place is
+ * the only way it stays true of both paths.
+ *
+ * Takes an optional client so the manual path can do it inside its own
+ * transaction; the webhook path has no transaction to join and uses the pool.
+ */
+async function markLeadDonated(
+  leadId: string,
+  amount: number,
+  note: string,
+  client?: { query: typeof pool.query }
+): Promise<void> {
+  const db = client ?? pool;
+
+  await db.query(
+    `UPDATE leads SET
+       status             = 'converted',
+       converted_amount   = COALESCE(converted_amount, 0) + $2::numeric,
+       converted_at       = COALESCE(converted_at, NOW()),
+       converted_via      = 'manual',
+       converted_note     = COALESCE(converted_note, $3),
+       -- The chase stops here. A callback still booked would put them back on
+       -- the follow-ups board tomorrow morning as somebody the temple owes a
+       -- call, which is no longer true.
+       next_follow_up_at  = NULL,
+       follow_up_note     = NULL,
+       -- Cleared so they leave the "awaiting a QR payment" list; the payment
+       -- they were awaiting is this one.
+       awaiting_qr_at     = NULL,
+       conversion_seen_at = NOW(),
+       updated_at         = NOW()
+     WHERE id = $1`,
+    [leadId, amount, note]
+  );
+
+  // The promise they made is kept. Marked done rather than deleted, so the
+  // record of what was promised and what came of it survives.
+  await db.query(
+    `UPDATE lead_reminders
+        SET status = 'done', completed_at = NOW(), updated_at = NOW()
+      WHERE lead_id = $1 AND status = 'open'`,
+    [leadId]
+  );
+
+  await db.query(
+    `INSERT INTO lead_activities (lead_id, kind, to_value, note)
+     VALUES ($1::uuid, 'status_change', 'converted', $2)`,
+    [leadId, note]
+  );
+}
+
 /** A lead's name for a note, or their number when they have no name yet. */
 async function leadLabel(leadId: string): Promise<string | null> {
   const r = await pool.query(`SELECT name, phone FROM leads WHERE id = $1`, [leadId]);
@@ -546,8 +645,10 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
   }
 
   const candidates = await pool.query(
-    `SELECT s.* FROM qr_shares s
+    `SELECT s.*, l.expected_amount AS lead_expected_amount
+       FROM qr_shares s
        JOIN razorpay_qrs q ON s.qr_id = q.id
+       LEFT JOIN leads l ON s.lead_id = l.id
       WHERE CASE WHEN $1::text IS NOT NULL THEN q.qr_id = $1 ELSE s.phone = $3::text END
         AND s.matched_at IS NULL
         AND s.created_at > $2::timestamptz - INTERVAL '7 days'
@@ -567,24 +668,45 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
     });
   }
 
+  // Counted before scoring, and over the shares that are actually in the
+  // window rather than every row the query returned - a share made eight days
+  // ago is not a rival explanation for this payment, so its presence must not
+  // take the "nothing else it could be" weight away from the one that is.
+  const payment = {
+    amount: Number(pay.amount),
+    payer_phone: pay.payer_phone as string | null,
+    received_at: new Date(pay.received_at),
+  };
+  const plausible = (candidates.rows as ShareRow[]).filter(
+    (s) => scoreShare(s, payment, { alone: false }) !== null
+  );
+
   let best: { share: ShareRow; score: number } | null = null;
-  for (const s of candidates.rows as ShareRow[]) {
-    const score = scoreShare(s, {
-      amount: Number(pay.amount),
-      payer_phone: pay.payer_phone,
-      received_at: new Date(pay.received_at),
-    });
+  for (const s of plausible) {
+    const score = scoreShare(s, payment, { alone: plausible.length === 1 });
     if (score !== null && (!best || score > best.score)) best = { share: s, score };
   }
 
   if (!best || best.score < CONFIDENT) {
+    // Naming the likeliest one is the whole value of this state. "Not certain
+    // enough" tells somebody nothing they can act on; "looks like Ramesh, who
+    // said he would pay" is a decision they can make in one click.
+    //
+    // A donor who promised on the call is deliberately NOT auto-matched when
+    // somebody else was sent the same QR in the same window. They are the
+    // likelier source of the money, not the certain one - the other person can
+    // pay without ever having said they would, and crediting the wrong caller
+    // is worse than asking.
+    const who = best?.share.lead_id ? await leadLabel(best.share.lead_id) : null;
     return await note(pay.id, {
       matched: false,
       basis,
       score: best?.score,
-      reason: best
-        ? 'The best candidate was not certain enough to apply on its own'
-        : 'Every candidate was outside the window for this payment',
+      reason: !best
+        ? 'Every candidate was outside the window for this payment'
+        : best.share.awaiting_payment_at
+        ? `Looks like ${who ?? best.share.phone}, who said on the call they would pay by QR — but the same QR went to somebody else too, so confirm it.`
+        : `Could be ${who ?? best?.share.phone}, but the same QR went to more than one person around then. Confirm it.`,
     });
   }
 
@@ -625,23 +747,22 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
     [pay.id, best.share.id, best.share.person_id, basis, Math.round(best.score)]
   );
 
-  // Move the lead. Recorded as 'manual' rather than 'auto' on purpose: 'auto'
-  // in DRM means a donation that arrived through a site and was matched on the
-  // donor's own phone number. A QR payment matched on timing and amount is a
-  // strong inference, not an observation, and the reports must not present the
-  // two as equal evidence.
+  // Move the lead.
+  //
+  // THE STATUS SLUG MATTERS MORE THAN IT LOOKS
+  // This used to write 'donated', which is not a stage that exists. Every
+  // consequence followed from that one word: crm_statuses had no row for it,
+  // so is_open fell back to TRUE and the donor who had just paid stayed in the
+  // calling queue to be rung again; is_won was unknown, so no conversion
+  // report counted them; and the stage badge showed a raw slug. The real slug
+  // is 'converted', whose label is "Donated".
+  //
+  // 'manual' rather than 'auto' is deliberate and unchanged: 'auto' in DRM
+  // means a donation that arrived through a site and was matched on the
+  // donor's own number. A QR payment matched on timing is a strong inference,
+  // not an observation, and the reports must not present the two as equal.
   if (best.share.lead_id) {
-    await pool.query(
-      `UPDATE leads SET
-         status = 'donated',
-         converted_amount = COALESCE(converted_amount, 0) + $2::numeric,
-         converted_at = COALESCE(converted_at, NOW()),
-         converted_via = 'manual',
-         converted_note = COALESCE(converted_note, 'Paid by QR, matched automatically'),
-         updated_at = NOW()
-       WHERE id = $1`,
-      [best.share.lead_id, pay.amount]
-    );
+    await markLeadDonated(best.share.lead_id, Number(pay.amount), 'Paid by QR, matched automatically');
   }
 
   // The donor has paid and is owed a receipt. Not awaited: the webhook must
@@ -1033,19 +1154,37 @@ router.get('/qr/unmatched', authenticate, async (_req, res) => {
   }
 });
 
-/** GET /qr/shares - what has been sent and what came of it. */
+/**
+ * GET /qr/shares - what has been sent and what came of it.
+ *
+ * `awaiting=true` narrows to the people who actually said on the call that
+ * they would pay by QR. That is the list somebody attributing a payment wants
+ * to see first: most shares were sent to people who said nothing, and one of
+ * the few who promised is almost certainly who this money is from. The screen
+ * can widen to everything in one click, because "almost certainly" is not
+ * always.
+ */
 router.get('/qr/shares', authenticate, async (req, res) => {
   const mine = req.query.mine !== 'false';
+  const awaitingOnly = req.query.awaiting === 'true';
+  const unmatchedOnly = req.query.unmatched === 'true';
   try {
     const rows = await pool.query(
-      `SELECT s.*, q.label AS qr_label, l.name AS lead_name, u.name AS shared_by_name
+      `SELECT s.*, q.label AS qr_label, l.name AS lead_name, l.awaiting_qr_at,
+              u.name AS shared_by_name
          FROM qr_shares s
          JOIN razorpay_qrs q ON s.qr_id = q.id
          LEFT JOIN leads l ON s.lead_id = l.id
          LEFT JOIN users u ON s.shared_by = u.id
         WHERE ($1::uuid IS NULL OR s.shared_by = $1::uuid)
-        ORDER BY s.created_at DESC LIMIT 200`,
-      [mine ? req.user?.userId ?? null : null]
+          AND ($2::boolean = FALSE OR s.awaiting_payment_at IS NOT NULL OR l.awaiting_qr_at IS NOT NULL)
+          AND ($3::boolean = FALSE OR s.matched_at IS NULL)
+        -- Promised first, then most recent. Whoever is attributing a payment
+        -- reads top-down and stops at the first plausible row.
+        ORDER BY (s.awaiting_payment_at IS NOT NULL OR l.awaiting_qr_at IS NOT NULL) DESC,
+                 s.created_at DESC
+        LIMIT 200`,
+      [mine ? req.user?.userId ?? null : null, awaitingOnly, unmatchedOnly]
     );
     res.json({ shares: rows.rows });
   } catch (err) {
@@ -1085,15 +1224,11 @@ router.post('/qr/payments/:id/attach', authenticate, async (req, res) => {
     ]);
 
     if (share.rows[0].lead_id) {
-      await client.query(
-        `UPDATE leads SET status = 'donated',
-           converted_amount = COALESCE(converted_amount, 0) + $2::numeric,
-           converted_at = COALESCE(converted_at, NOW()),
-           converted_via = 'manual',
-           converted_note = COALESCE(converted_note, 'Paid by QR, linked by hand'),
-           updated_at = NOW()
-         WHERE id = $1`,
-        [share.rows[0].lead_id, pay.rows[0].amount]
+      await markLeadDonated(
+        share.rows[0].lead_id,
+        Number(pay.rows[0].amount),
+        'Paid by QR, linked by hand',
+        client
       );
     }
 

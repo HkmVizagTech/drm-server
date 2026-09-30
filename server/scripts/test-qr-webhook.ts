@@ -132,7 +132,10 @@ function check(name: string, cond: boolean, detail?: unknown) {
 }
 
 async function reset() {
-  await pool.query(`TRUNCATE qr_payments, qr_shares, razorpay_qrs, leads, users RESTART IDENTITY CASCADE`);
+  await pool.query(
+    `TRUNCATE qr_payments, qr_shares, razorpay_qrs, lead_reminders, lead_activities, leads, users
+     RESTART IDENTITY CASCADE`
+  );
   await pool.query(
     `INSERT INTO users (id, name, email, password_hash, role)
      VALUES ('11111111-1111-1111-1111-111111111111','Caller One','c1@test','x','caller')`
@@ -177,7 +180,7 @@ async function main() {
   check('qr id captured from payload.qr_code.entity.id', p.qr_id === 'qr_TESTQR0001', p.qr_id);
   check('matched to the share', !!p.share_id, { note: p.match_note, score: p.match_score });
   check('basis recorded as qr', p.match_basis === 'qr', p.match_basis);
-  check('lead moved to donated', (await pool.query(`SELECT status FROM leads WHERE id='33333333-3333-3333-3333-333333333333'`)).rows[0].status === 'donated');
+  check('lead moved to the converted stage', (await pool.query(`SELECT status FROM leads WHERE id='33333333-3333-3333-3333-333333333333'`)).rows[0].status === 'converted');
 
   console.log('\n2. payment.captured alone - no QR id anywhere in the payload');
   await reset();
@@ -314,6 +317,68 @@ async function main() {
     req.end(raw);
   });
   check('refused', bad === 401, bad);
+
+  console.log('\n10. THE REPORTED CASE: one QR, one share, a UPI payment with no phone and no amount');
+  // This is exactly what the user did: made a list with their own number,
+  // started calling, shared the QR, paid. The old scoring gave 25 against a
+  // bar of 60, so it sat unattributed and had to be linked by hand.
+  await reset();
+  const s10 = await share('9000000001', null, 4);
+  await post(qrCredited({ contact: '', amount: 100 }));
+  p = await row();
+  check('matched on its own', p.share_id === s10, { note: p.match_note, score: p.match_score });
+  check('and scored on there being nothing else it could be', (p.match_score ?? 0) >= 60, p.match_score);
+
+  const lead10 = (
+    await pool.query(`SELECT * FROM leads WHERE id = '33333333-3333-3333-3333-333333333333'`)
+  ).rows[0];
+  check("the lead's stage is a real one", lead10.status === 'converted', lead10.status);
+  check('the callback is cleared, so nobody rings to chase it', lead10.next_follow_up_at === null, lead10.next_follow_up_at);
+  check('and the money is on the lead', Number(lead10.converted_amount) === 1, lead10.converted_amount);
+
+  console.log('\n11. two shares on the same QR go to a human instead');
+  await reset();
+  await share('9000000001', null, 10);
+  await share('9555555555', null, 5);
+  await post(qrCredited({ contact: '' }));
+  p = await row();
+  check('not matched', !p.share_id, p.share_id);
+  check('because it could be either', (p.match_score ?? 99) < 60, p.match_score);
+
+  console.log('\n12. saying "I will pay by QR" on the call tips a doubtful one over');
+  await reset();
+  const a12 = await share('9000000001', null, 10);
+  await share('9555555555', null, 5);
+  await pool.query(`UPDATE qr_shares SET awaiting_payment_at = NOW() WHERE id = $1`, [a12]);
+  await post(qrCredited({ contact: '' }));
+  p = await row();
+  // Deliberately NOT auto-matched: somebody else was sent the same QR in the
+  // same window and could have paid without ever saying so. A promise makes
+  // one candidate likelier, not certain.
+  check('still left for a human', !p.share_id, p.share_id);
+  check('but it scores higher than a silent share', (p.match_score ?? 0) > 25, p.match_score);
+  check(
+    'and the note names who said they would pay',
+    /said on the call they would pay/.test(p.match_note ?? ''),
+    p.match_note
+  );
+
+  console.log('\n13. an open promise is closed when the money lands');
+  await reset();
+  const s13 = await share('9000000001', null, 5);
+  await pool.query(
+    `INSERT INTO lead_reminders (lead_id, title, due_at)
+     VALUES ('33333333-3333-3333-3333-333333333333','Said they would give', NOW() + INTERVAL '2 days')`
+  );
+  await post(qrCredited({ contact: '' }));
+  p = await row();
+  check('matched', p.share_id === s13, p.match_note);
+  const rem13 = (await pool.query(`SELECT status FROM lead_reminders`)).rows[0];
+  check(
+    'the reminder is done, not still waiting to alert somebody',
+    rem13.status === 'done',
+    rem13.status
+  );
 
   console.log(failures ? `\n${failures} FAILURE(S)\n` : '\nall green\n');
   server.close();

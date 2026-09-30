@@ -31,7 +31,15 @@ interface Dashboard {
    * other.
    */
   scope: "mine" | "team";
-  leads: { received: number; converted: number; conversion_rate: number; raised: number };
+  leads: {
+    received: number;
+    converted: number;
+    conversion_rate: number;
+    raised: number;
+    /** Of `raised`, how much has a receipt from one of the sites behind it. */
+    raised_receipted: number;
+    converted_unreceipted: number;
+  };
   calls: {
     made: number;
     connected: number;
@@ -239,6 +247,24 @@ export default function CallingDashboardPage() {
           sub={f ? `${number(f.today)} due today, ${number(f.next_7_days)} this week` : undefined}
         />
       </div>
+
+      {/* WHERE THE MONEY CAME FROM, AND HOW WELL IT IS EVIDENCED
+          Raised counts every conversion — a donation the site receipted, a QR
+          payment Razorpay confirmed, and cash a caller recorded at the
+          counter. Only the first has a receipt row behind it in DRM. Saying so
+          is better than the alternative this replaced, which was to count only
+          the receipted ones and show every caller who had taken QR payments or
+          cash a total of zero. */}
+      {data && data.leads.raised > 0 && data.leads.raised_receipted < data.leads.raised && (
+        <p className="mb-5 rounded-lg bg-slate-50 px-4 py-3 text-xs text-slate-500">
+          <strong className="font-medium text-slate-700">About the money.</strong>{" "}
+          {currency(data.leads.raised_receipted)} of that has a receipt behind it from one of the sites. The rest —{" "}
+          {currency(data.leads.raised - data.leads.raised_receipted)} across{" "}
+          {number(data.leads.converted_unreceipted)}{" "}
+          {data.leads.converted_unreceipted === 1 ? "donor" : "donors"} — is QR payments and cash recorded by hand.
+          Real money, and it links itself to a receipt as soon as the site&apos;s own entry syncs across.
+        </p>
+      )}
 
       {/* The honesty note. Renders only while nothing is measured. */}
       {c && c.made > 0 && c.measured === 0 && (
