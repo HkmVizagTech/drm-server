@@ -30,6 +30,8 @@ import { Router } from 'express';
 import crypto from 'crypto';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
+import * as storage from '../services/storage';
+import { createOfflineDonation, type SiteKey } from '../services/hkmvClient';
 
 const router = Router();
 
@@ -49,6 +51,51 @@ const str = (v: unknown, max = 255): string | null => {
   return s ? s.slice(0, max) : null;
 };
 const phone10 = (v: unknown): string => String(v ?? '').replace(/\D/g, '').slice(-10);
+
+/**
+ * The image a donor actually receives.
+ *
+ * A branded image uploaded by the temple wins over Razorpay's plain square,
+ * but only when the bucket can give it a public URL - a donor's phone fetches
+ * this straight from WhatsApp, with no DRM session, so a private object would
+ * simply fail to load. Falls back to the pasted Razorpay URL, which is how
+ * every QR works before anybody uploads anything.
+ */
+function qrImage(q: { image_key?: string | null; image_url?: string | null }): string | null {
+  if (q.image_key) {
+    const url = storage.publicUrl(q.image_key);
+    if (url) return url;
+  }
+  return q.image_url ?? null;
+}
+
+/**
+ * GET /storage/status - whether file storage is set up, and what that means.
+ *
+ * The screens ask this rather than assuming, so an unconfigured bucket shows
+ * as a plain explanation of what is not being kept instead of a broken button
+ * or a silent absence.
+ */
+router.get('/storage/status', authenticate, async (_req, res) => {
+  try {
+    const counts = await pool.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM lead_import_batches WHERE file_key IS NOT NULL) AS sheets_kept,
+         (SELECT COUNT(*)::int FROM lead_import_batches) AS sheets_total,
+         (SELECT COUNT(*)::int FROM receipt_cache) AS receipts_cached,
+         (SELECT COALESCE(SUM(bytes),0)::bigint FROM receipt_cache) AS receipt_bytes,
+         (SELECT COUNT(*)::int FROM razorpay_qrs WHERE image_key IS NOT NULL) AS qr_images`
+    );
+    res.json({
+      configured: storage.isConfigured(),
+      public_urls: storage.hasPublicUrls(),
+      ...counts.rows[0],
+    });
+  } catch (err) {
+    console.error('crm.storageStatus error:', err);
+    res.status(500).json({ error: 'Could not read the storage status' });
+  }
+});
 
 /* =========================================================== the QR codes */
 
@@ -91,9 +138,10 @@ router.post('/qrs', authenticate, authorize('admin'), async (req, res) => {
 
   try {
     const r = await pool.query(
-      `INSERT INTO razorpay_qrs (qr_id, label, image_url, purpose, fixed_amount, owner_id, notes, created_by)
-       VALUES ($1,$2,$3,$4,$5::numeric,$6::uuid,$7,$8::uuid)
+      `INSERT INTO razorpay_qrs (qr_id, label, image_url, purpose, fixed_amount, owner_id, notes, created_by, receipt_site)
+       VALUES ($1,$2,$3,$4,$5::numeric,$6::uuid,$7,$8::uuid,$9)
        ON CONFLICT (qr_id) DO UPDATE SET
+         receipt_site = COALESCE(EXCLUDED.receipt_site, razorpay_qrs.receipt_site),
          label = EXCLUDED.label,
          image_url = COALESCE(EXCLUDED.image_url, razorpay_qrs.image_url),
          purpose = COALESCE(EXCLUDED.purpose, razorpay_qrs.purpose),
@@ -112,6 +160,9 @@ router.post('/qrs', authenticate, authorize('admin'), async (req, res) => {
         str(req.body?.owner_id, 36),
         str(req.body?.notes, 2000),
         req.user?.userId ?? null,
+        req.body?.receipt_site === 'annadan' || req.body?.receipt_site === 'hkmv'
+          ? req.body.receipt_site
+          : null,
       ]
     );
     res.status(201).json({ qr: r.rows[0], warning: looksRight ? null : "That doesn't look like a Razorpay QR id (they start with qr_)." });
@@ -132,6 +183,7 @@ router.put('/qrs/:id', authenticate, authorize('admin'), async (req, res) => {
          owner_id = CASE WHEN $5::boolean THEN $6::uuid ELSE owner_id END,
          active = COALESCE($7::boolean, active),
          notes = COALESCE($8, notes),
+         receipt_site = COALESCE($9, receipt_site),
          updated_at = NOW()
        WHERE id = $1 RETURNING *`,
       [
@@ -143,6 +195,7 @@ router.put('/qrs/:id', authenticate, authorize('admin'), async (req, res) => {
         str(b.owner_id, 36),
         typeof b.active === 'boolean' ? b.active : null,
         str(b.notes, 2000),
+        b.receipt_site === 'annadan' || b.receipt_site === 'hkmv' ? b.receipt_site : null,
       ]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'No such QR' });
@@ -213,7 +266,7 @@ router.post('/leads/:id/share-qr', authenticate, async (req, res) => {
     const amountLine = amount ? `\nAmount: ₹${Number(amount).toLocaleString('en-IN')}` : '';
     const message =
       `Hare Krishna${name}, thank you for speaking with me.\n\n` +
-      `Here is the QR to donate${forWhat}:\n${q.image_url || '(QR image)'}${amountLine}\n\n` +
+      `Here is the QR to donate${forWhat}:\n${qrImage(q) || '(QR image)'}${amountLine}\n\n` +
       `Hare Krishna Movement, Visakhapatnam`;
 
     await pool.query(
@@ -236,6 +289,76 @@ router.post('/leads/:id/share-qr', authenticate, async (req, res) => {
   } catch (err) {
     console.error('crm.shareQr error:', err);
     res.status(500).json({ error: 'Could not share that QR' });
+  }
+});
+
+/**
+ * POST /qrs/:id/image - upload a branded QR image.
+ *
+ * Razorpay hosts a plain black-and-white square. This lets the temple send the
+ * one it designed - logo, seva name, the deity - which is what a donor on
+ * WhatsApp actually recognises.
+ *
+ * Needs a PUBLIC bucket, and says so rather than silently storing something no
+ * donor can fetch: the image is loaded by a phone straight from a WhatsApp
+ * message, with no DRM session behind it.
+ */
+router.post('/qrs/:id/image', authenticate, authorize('admin'), async (req, res) => {
+  if (!storage.isConfigured()) {
+    return res.status(503).json({ error: 'File storage is not set up, so images cannot be uploaded yet.' });
+  }
+  if (!storage.hasPublicUrls()) {
+    return res.status(503).json({
+      error:
+        'This bucket has no public URL set, so a donor could not load the image. Set R2_PUBLIC_BASE_URL, or paste the Razorpay image link instead.',
+    });
+  }
+
+  const base64 = String(req.body?.base64 ?? '');
+  const filename = str(req.body?.filename, 255) ?? 'qr.png';
+  if (!base64) return res.status(400).json({ error: 'No image received' });
+
+  const ext = (filename.split('.').pop() ?? 'png').toLowerCase();
+  const types: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp' };
+  if (!types[ext]) return res.status(400).json({ error: 'Use a PNG, JPG or WebP image' });
+
+  const buf = Buffer.from(base64, 'base64');
+  // A QR image is tens of kilobytes. Anything past two megabytes is a photo
+  // somebody picked by mistake, and it would be slow to load on the phone it
+  // is meant for.
+  if (buf.length > 2 * 1024 * 1024) {
+    return res.status(400).json({ error: 'That image is over 2 MB. A QR image should be far smaller.' });
+  }
+
+  try {
+    const key = storage.keys.qrImage(String(req.params.id), ext);
+    const put = await storage.putObject(key, buf, types[ext]);
+    if (!put.ok) return res.status(502).json({ error: 'Could not store that image' });
+
+    const r = await pool.query(
+      `UPDATE razorpay_qrs SET image_key = $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
+      [req.params.id, key]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'No such QR' });
+    res.json({ qr: r.rows[0], url: put.url });
+  } catch (err) {
+    console.error('crm.qrImage error:', err);
+    res.status(500).json({ error: 'Could not save that image' });
+  }
+});
+
+/** Back to Razorpay's own image. */
+router.delete('/qrs/:id/image', authenticate, authorize('admin'), async (req, res) => {
+  try {
+    const r = await pool.query(
+      `UPDATE razorpay_qrs SET image_key = NULL, updated_at = NOW() WHERE id = $1 RETURNING image_key`,
+      [req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'No such QR' });
+    res.json({ removed: true });
+  } catch (err) {
+    console.error('crm.removeQrImage error:', err);
+    res.status(500).json({ error: 'Could not remove that image' });
   }
 });
 
@@ -360,7 +483,123 @@ export async function matchPayment(paymentId: string): Promise<{ matched: boolea
     );
   }
 
+  // The donor has paid and is owed a receipt. Not awaited: the webhook must
+  // answer Razorpay promptly or it retries, and issuing a receipt means calling
+  // another system that may be slow. What happened is recorded on the payment
+  // and shown on the unmatched-and-unreceipted screen.
+  void issueReceiptForPayment(pay.id).catch((e) =>
+    console.error('crm.issueReceipt error:', (e as Error).message)
+  );
+
   return { matched: true, shareId: best.share.id, score: best.score };
+}
+
+/**
+ * Turn a matched QR payment into a real donation with an 80G receipt.
+ *
+ * THE HOLE THIS CLOSES
+ * Matching a payment used to move the lead to Donated and stop there. No
+ * donation record, no receipt number, no PDF - a donor gave five thousand
+ * rupees through a QR and got nothing they could claim against tax.
+ *
+ * DRM cannot issue a receipt itself, and should not: each site allocates 80G
+ * numbers from its own series, and two systems numbering into one series is
+ * how a charity ends up with duplicates. So this goes down the site's own
+ * offline-donation path - the same one a staff member uses for a cash
+ * donation - which allocates the number, renders the PDF and sends it on
+ * WhatsApp, exactly as it does for every other donation.
+ *
+ * The Razorpay payment id travels as the reference number, which also makes
+ * this safe to retry: the sites reject a duplicate reference, so a second
+ * attempt cannot raise a second receipt for the same money.
+ */
+export async function issueReceiptForPayment(paymentRowId: string): Promise<void> {
+  const r = await pool.query(
+    `SELECT p.*, s.lead_id, s.person_id, s.phone AS share_phone,
+            q.receipt_site, q.purpose, q.label AS qr_label,
+            l.name AS lead_name, l.email AS lead_email,
+            pe.name AS person_name, pe.email AS person_email, pe.pan,
+            pe.address_door, pe.address_house, pe.address_street, pe.address_area,
+            pe.address_city, pe.address_state, pe.address_pincode, pe.address_country,
+            pe.address AS address_text
+       FROM qr_payments p
+       JOIN qr_shares s ON p.share_id = s.id
+       JOIN razorpay_qrs q ON s.qr_id = q.id
+       LEFT JOIN leads l ON s.lead_id = l.id
+       LEFT JOIN people pe ON s.person_id = pe.id
+      WHERE p.id = $1`,
+    [paymentRowId]
+  );
+  if (!r.rows.length) return;
+  const p = r.rows[0];
+
+  // Already done, or already being done. Guards against a webhook redelivery
+  // racing the first attempt into two receipts.
+  if (p.receipt_status === 'issued' || p.receipt_status === 'pending') return;
+
+  if (!p.receipt_site) {
+    await pool.query(
+      `UPDATE qr_payments SET receipt_status = 'skipped',
+         receipt_error = 'No site is set on this QR, so DRM does not know which 80G series to use.'
+       WHERE id = $1`,
+      [paymentRowId]
+    );
+    return;
+  }
+
+  await pool.query(`UPDATE qr_payments SET receipt_status = 'pending', receipt_error = NULL WHERE id = $1`, [
+    paymentRowId,
+  ]);
+
+  try {
+    const name = p.person_name || p.lead_name || p.payer_name || `Donor ${p.share_phone}`;
+    const result = await createOfflineDonation(p.receipt_site as SiteKey, {
+      donorName: name,
+      donorMobile: p.share_phone,
+      donorEmail: p.person_email || p.lead_email || null,
+      amount: Number(p.amount),
+      // It arrived by UPI through a Razorpay QR. Saying so keeps the site's own
+      // books honest about how the money came in.
+      paymentMode: 'upi',
+      referenceNo: p.payment_id,
+      paymentDate: new Date(p.received_at).toISOString(),
+      sevaName: p.purpose || undefined,
+      panNumber: p.pan || undefined,
+      // Only where there is a PAN to put on it; a certificate without one is
+      // no use to the donor.
+      wantCertificate: !!p.pan,
+      wantPrasadam: false,
+      prasadamAddress: p.address_text || undefined,
+      billingParts: {
+        door: p.address_door, house: p.address_house, street: p.address_street, area: p.address_area,
+        city: p.address_city, state: p.address_state, pincode: p.address_pincode, country: p.address_country,
+      },
+      enteredByName: `DRM · QR ${p.qr_label}`,
+      note: `Paid by QR during a call. Razorpay payment ${p.payment_id}.`,
+    });
+
+    await pool.query(
+      `UPDATE qr_payments SET
+         receipt_status = 'issued',
+         receipt_number = $2,
+         external_donation_id = $3,
+         receipt_site = $4,
+         receipt_error = NULL
+       WHERE id = $1`,
+      [paymentRowId, result.receiptNumber, result.externalId, p.receipt_site]
+    );
+  } catch (e) {
+    const err = e as Error & { status?: number };
+    // A duplicate reference means the receipt already exists on that site,
+    // which is a success from the donor's point of view even though the call
+    // failed. Recorded as such rather than left looking like a failure
+    // somebody has to chase.
+    const duplicate = err.status === 409;
+    await pool.query(
+      `UPDATE qr_payments SET receipt_status = $2, receipt_error = $3 WHERE id = $1`,
+      [paymentRowId, duplicate ? 'issued' : 'failed', duplicate ? null : err.message]
+    );
+  }
 }
 
 /**
@@ -420,6 +659,66 @@ webhookRouter.post('/webhook', async (req, res) => {
     console.error('crm.qrWebhook error:', err);
     // Still 200: Razorpay would otherwise retry for hours over a bug of ours.
     res.json({ stored: false });
+  }
+});
+
+/**
+ * POST /qr/payments/:id/issue-receipt - try again.
+ *
+ * For the case where the site refused the entry - it was down, or the entry
+ * was rejected - and somebody wants another go once it is fixed. Safe to press
+ * twice: the sites reject a duplicate reference number, so a second attempt
+ * cannot raise a second receipt for the same money.
+ */
+router.post('/qr/payments/:id/issue-receipt', authenticate, async (req, res) => {
+  try {
+    await pool.query(`UPDATE qr_payments SET receipt_status = NULL WHERE id = $1`, [req.params.id]);
+    await issueReceiptForPayment(String(req.params.id));
+    const r = await pool.query(
+      `SELECT receipt_status, receipt_error, receipt_number FROM qr_payments WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'No such payment' });
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('crm.retryReceipt error:', err);
+    res.status(500).json({ error: 'Could not issue that receipt' });
+  }
+});
+
+/**
+ * GET /qr/payments - what has come in, and what became of it.
+ *
+ * Defaults to everything needing attention: unmatched, or matched but with no
+ * receipt raised. Those are the two states somebody has to act on, and keeping
+ * them on one screen is what stops the second one being forgotten - a donation
+ * credited to the right lead with no receipt behind it looks finished from
+ * every other angle.
+ */
+router.get('/qr/payments', authenticate, async (req, res) => {
+  const scope = String(req.query.scope ?? 'attention');
+  const where =
+    scope === 'all'
+      ? 'TRUE'
+      : scope === 'unmatched'
+      ? 'p.share_id IS NULL'
+      : "p.share_id IS NULL OR p.receipt_status IS NULL OR p.receipt_status IN ('failed','skipped','pending')";
+  try {
+    const rows = await pool.query(
+      `SELECT p.*, q.label AS qr_label, q.receipt_site AS qr_receipt_site,
+              u.name AS qr_owner, l.name AS lead_name, l.id AS lead_id
+         FROM qr_payments p
+         LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
+         LEFT JOIN users u ON q.owner_id = u.id
+         LEFT JOIN qr_shares s ON p.share_id = s.id
+         LEFT JOIN leads l ON s.lead_id = l.id
+        WHERE ${where}
+        ORDER BY p.received_at DESC LIMIT 200`
+    );
+    res.json({ payments: rows.rows });
+  } catch (err) {
+    console.error('crm.qrPayments error:', err);
+    res.status(500).json({ error: 'Could not load the QR payments' });
   }
 });
 
@@ -506,6 +805,13 @@ router.post('/qr/payments/:id/attach', authenticate, async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    // Now that it belongs to somebody, the donor is owed a receipt for it -
+    // the same as if the webhook had matched it itself.
+    void issueReceiptForPayment(pay.rows[0].id).catch((e) =>
+      console.error('crm.issueReceipt error:', (e as Error).message)
+    );
+
     res.json({ attached: true });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);

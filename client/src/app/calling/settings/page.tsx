@@ -19,11 +19,12 @@
 // (switch it off) removes it from the dropdowns while old records keep their
 // meaning.
 
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { apiClient } from "@/lib/api";
 import { Badge, buttonPrimary, buttonSecondary, Card, CardHeader, inputClass, PageHeader, Select, TableShell, Td, Th, Toggle, Modal } from "@/components/ui";
 import { apiClient as api } from "@/lib/api";
 import { currency, number } from "@/lib/format";
+import { toBase64 } from "@/lib/spreadsheet";
 
 interface Status {
   slug: string;
@@ -295,6 +296,9 @@ export default function CallingSettingsPage() {
 
         {/* --------------------------------------------------------- QR codes */}
         <QrSection />
+
+        {/* ---------------------------------------------------- file storage */}
+        <StorageSection />
 
         {/* ---------------------------------------------------------- links */}
         <LinksSection />
@@ -779,6 +783,8 @@ interface QrRow {
   fixed_amount: string | null;
   owner_id: string | null;
   owner_name: string | null;
+  receipt_site: string | null;
+  image_key: string | null;
   active: boolean;
   shares: number;
   matched: number;
@@ -841,16 +847,18 @@ function QrSection() {
             <Th>Label</Th>
             <Th>Razorpay id</Th>
             <Th>Whose</Th>
+            <Th>Receipt from</Th>
             <Th align="right">Sent</Th>
             <Th align="right">Paid</Th>
             <Th align="right">Raised</Th>
             <Th align="center">In use</Th>
+            <Th align="right">Image</Th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
           {!rows.length ? (
             <tr>
-              <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-400">
+              <td colSpan={9} className="px-4 py-8 text-center text-sm text-slate-400">
                 None yet. A caller sees no QR option until one is added here.
               </td>
             </tr>
@@ -877,6 +885,24 @@ function QrSection() {
                     ]}
                   />
                 </Td>
+                <Td>
+                  {/* Which 80G series the receipt comes from. Without this DRM
+                      records the donation and issues nothing, which is how a
+                      donor ends up paying and getting no receipt. */}
+                  <Select
+                    value={q.receipt_site ?? ""}
+                    onChange={(v) => void save(q.id, { receipt_site: v || null })}
+                    className="min-w-[9rem]"
+                    options={[
+                      { value: "", label: "None — no receipt" },
+                      { value: "hkmv", label: "harekrishnavizag.org" },
+                      { value: "annadan", label: "annadan" },
+                    ]}
+                  />
+                  {!q.receipt_site && (
+                    <p className="mt-0.5 text-[11px] text-amber-700">Donors get no receipt</p>
+                  )}
+                </Td>
                 <Td align="right" className="tabular-nums text-slate-600">{number(q.shares)}</Td>
                 <Td align="right" className="tabular-nums text-slate-700">
                   {q.matched ? number(q.matched) : <span className="text-slate-300">\u2014</span>}
@@ -886,6 +912,9 @@ function QrSection() {
                 </Td>
                 <Td align="center">
                   <Toggle on={q.active} onChange={(v) => void save(q.id, { active: v })} label={`${q.label} in use`} />
+                </Td>
+                <Td align="right">
+                  <QrImageButton qr={q} onDone={load} onError={setError} />
                 </Td>
               </tr>
             ))
@@ -931,6 +960,7 @@ function AddQrDialog({
   const [imageUrl, setImageUrl] = useState("");
   const [purpose, setPurpose] = useState("");
   const [owner, setOwner] = useState("");
+  const [site, setSite] = useState("hkmv");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -995,6 +1025,23 @@ function AddQrDialog({
             ]}
           />
         </label>
+        <label className="text-xs text-slate-500 sm:col-span-2">
+          Which site issues the 80G receipt
+          <Select
+            value={site}
+            onChange={setSite}
+            className="mt-1 w-full"
+            options={[
+              { value: "hkmv", label: "harekrishnavizag.org" },
+              { value: "annadan", label: "annadan" },
+              { value: "", label: "None \u2014 record it, issue nothing" },
+            ]}
+          />
+          <span className="mt-0.5 block text-[11px] text-slate-400">
+            When a donor pays through this QR, DRM raises the receipt on that site from its own 80G series, the
+            same way a cash donation is entered there.
+          </span>
+        </label>
       </div>
 
       <div className="mt-5 flex justify-end gap-2">
@@ -1011,6 +1058,7 @@ function AddQrDialog({
                 image_url: imageUrl.trim() || undefined,
                 purpose: purpose.trim() || undefined,
                 owner_id: owner || undefined,
+                receipt_site: site || undefined,
               });
               onDone(r.warning ?? null);
             } catch (e) {
@@ -1024,5 +1072,182 @@ function AddQrDialog({
         </button>
       </div>
     </Modal>
+  );
+}
+
+/**
+ * Uploading the branded QR image a donor actually receives.
+ *
+ * Razorpay hosts a plain square. The temple designs its own with the seva name
+ * and the deity on it, and this puts that image somewhere a donor's phone can
+ * fetch it straight from WhatsApp.
+ *
+ * It needs a public bucket and says so plainly when there isn't one, rather
+ * than storing something no donor could load.
+ */
+function QrImageButton({
+  qr,
+  onDone,
+  onError,
+}: {
+  qr: QrRow;
+  onDone: () => Promise<void> | void;
+  onError: (m: string) => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function upload(file: File) {
+    if (file.size > 2 * 1024 * 1024) {
+      return onError("That image is over 2 MB. A QR image should be far smaller.");
+    }
+    setBusy(true);
+    try {
+      await api.post(`/api/crm/qrs/${qr.id}/image`, {
+        filename: file.name,
+        base64: toBase64(await file.arrayBuffer()),
+      });
+      await onDone();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : "Could not upload that image");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex justify-end gap-1">
+      <input
+        ref={ref}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        className="sr-only"
+        onChange={(e) => e.target.files?.[0] && void upload(e.target.files[0])}
+      />
+      <button
+        onClick={() => ref.current?.click()}
+        disabled={busy}
+        className="rounded-lg px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+      >
+        {busy ? "…" : qr.image_key ? "Replace" : "Upload"}
+      </button>
+      {qr.image_key && (
+        <button
+          onClick={async () => {
+            try {
+              await api.delete(`/api/crm/qrs/${qr.id}/image`);
+              await onDone();
+            } catch (e) {
+              onError(e instanceof Error ? e.message : "Could not remove that image");
+            }
+          }}
+          className="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+        >
+          Remove
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * What file storage is keeping, and what it is not.
+ *
+ * Shown whether or not a bucket is set up, because the useful thing to know
+ * when it is missing is exactly which of these is not happening — not a blank
+ * space where a feature would be.
+ */
+interface StorageStatus {
+  configured: boolean;
+  public_urls: boolean;
+  sheets_kept: number;
+  sheets_total: number;
+  receipts_cached: number;
+  receipt_bytes: string;
+  qr_images: number;
+}
+
+function StorageSection() {
+  const [s, setS] = useState<StorageStatus | null>(null);
+
+  useEffect(() => {
+    api
+      .get<StorageStatus>("/api/crm/storage/status")
+      .then(setS)
+      .catch(() => undefined);
+  }, []);
+
+  if (!s) return null;
+
+  const mb = (bytes: string) => {
+    const n = Number(bytes);
+    return n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`;
+  };
+
+  return (
+    <Card>
+      <CardHeader
+        title="File storage"
+        subtitle={
+          s.configured
+            ? "Original uploads, branded QR images and cached receipts."
+            : "Not set up. Everything still works — these three things are simply not kept."
+        }
+      />
+
+      {s.configured ? (
+        <>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div>
+              <p className="text-2xl font-semibold tabular-nums text-slate-900">
+                {number(s.sheets_kept)}
+                <span className="text-base font-normal text-slate-400"> / {number(s.sheets_total)}</span>
+              </p>
+              <p className="text-xs text-slate-600">uploaded sheets kept as files</p>
+            </div>
+            <div>
+              <p className="text-2xl font-semibold tabular-nums text-slate-900">{number(s.receipts_cached)}</p>
+              <p className="text-xs text-slate-600">receipts cached · {mb(s.receipt_bytes)}</p>
+            </div>
+            <div>
+              <p className="text-2xl font-semibold tabular-nums text-slate-900">{number(s.qr_images)}</p>
+              <p className="text-xs text-slate-600">branded QR images</p>
+            </div>
+          </div>
+
+          {!s.public_urls && (
+            <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              The bucket has no public address set, so branded QR images cannot be uploaded — a donor&apos;s phone
+              fetches that image straight from WhatsApp and could not load a private one. Set{" "}
+              <span className="font-mono">R2_PUBLIC_BASE_URL</span> to enable it. Everything else works as it is.
+            </p>
+          )}
+
+          <p className="mt-3 text-xs text-slate-500">
+            A cached receipt can never go out of date: its stored name contains a fingerprint of what the receipt
+            prints — its number, the amount, the donor&apos;s name and address. Correct any of those and the
+            fingerprint changes, so DRM looks for a different file, doesn&apos;t find one, and fetches a fresh
+            receipt from the site. The old copy is never read again rather than needing to be cleared.
+          </p>
+        </>
+      ) : (
+        <div className="text-sm text-slate-600">
+          <p>Without a bucket, three things are not happening:</p>
+          <p className="mt-2">
+            The original workbook the office sends is not kept — every row is still stored and searchable, but
+            &ldquo;send me the file itself&rdquo; has no answer. Donors receive Razorpay&apos;s plain QR square
+            rather than a branded image. And every receipt reprint calls the donation site afresh instead of
+            being served from a copy.
+          </p>
+          <p className="mt-2 text-xs text-slate-500">
+            To turn it on, set <span className="font-mono">R2_ACCOUNT_ID</span>,{" "}
+            <span className="font-mono">R2_ACCESS_KEY_ID</span>,{" "}
+            <span className="font-mono">R2_SECRET_ACCESS_KEY</span> and{" "}
+            <span className="font-mono">R2_BUCKET</span>, plus{" "}
+            <span className="font-mono">R2_PUBLIC_BASE_URL</span> for the QR images.
+          </p>
+        </div>
+      )}
+    </Card>
   );
 }

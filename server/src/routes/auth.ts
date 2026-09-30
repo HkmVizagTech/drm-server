@@ -44,6 +44,29 @@ async function userCount(): Promise<number> {
   return r.rows[0].n;
 }
 
+/**
+ * Columns this file uses that a lagging database might not have yet.
+ *
+ * Checked once and cached, so the team list and the account screens degrade to
+ * "we cannot tell you that yet" instead of failing outright while a migration
+ * is pending. The alternative - assuming the schema is current - is what broke
+ * production.
+ */
+let userColumns: Set<string> | null = null;
+async function hasUserColumn(name: string): Promise<boolean> {
+  if (!userColumns) {
+    try {
+      const r = await pool.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'users'`
+      );
+      userColumns = new Set(r.rows.map((x) => x.column_name));
+    } catch {
+      return false;
+    }
+  }
+  return userColumns.has(name);
+}
+
 /* ------------------------------------------------------------------- login */
 
 router.post('/login', async (req, res) => {
@@ -66,7 +89,20 @@ router.post('/login', async (req, res) => {
       return res.status(403).json({ error: 'That account has been switched off. Ask an administrator.' });
     }
 
-    await pool.query(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [user.id]);
+    // Best-effort, and deliberately so.
+    //
+    // THIS EXACT LINE TOOK THE LIVE SITE DOWN. It was written as an awaited
+    // query, the deploy went out ahead of the schema, and every sign-in died
+    // with `column "last_login_at" does not exist` - locking out the very
+    // people who could have run the migration.
+    //
+    // Knowing when somebody last signed in is worth almost nothing. Being able
+    // to sign in is worth everything, because it is the door to fixing
+    // anything else. So this can fail as loudly as it likes in the log and the
+    // sign-in still succeeds.
+    void pool
+      .query(`UPDATE users SET last_login_at = NOW() WHERE id = $1`, [user.id])
+      .catch((e) => console.error('auth.login: could not record last_login_at -', e.message));
 
     const token = generateToken({ userId: user.id, role: user.role });
     res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
@@ -145,13 +181,28 @@ router.get('/needs-setup', async (_req, res) => {
   }
 });
 
+/**
+ * GET /me - who am I.
+ *
+ * On the critical path: the app calls this on every load to establish the
+ * session, so a failure here bounces somebody back to the login screen they
+ * just came through. It therefore asks only for columns that have existed
+ * since DRM's first day, and adds the newer ones only once they are really
+ * there. Same lesson as the login handler above.
+ */
 router.get('/me', authenticate, async (req, res) => {
-  const result = await pool.query(
-    'SELECT id, name, email, role, active FROM users WHERE id = $1',
-    [req.user!.userId]
-  );
-  if (!result.rows.length) return res.status(404).json({ error: 'User not found' });
-  res.json(result.rows[0]);
+  try {
+    const extra = (await hasUserColumn('active')) ? ', active' : '';
+    const result = await pool.query(
+      `SELECT id, name, email, role${extra} FROM users WHERE id = $1`,
+      [req.user!.userId]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'User not found' });
+    res.json({ active: true, ...result.rows[0] });
+  } catch (err) {
+    console.error('auth.me error:', err);
+    res.status(500).json({ error: 'Could not load your account' });
+  }
 });
 
 /** Changing your own password. Needs the current one, even for an admin. */
@@ -182,6 +233,24 @@ router.post('/change-password', authenticate, async (req, res) => {
 
 router.get('/users', authenticate, authorize('admin'), async (_req, res) => {
   try {
+    // The team screen is where somebody goes to fix an account, so it has to
+    // open even when the schema is behind - showing what it can rather than a
+    // five-hundred.
+    const hasActive = await hasUserColumn('active');
+    const hasLastLogin = await hasUserColumn('last_login_at');
+    if (!hasActive || !hasLastLogin) {
+      const rows = await pool.query(
+        `SELECT id, name, email, role, created_at,
+                TRUE AS active, NULL::timestamptz AS last_login_at,
+                0 AS assigned_leads, 0 AS open_leads, 0 AS calls_7d
+           FROM users ORDER BY name`
+      );
+      return res.json({
+        users: rows.rows,
+        degraded: 'The database is still being brought up to date, so sign-in times and lead counts are missing.',
+      });
+    }
+
     const rows = await pool.query(
       `SELECT u.id, u.name, u.email, u.role, u.active, u.created_at, u.last_login_at,
               COALESCE(l.assigned, 0)  AS assigned_leads,

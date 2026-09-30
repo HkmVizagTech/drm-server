@@ -39,6 +39,7 @@ import profilesRoutes from './routes/profiles';
 import filesRoutes from './routes/files';
 import { denyRole, readOnlyFor } from './middleware/auth';
 import { scheduleBirthdayAnniversaryCheck } from './utils/cron';
+import { runMigrations, setMigrationResult, getMigrationResult } from './db/migrate';
 
 dotenv.config();
 
@@ -96,7 +97,19 @@ app.use(
 
 // Health check
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  // The migration outcome is here on purpose. A deploy whose schema did not
+  // apply looks perfectly healthy from the outside and then fails on the first
+  // request that needs a new column - which is how a sign-in page started
+  // answering 500 with nothing obviously wrong. This makes it visible without
+  // having to reproduce it.
+  const schema = getMigrationResult();
+  res.json({
+    status: schema && !schema.ok ? 'degraded' : 'ok',
+    schema: schema
+      ? { applied: schema.ok, ms: schema.ms, ...(schema.error ? { error: schema.error } : {}) }
+      : { applied: null },
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // Routes
@@ -230,6 +243,21 @@ async function mountClient(): Promise<void> {
 }
 
 async function start(): Promise<void> {
+  // BEFORE anything is served.
+  //
+  // The alternative - deploy the code, remember to run schema.sql - failed
+  // exactly once and took every sign-in with it: the new code wrote a column
+  // the live database did not have, so nobody could log in, including the
+  // people who would have run the migration. An instruction is not a
+  // mechanism. schema.sql is additive and idempotent, so applying it on every
+  // boot is a no-op when there is nothing to do.
+  //
+  // A failure here does not stop the app. A database that is briefly
+  // unreachable at boot must not turn into a site that refuses to start at
+  // all - and whatever is wrong, serving the parts that still work beats
+  // serving nothing. It is logged loudly and shows on /health.
+  setMigrationResult(await runMigrations());
+
   await mountClient();
 
   // Error handler - last, so it sees errors thrown by everything above.

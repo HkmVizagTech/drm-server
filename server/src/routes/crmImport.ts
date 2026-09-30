@@ -28,6 +28,7 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
+import * as storage from '../services/storage';
 import { preacherIdForCode, normalizeCode } from './crmPreachers';
 import {
   parseWorkbook,
@@ -167,6 +168,8 @@ router.post('/import/sheet', async (req, res) => {
   try {
     await client.query('BEGIN');
     const batches: Record<string, unknown>[] = [];
+    let storedFileKey: string | null = null;
+    let storedFileSize: number | null = null;
 
     for (const ws of sheets) {
       const { headers, mapping, rows } = parseSheet(ws);
@@ -321,6 +324,38 @@ router.post('/import/sheet', async (req, res) => {
         );
       }
 
+      // The original file, kept beside the rows parsed out of it.
+      //
+      // lead_import_rows already answers "what did the March sheet say about
+      // this donor". What it cannot answer is "send me the file" - and
+      // somebody asking that wants the workbook, with its formatting and its
+      // other tabs, not a reconstruction of it.
+      //
+      // Stored ONCE per upload, and pointed at by EVERY batch it produced.
+      //
+      // A workbook with three tabs makes three batches. Storing three copies
+      // of one file would be three times the bytes for no extra answer - but
+      // setting file_key on only the first batch is worse: the other two would
+      // show a Download button that 404s, because the object exists and their
+      // row does not know about it. One object, three references.
+      if (storage.isConfigured() && !storedFileKey) {
+        const key = storage.keys.importFile(batchId, filename);
+        const put = await storage.putObject(
+          key,
+          Buffer.from(base64, 'base64'),
+          filename.toLowerCase().endsWith('.csv')
+            ? 'text/csv'
+            : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        );
+        if (put.ok) {
+          storedFileKey = key;
+          storedFileSize = Buffer.byteLength(base64, 'base64');
+        }
+        // A failed store is not a failed import. The rows are in; the file
+        // being unkept is a smaller loss than refusing an upload the office
+        // has already done.
+      }
+
       batches.push({
         ...batch.rows[0],
         headers,
@@ -336,6 +371,23 @@ router.post('/import/sheet', async (req, res) => {
           invalid: classified.filter((r) => r.outcome === 'invalid_phone' || r.outcome === 'no_phone').slice(0, 6),
         },
       });
+    }
+
+    // Every batch from this upload points at the one stored object, so a
+    // workbook's second and third tabs offer the same file rather than a
+    // button that fails.
+    if (storedFileKey && batches.length) {
+      await client.query(
+        `UPDATE lead_import_batches SET file_key = $2, file_size = $3, file_type = $4
+          WHERE id = ANY($1::uuid[])`,
+        [
+          batches.map((b) => b.id).filter(Boolean),
+          storedFileKey,
+          storedFileSize,
+          filename.split('.').pop()?.toLowerCase() ?? null,
+        ]
+      );
+      for (const b of batches) b.file_key = storedFileKey;
     }
 
     await client.query('COMMIT');
@@ -592,6 +644,45 @@ router.get('/import/batches/:id', async (req, res) => {
   } catch (err) {
     console.error('crm.getBatch error:', err);
     res.status(500).json({ error: 'Could not load that upload' });
+  }
+});
+
+/**
+ * GET /import/batches/:id/file - the workbook the office actually sent.
+ *
+ * Streamed through DRM rather than handed out as a bucket link: this is the
+ * donor list, and a public URL to it would outlive anybody's access to DRM.
+ */
+router.get('/import/batches/:id/file', async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT file_key, filename, file_type FROM lead_import_batches WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'That upload no longer exists' });
+    const b = r.rows[0];
+    if (!b.file_key) {
+      return res.status(404).json({
+        error: storage.isConfigured()
+          ? 'The original file was not kept for this upload. Its rows are all still here.'
+          : 'File storage is not set up, so original uploads are not kept. The rows are all still here.',
+      });
+    }
+
+    const buf = await storage.getObject(b.file_key);
+    if (!buf) return res.status(404).json({ error: 'That file is no longer in storage.' });
+
+    res.setHeader(
+      'Content-Type',
+      b.file_type === 'csv'
+        ? 'text/csv; charset=utf-8'
+        : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${storage.safeName(b.filename)}"`);
+    res.send(buf);
+  } catch (err) {
+    console.error('crm.batchFile error:', err);
+    res.status(500).json({ error: 'Could not fetch that file' });
   }
 });
 

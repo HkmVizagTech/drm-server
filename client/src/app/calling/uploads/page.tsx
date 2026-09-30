@@ -40,7 +40,7 @@ import {
   buttonSecondary,
   inputClass,
 } from "@/components/ui";
-import { SPREADSHEET_ACCEPT, toBase64 } from "@/lib/spreadsheet";
+import { downloadFromApi, SPREADSHEET_ACCEPT, toBase64 } from "@/lib/spreadsheet";
 
 interface Counts {
   new: number;
@@ -67,6 +67,10 @@ interface Batch {
   uploaded_by_name: string | null;
   stored_rows?: number;
   detail?: { counts?: Counts; headers?: string[]; mapping?: Record<string, number>; external_total?: number };
+  // The original workbook, when file storage kept one. Absent on uploads made
+  // before storage was set up - their rows are all still here.
+  file_key?: string | null;
+  file_size?: number | null;
   // present only on a fresh upload
   counts?: Counts;
   headers?: string[];
@@ -388,12 +392,13 @@ export default function UploadsPage() {
               <Th align="right">Updated</Th>
               <Th>Uploaded</Th>
               <Th align="center">State</Th>
+              <Th align="right">File</Th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {!history.length ? (
               <tr>
-                <td colSpan={6}>
+                <td colSpan={7}>
                   <EmptyState title="Nothing uploaded yet" message="Drop an Excel file or CSV above to get started." />
                 </td>
               </tr>
@@ -418,6 +423,27 @@ export default function UploadsPage() {
                       <Badge tone="good">applied</Badge>
                     ) : (
                       <Badge tone="warn">read, not applied</Badge>
+                    )}
+                  </Td>
+                  <Td align="right">
+                    {/* The workbook itself, not a reconstruction of it. Only
+                        offered where one was actually kept — uploads from
+                        before file storage was set up have their rows and
+                        nothing else, and saying so beats a button that 404s. */}
+                    {b.file_key ? (
+                      <button
+                        onClick={() =>
+                          void downloadFromApi(
+                            `/api/crm/import/batches/${b.id}/file`,
+                            b.filename
+                          ).catch((e) => setError(e instanceof Error ? e.message : "Could not fetch that file"))
+                        }
+                        className="rounded-lg px-2 py-1 text-xs text-slate-600 hover:bg-slate-100"
+                      >
+                        Download
+                      </button>
+                    ) : (
+                      <span className="text-xs text-slate-300">not kept</span>
                     )}
                   </Td>
                 </tr>

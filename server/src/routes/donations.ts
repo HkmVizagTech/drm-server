@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { normalizeAddress, type Address } from '../utils/address';
+import { getReceipt, receiptSourceForDonation } from '../services/receipts';
 import { authenticate, authorize } from '../middleware/auth';
 import {
   createOfflineDonation,
@@ -436,31 +437,49 @@ router.post('/:id/resend-receipt', async (req, res) => {
   }
 });
 
+/**
+ * GET /:id/receipt-file - the donor's 80G receipt.
+ *
+ * TWO FIXES LIVE HERE
+ *
+ * The query used to select external_ref and receipt_number, then destructure
+ * source_site out of the same row - a column it never asked for. So
+ * source_site was always undefined and every receipt was fetched from HKMV,
+ * which meant an annadan receipt could not be downloaded at all. It is
+ * selected now.
+ *
+ * And the PDF is cached, in a way that cannot serve a stale one: see
+ * receiptFingerprint. The key carries a hash of what the receipt prints, so a
+ * corrected receipt is a different object and the old one is never asked for
+ * again. ?refresh=true skips the cache for the rare case where somebody
+ * believes the site has changed something DRM cannot see.
+ */
 router.get('/:id/receipt-file', async (req, res) => {
   const { id } = req.params;
-  const result = await pool.query('SELECT external_ref, receipt_number FROM donations WHERE id = $1', [id]);
-  if (!result.rows.length) return res.status(404).json({ error: 'Donation not found' });
-
-  const { external_ref, receipt_number, source_site } = result.rows[0];
-  if (!external_ref) {
-    return res.status(400).json({ error: 'This donation has no linked hkmsite2.0 record to fetch a receipt file from.' });
-  }
-
   try {
-    const upstream = await fetchReceiptPdf((source_site || 'hkmv') as SiteKey, external_ref);
-    if (!upstream.ok) {
-      const text = await upstream.text().catch(() => '');
-      return res.status(upstream.status).json({ error: text || 'Could not fetch the receipt from hkmsite2.0' });
+    const src = await receiptSourceForDonation(id);
+    if (!src) {
+      const exists = await pool.query('SELECT 1 FROM donations WHERE id = $1', [id]);
+      if (!exists.rows.length) return res.status(404).json({ error: 'Donation not found' });
+      return res.status(400).json({
+        error: 'This donation has no linked site record to fetch a receipt file from.',
+      });
     }
-    const arrayBuffer = await upstream.arrayBuffer();
+
+    const out = await getReceipt(src, req.query.refresh === 'true');
+
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="receipt-${(receipt_number || id).replace(/[^a-zA-Z0-9-]/g, '-')}.pdf"`
+      `attachment; filename="receipt-${(out.receiptNumber || id).replace(/[^a-zA-Z0-9-]/g, '-')}.pdf"`
     );
-    res.send(Buffer.from(arrayBuffer));
+    // Says where it came from, so a slow download and a cached one are
+    // distinguishable when somebody asks why a reprint was instant.
+    res.setHeader('X-Receipt-Source', out.from);
+    res.send(out.buffer);
   } catch (err) {
-    res.status(502).json({ error: (err as Error).message });
+    const e = err as Error & { status?: number };
+    res.status(e.status && e.status < 500 ? e.status : 502).json({ error: e.message });
   }
 });
 

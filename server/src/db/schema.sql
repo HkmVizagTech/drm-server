@@ -1356,3 +1356,80 @@ CREATE TABLE IF NOT EXISTS qr_payments (
 CREATE INDEX IF NOT EXISTS idx_qr_payments_unmatched
   ON qr_payments(received_at DESC) WHERE share_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_qr_payments_qr ON qr_payments(qr_id, received_at DESC);
+
+
+-- ===========================================================================
+-- STORED FILES
+--
+-- All of this is optional. DRM ran without object storage and still does: an
+-- unset bucket means these columns stay NULL and every screen falls back to
+-- what it did before. Nothing here is on the path of anything that already
+-- works.
+-- ===========================================================================
+
+-- The office's original workbook, kept beside the rows parsed out of it.
+--
+-- lead_import_rows already holds every row of every sheet, which answers "what
+-- did the March sheet say about this donor". What it cannot answer is "send me
+-- the file" - and an accountant asking that wants the file, with its formatting
+-- and its other tabs, not a reconstruction.
+ALTER TABLE lead_import_batches ADD COLUMN IF NOT EXISTS file_key  TEXT;
+ALTER TABLE lead_import_batches ADD COLUMN IF NOT EXISTS file_size INT;
+ALTER TABLE lead_import_batches ADD COLUMN IF NOT EXISTS file_type VARCHAR(120);
+
+-- Which site raises the 80G receipt when a QR payment comes in.
+--
+-- Set when the QR is registered rather than chosen mid-call: a caller already
+-- has a conversation to run, and a receipt issued from the wrong series is not
+-- something they would notice.
+ALTER TABLE razorpay_qrs ADD COLUMN IF NOT EXISTS receipt_site VARCHAR(20);
+-- A branded image an admin uploaded, in place of Razorpay's plain square.
+-- image_url stays as the fallback, so a QR with no upload still works.
+ALTER TABLE razorpay_qrs ADD COLUMN IF NOT EXISTS image_key TEXT;
+
+-- What became of a matched payment once DRM tried to turn it into a receipt.
+--
+-- Kept per payment rather than inferred, because "the donor paid but the site
+-- refused the entry" is a real state somebody has to see and act on - not a
+-- failure to retry forever, and certainly not a silent one.
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS receipt_status VARCHAR(20);
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS receipt_error  TEXT;
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS receipt_number VARCHAR(80);
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS external_donation_id VARCHAR(80);
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS receipt_site   VARCHAR(20);
+
+CREATE INDEX IF NOT EXISTS idx_qr_payments_receipt_pending
+  ON qr_payments(received_at DESC)
+  WHERE share_id IS NOT NULL AND receipt_status IN ('pending', 'failed');
+
+-- A cached copy of a receipt PDF.
+--
+-- WHY THIS CANNOT GO STALE
+-- The key is content-addressed: it carries a fingerprint of the fields the
+-- receipt actually renders - its number, the amount, the donor's name and
+-- address, the date. Correct any of those and the fingerprint changes, so the
+-- next request looks for a DIFFERENT object, misses, and fetches fresh. The
+-- old object is never read again rather than being invalidated, which removes
+-- the step everybody forgets.
+--
+-- An issued 80G receipt is in any case meant to be immutable - it has a number
+-- and it has been sent - which is why the sites deliberately do not rewrite
+-- past donations when a donor edits their profile. This table caches something
+-- that should not change, and notices if it does anyway.
+CREATE TABLE IF NOT EXISTS receipt_cache (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  site VARCHAR(20) NOT NULL,
+  external_donation_id VARCHAR(80) NOT NULL,
+  -- sha256 of the receipt-bearing fields, as DRM knew them at fetch time.
+  fingerprint VARCHAR(64) NOT NULL,
+  storage_key TEXT NOT NULL,
+  receipt_number VARCHAR(80),
+  bytes INT,
+  fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_served_at TIMESTAMPTZ,
+  serve_count INT NOT NULL DEFAULT 0,
+  UNIQUE (site, external_donation_id, fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_receipt_cache_lookup
+  ON receipt_cache(site, external_donation_id, fingerprint);
