@@ -17,7 +17,7 @@
 
 import { Router } from 'express';
 import pool from '../db/pool';
-import { authenticate } from '../middleware/auth';
+import { authenticate, authorize } from '../middleware/auth';
 
 const router = Router();
 router.use(authenticate);
@@ -111,7 +111,7 @@ router.get('/preachers', async (req, res) => {
          LEFT JOIN LATERAL (
            SELECT COUNT(*)::int AS leads,
                   COUNT(*) FILTER (WHERE COALESCE(s.is_open, TRUE) AND NOT le.do_not_call)::int AS open_leads,
-                  COUNT(*) FILTER (WHERE le.converted_donation_id IS NOT NULL)::int AS converted,
+                  COUNT(*) FILTER (WHERE le.converted_at IS NOT NULL)::int AS converted,
                   COALESCE(SUM(le.converted_amount), 0)::numeric AS raised,
                   -- Lifetime giving from the office's own sheets, kept apart
                   -- from anything DRM raised. See the schema note.
@@ -134,7 +134,7 @@ router.get('/preachers', async (req, res) => {
   }
 });
 
-router.post('/preachers', async (req, res) => {
+router.post('/preachers', authorize('admin', 'accountant'), async (req, res) => {
   const code = normalizeCode(req.body?.code);
   if (!code) return res.status(400).json({ error: 'A preacher needs a code' });
   const idNumber = normalizeIdNumber(req.body?.id_number);
@@ -176,7 +176,7 @@ router.post('/preachers', async (req, res) => {
   }
 });
 
-router.put('/preachers/:id', async (req, res) => {
+router.put('/preachers/:id', authorize('admin', 'accountant'), async (req, res) => {
   const b = req.body ?? {};
   try {
     // An empty string means "clear this", which COALESCE alone cannot express
@@ -231,7 +231,7 @@ router.put('/preachers/:id', async (req, res) => {
  * "nobody" or "the row was tidied away". Retiring keeps the history readable
  * and takes the code out of the dropdowns, which is what "delete" was for.
  */
-router.post('/preachers/:id/retire', async (req, res) => {
+router.post('/preachers/:id/retire', authorize('admin', 'accountant'), async (req, res) => {
   try {
     const result = await pool.query(
       `UPDATE preachers SET active = FALSE, updated_at = NOW() WHERE id = $1 RETURNING *`,

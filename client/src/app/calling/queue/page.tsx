@@ -109,9 +109,16 @@ function atTenAm(daysFromNow: number): string {
  * suggests is exactly the signal needed: one that closes a lead is not good
  * news however the call connected.
  */
+// The stages that close a lead badly. `converted` closes it too, and should
+// stay green - it is the best outcome there is. Anything the temple invents in
+// Settings is unknown here and falls through to neutral, which is the right
+// default for a stage this screen has never heard of.
+const BAD_ENDINGS = ["not_interested", "invalid", "dnc"];
+
 function toneFor(d: Disposition): string {
-  const closes = d.suggests_status === "not_interested" || d.suggests_status === "invalid" || d.suggests_status === "dnc";
-  if (closes) return "border-slate-200 bg-white text-slate-600 hover:bg-slate-50";
+  if (BAD_ENDINGS.includes(d.suggests_status ?? "")) {
+    return "border-slate-200 bg-white text-slate-600 hover:bg-slate-50";
+  }
   if (d.counts_connected) return "border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100";
   return "border-slate-200 bg-white text-slate-700 hover:bg-slate-50";
 }
@@ -180,6 +187,10 @@ function CallingQueue() {
   // until then, the wider default, so a caller who opens the reminder box in
   // the first second after a refresh does not silently get something narrower.
   const [remAlerts, setRemAlerts] = useState<number[]>(DEFAULT_ALERTS);
+  // What they gave, when the outcome is that they gave. Without this the
+  // conversion was recorded with no figure at all, and every report showed a
+  // donation taken on the call as a conversion worth nothing.
+  const [donatedAmount, setDonatedAmount] = useState("");
 
   // What was just logged, so a misclick is one keystroke away from being fixed
   // rather than a trip to the lead page.
@@ -260,6 +271,7 @@ function CallingQueue() {
     setRemOccasion("");
     setRemWhen("");
     setRemAmount("");
+    setDonatedAmount("");
     setCopied(false);
   };
 
@@ -284,6 +296,7 @@ function CallingQueue() {
                 note: note.trim() || undefined,
               }
             : undefined,
+          donated_amount: donatedAmount ? Number(donatedAmount) : undefined,
         });
 
         setDone((n) => n + 1);
@@ -302,7 +315,7 @@ function CallingQueue() {
         setSaving(false);
       }
     },
-    [lead, saving, sessionId, note, duration, followUp, customDate, remWhen, remOccasion, remAmount, remAlerts]
+    [lead, saving, sessionId, note, duration, followUp, customDate, remWhen, remOccasion, remAmount, remAlerts, donatedAmount]
   );
 
   // Refill when the loaded batch runs low, so the caller never hits a spinner
@@ -788,6 +801,30 @@ function CallingQueue() {
               >
                 shortcuts {shortcutsOn ? "on" : "off"}
               </button>
+            </div>
+
+            {/* How much, when the outcome is that they gave.
+                Optional and inline rather than a dialog: a caller has somebody
+                on the line. Left blank it falls back to whatever the lead was
+                expected to give, and the conversion is still recorded - a
+                donation with no figure beats a donation DRM denies happened,
+                which is what used to occur. */}
+            <div className="mt-4">
+              <label className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                If they gave on this call, how much?
+                <input
+                  value={donatedAmount}
+                  onChange={(e) => setDonatedAmount(e.target.value.replace(/\D/g, ""))}
+                  placeholder="₹ optional"
+                  inputMode="numeric"
+                  className={`${inputClass} w-32 text-sm tabular-nums`}
+                />
+                {!!donatedAmount && (
+                  <span className="text-[11px] text-emerald-700">
+                    recorded when you pick an outcome that means they donated
+                  </span>
+                )}
+              </label>
             </div>
 
             <div className="mt-4">

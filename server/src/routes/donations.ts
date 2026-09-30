@@ -454,8 +454,14 @@ router.post('/:id/resend-receipt', async (req, res) => {
  * again. ?refresh=true skips the cache for the rare case where somebody
  * believes the site has changed something DRM cannot see.
  */
-router.get('/:id/receipt-file', async (req, res) => {
-  const { id } = req.params;
+// An 80G receipt carries the donor's full name, address, PAN and amount.
+//
+// readOnlyFor('caller') on this router lets every GET through, and the guard's
+// own comment says a download is a GET and cannot be told apart from reading a
+// page by method alone - "that is a separate check on those handlers". This is
+// that check. A caller has no reason to pull another donor's tax certificate.
+router.get('/:id/receipt-file', authorize('admin', 'accountant'), async (req, res) => {
+  const id = String(req.params.id);
   try {
     const src = await receiptSourceForDonation(id);
     if (!src) {

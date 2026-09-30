@@ -10,7 +10,33 @@ declare global {
   }
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
+/**
+ * The signing secret, and why this refuses to start without one.
+ *
+ * It used to fall back to the literal string 'dev-secret-change-in-production'.
+ * That string is in this repository, so a deploy that lost JWT_SECRET - a
+ * renamed variable, a fresh environment, a typo - would come up looking
+ * perfectly healthy while anybody who had read the source could mint
+ * themselves an admin token. Nothing would have logged, and nothing would have
+ * looked wrong.
+ *
+ * Outside development the process now refuses to start. A DRM that is down is
+ * a bad morning; a DRM anyone can sign into as an admin is the donor database.
+ */
+const JWT_SECRET = (() => {
+  const fromEnv = process.env.JWT_SECRET;
+  if (fromEnv && fromEnv.length >= 16) return fromEnv;
+
+  if (process.env.NODE_ENV === 'production') {
+    console.error(
+      'FATAL: JWT_SECRET is missing or too short (16+ characters). ' +
+        'Refusing to start rather than signing tokens with a secret that is public in the source.'
+    );
+    process.exit(1);
+  }
+  console.warn('[auth] JWT_SECRET is not set - using a development secret. Never do this in production.');
+  return 'dev-secret-change-in-production';
+})();
 
 export function generateToken(payload: AuthPayload): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });

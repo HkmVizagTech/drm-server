@@ -10,7 +10,7 @@
 // guards itself with the same HKMV_INTERNAL_SECRET used for outbound calls,
 // so one secret configures the connection in both directions.
 
-import { Router } from 'express';
+import { Router, type Request, type Response, type NextFunction } from 'express';
 import { upsertDonorSnapshot, DonorSnapshotInput } from '../services/hkmvSync';
 import { SiteKey, SITE_KEYS, getSite } from '../services/hkmvClient';
 
@@ -40,6 +40,24 @@ function matchSite(provided: unknown): SiteKey | null {
     if (site.secret && constantTimeEquals(provided, site.secret)) return key;
   }
   return null;
+}
+
+/**
+ * The same site-secret check, as reusable middleware.
+ *
+ * Exported so the donor lookup in index.ts authenticates exactly the way the
+ * webhooks do. One implementation, because two copies of "is this really one
+ * of our sites" is how one of them ends up subtly weaker.
+ */
+export function siteAuth(req: Request, res: Response, next: NextFunction) {
+  const configured = SITE_KEYS.filter((k) => getSite(k).secret);
+  if (!configured.length) {
+    return res.status(503).json({ error: 'No site secret is configured' });
+  }
+  const matched = matchSite(req.headers['x-internal-secret']);
+  if (!matched) return res.status(401).json({ error: 'Unauthorized' });
+  (req as unknown as { authedSite?: SiteKey }).authedSite = matched;
+  next();
 }
 
 router.use((req, res, next) => {

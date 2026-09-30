@@ -322,7 +322,12 @@ router.get('/reports/callers', async (req, res) => {
                 COUNT(*)::int AS conversions,
                 COALESCE(SUM(l.converted_amount),0)::numeric AS raised
            FROM leads l
-          WHERE l.converted_donation_id IS NOT NULL AND ${WINDOW('l.converted_at', 1, 2)}
+          -- converted_at, not converted_donation_id. See the dashboard's own
+          -- note: a QR payment and a cash donation recorded by hand both
+          -- convert a lead without ever producing a donation row here, so
+          -- keying on the link counted a caller's QR work as zero conversions
+          -- and zero rupees on the very report a supervisor judges them by.
+          WHERE l.converted_at IS NOT NULL AND ${WINDOW('l.converted_at', 1, 2)}
           GROUP BY l.assigned_to
        )
        SELECT u.id, u.name, u.email,
@@ -400,7 +405,9 @@ router.get('/reports/timeline', async (req, res) => {
            SELECT date_trunc($3, converted_at) AS b,
                   COUNT(*)::int AS conversions,
                   COALESCE(SUM(converted_amount),0)::numeric AS raised
-             FROM leads WHERE converted_donation_id IS NOT NULL AND ${WINDOW('converted_at', 1, 2)}
+             -- Same rule as everywhere else: a conversion is a conversion,
+             -- whether or not a receipt row exists for it yet.
+             FROM leads WHERE converted_at IS NOT NULL AND ${WINDOW('converted_at', 1, 2)}
             GROUP BY 1
          ) v ON v.b = d.bucket
         ORDER BY d.bucket`,
@@ -477,9 +484,14 @@ router.get('/reports/conversion', async (req, res) => {
     const rows = await pool.query(
       `SELECT COALESCE(l.${by}::text, 'Unspecified') AS bucket,
               COUNT(*)::int AS leads,
-              COUNT(*) FILTER (WHERE l.converted_donation_id IS NOT NULL)::int AS conversions,
+              -- These three disagreed with each other: the raised sum counted
+              -- every conversion while the conversion count took only the
+              -- receipted ones, so a row could show money raised, a conversion
+              -- count of zero and a rate of 0% at once - and still carry the
+              -- converted lead's expectation in pipeline as if outstanding.
+              COUNT(*) FILTER (WHERE l.converted_at IS NOT NULL)::int AS conversions,
               COALESCE(SUM(l.converted_amount),0)::numeric AS raised,
-              COALESCE(SUM(l.expected_amount) FILTER (WHERE l.converted_donation_id IS NULL),0)::numeric AS pipeline,
+              COALESCE(SUM(l.expected_amount) FILTER (WHERE l.converted_at IS NULL),0)::numeric AS pipeline,
               COALESCE(AVG(l.call_attempts),0)::numeric(10,1) AS avg_attempts
          FROM leads l
         WHERE ${WINDOW('l.created_at', 1, 2)}

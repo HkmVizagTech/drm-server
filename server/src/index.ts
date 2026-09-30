@@ -26,7 +26,7 @@ import triggersRoutes from './routes/triggers';
 import reportsRoutes from './routes/reports';
 import subscriptionsRoutes from './routes/subscriptions';
 import prasadamRoutes from './routes/prasadam';
-import webhooksRoutes from './routes/webhooks';
+import webhooksRoutes, { siteAuth } from './routes/webhooks';
 import crmRoutes from './routes/crm';
 import crmReportsRoutes from './routes/crmReports';
 import crmRemindersRoutes from './routes/crmReminders';
@@ -118,6 +118,44 @@ app.use('/api/auth', authRoutes);
 // change anything there. Enforced here, ahead of the routers, rather than on
 // each handler: a guard you have to remember to add to the next endpoint is a
 // guard that will be missing from it.
+// A donor lookup for the two donation sites, so their forms can recognise a
+// returning donor by phone.
+//
+// WHAT THIS REPLACED, AND WHY IT HAD TO GO
+// There used to be an `app.get('/api/people/lookup')` further down this file,
+// commented "no auth, rate limited". It had neither. It returned name, email,
+// address and PAN for any phone number to anyone who asked, and the only thing
+// standing between that and the open internet was an accident of ordering:
+// registered AFTER the people router, so `/api/people/:id` matched "lookup"
+// first and swallowed it. Moving one line would have published donors' PAN
+// numbers - and meanwhile the sites' lookups were simply broken, because they
+// were hitting `/:id` with an id of "lookup".
+//
+// So it is mounted ahead of the router where it actually works, authenticated
+// with the same per-site shared secret the webhooks use, and it no longer
+// returns PAN: a donation form needs to greet somebody by name and prefill an
+// address, not read their tax identifier.
+app.get('/api/people/lookup', siteAuth, async (req, res) => {
+  const phone = String(req.query.phone ?? '').replace(/\D/g, '').slice(-10);
+  if (phone.length !== 10) return res.status(400).json({ error: 'A 10-digit phone number is required' });
+
+  try {
+    const result = await pool.query(
+      `SELECT id, name, phone, email, address, address_door, address_house, address_street,
+              address_area, address_city, address_state, address_pincode, address_country
+         FROM people
+        WHERE right(regexp_replace(phone, '\\D', '', 'g'), 10) = $1
+        LIMIT 1`,
+      [phone]
+    );
+    if (!result.rows.length) return res.json({ found: false });
+    res.json({ found: true, person: result.rows[0] });
+  } catch (err) {
+    console.error('people.lookup error:', err);
+    res.status(500).json({ error: 'Lookup failed' });
+  }
+});
+
 app.use('/api/people', readOnlyFor('caller'), peopleRoutes);
 // Reconciling who a donor is across DRM, HKMV and annadan. Its own prefix
 // rather than another /api/people route, because it acts on the sites as much
@@ -170,21 +208,7 @@ app.use('/api/razorpay', razorpayWebhook);
 // user, and the router enforces its own shared-secret check.
 app.use('/api/webhooks', webhooksRoutes);
 
-// Public donor lookup API (used by the live donation site - no auth, rate limited)
-app.get('/api/people/lookup', async (req, res) => {
-  const { phone } = req.query;
-  if (!phone || typeof phone !== 'string') {
-    return res.status(400).json({ error: 'Phone number required' });
-  }
 
-  const result = await pool.query(
-    'SELECT id, name, phone, email, address, pan FROM people WHERE phone = $1',
-    [phone.replace(/\s+/g, '').replace(/^\+91/, '')]
-  );
-
-  if (!result.rows.length) return res.json({ found: false });
-  res.json({ found: true, person: result.rows[0] });
-});
 
 // ---------------------------------------------------------------------------
 // The admin UI, served from this same process.

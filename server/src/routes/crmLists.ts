@@ -21,7 +21,7 @@
 
 import { Router } from 'express';
 import pool from '../db/pool';
-import { authenticate } from '../middleware/auth';
+import { authenticate, authorize } from '../middleware/auth';
 
 const router = Router();
 router.use(authenticate);
@@ -203,7 +203,10 @@ router.get('/lists', async (req, res) => {
   }
 });
 
-router.post('/lists', async (req, res) => {
+// Making, editing and staffing calling lists is how the office decides who
+// gets rung and by whom. Left open, a caller could reassign a list away from a
+// colleague mid-campaign or retire it outright.
+router.post('/lists', authorize('admin', 'accountant'), async (req, res) => {
   const name = str(req.body?.name, 160);
   if (!name) return res.status(400).json({ error: 'A list needs a name' });
 
@@ -238,7 +241,7 @@ router.post('/lists', async (req, res) => {
   }
 });
 
-router.put('/lists/:id', async (req, res) => {
+router.put('/lists/:id', authorize('admin', 'accountant'), async (req, res) => {
   const b = req.body ?? {};
   try {
     const r = await pool.query(
@@ -273,7 +276,7 @@ router.put('/lists/:id', async (req, res) => {
  * checkboxes now say is both simpler and free of the race where two admins
  * each remove the other's person.
  */
-router.put('/lists/:id/assignees', async (req, res) => {
+router.put('/lists/:id/assignees', authorize('admin', 'accountant'), async (req, res) => {
   const ids: string[] = Array.isArray(req.body?.user_ids) ? req.body.user_ids.map(String) : [];
   const note = str(req.body?.note, 2000);
 
@@ -459,17 +462,29 @@ router.post('/sessions/:id/end', async (req, res) => {
  * disagreed with the reports would be worse than no history screen.
  */
 router.get('/sessions/history', async (req, res) => {
-  const userId = str(req.query.user_id, 36) ?? req.user?.userId ?? null;
+  // Only an admin may ask about somebody else. The user ids are handed out
+  // freely by /config to populate dropdowns, so without this any caller could
+  // read a colleague's last thirty shifts by pasting their id into the query.
+  const asked = str(req.query.user_id, 36);
+  const userId =
+    asked && req.user?.role === 'admin' ? asked : req.user?.userId ?? null;
   try {
     const rows = await pool.query(
       `SELECT s.id, s.started_at, s.last_active_at, s.ended_at,
               cl.name AS list_name,
               COUNT(a.id)::int AS calls,
-              COUNT(a.id) FILTER (WHERE d.counts_connected)::int AS connected
+              -- The stored column, not a recomputation from the disposition
+              -- table. The schema says why: a caller can mark a call connected
+              -- that ended in an outcome the temple later reclassifies, and
+              -- the connected/unanswered split must not shift under old
+              -- reports. Deriving it here made every past shift in this screen
+              -- change the moment somebody edited a disposition in Settings,
+              -- while the dashboard and the caller report kept the real
+              -- numbers - two screens, two answers, same shift.
+              COUNT(a.id) FILTER (WHERE a.connected)::int AS connected
          FROM calling_sessions s
          LEFT JOIN calling_lists cl ON s.list_id = cl.id
          LEFT JOIN lead_activities a ON a.session_id = s.id AND a.kind = 'call'
-         LEFT JOIN crm_dispositions d ON a.disposition = d.slug
         WHERE s.user_id = $1
         GROUP BY s.id, cl.name
         ORDER BY s.last_active_at DESC

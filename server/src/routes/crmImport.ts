@@ -27,7 +27,7 @@
 
 import { Router } from 'express';
 import pool from '../db/pool';
-import { authenticate } from '../middleware/auth';
+import { authenticate, authorize } from '../middleware/auth';
 import * as storage from '../services/storage';
 import { preacherIdForCode, normalizeCode } from './crmPreachers';
 import {
@@ -486,7 +486,7 @@ router.post('/import/batches/:id/apply', async (req, res) => {
     let skipped = 0;
 
     for (const r of rows.rows) {
-      if (skipExisting && r.was_existing) { skipped++; continue; }
+      if (skipExisting && r.outcome === 'updated') { skipped++; continue; }
 
       // The person this donor already is in DRM, if they are one. Matching on
       // the donor code first and the phone second, the same order the preview
@@ -527,6 +527,14 @@ router.post('/import/batches/:id/apply', async (req, res) => {
            external_last_donation_at = COALESCE(EXCLUDED.external_last_donation_at, leads.external_last_donation_at),
            external_account_type     = COALESCE(EXCLUDED.external_account_type, leads.external_account_type),
            external_account_count    = COALESCE(EXCLUDED.external_account_count, leads.external_account_count),
+           -- The sheet this lead was last seen on.
+           --
+           -- Left alone, this stayed on whichever sheet first brought them in,
+           -- and the calling list the importer creates for a batch selects on
+           -- it. So uploading "Janmashtami 2026" with 500 rows, 300 of them
+           -- existing leads, produced a list of 200 - and the caller told to
+           -- work that list never saw the 300 returning donors in it.
+           import_batch_id   = COALESCE(EXCLUDED.import_batch_id, leads.import_batch_id),
            updated_at        = NOW()
          RETURNING id, (xmax = 0) AS was_inserted`,
         [
@@ -653,7 +661,11 @@ router.get('/import/batches/:id', async (req, res) => {
  * Streamed through DRM rather than handed out as a bucket link: this is the
  * donor list, and a public URL to it would outlive anybody's access to DRM.
  */
-router.get('/import/batches/:id/file', async (req, res) => {
+// The office's original workbook: the whole donor list with lifetime giving,
+// exactly as it arrived. This handler's own comment says a public URL to it
+// would outlive anybody's access to DRM - and it had no role check at all, so
+// any caller could list the batches, take an id and save the sheet.
+router.get('/import/batches/:id/file', authorize('admin', 'accountant'), async (req, res) => {
   try {
     const r = await pool.query(
       `SELECT file_key, filename, file_type FROM lead_import_batches WHERE id = $1`,

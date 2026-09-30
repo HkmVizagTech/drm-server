@@ -131,6 +131,14 @@ async function reconcileConversions(force = false): Promise<number> {
          JOIN donations d ON d.person_id = l.person_id
         WHERE l.person_id IS NOT NULL
           AND l.converted_donation_id IS NULL
+          -- AND not already converted by a human or by a QR payment.
+          --
+          -- Both of those deliberately leave converted_donation_id NULL, so
+          -- without this line they stayed eligible for ever: a caller who
+          -- recorded 50,000 in cash would find it silently rewritten to a 101
+          -- donation the same donor made on annadan a week later, redated,
+          -- and relabelled 'auto' as though DRM had observed it.
+          AND l.converted_at IS NULL
           AND d.created_at >= l.created_at
         ORDER BY l.id, d.created_at ASC
      )
@@ -210,7 +218,11 @@ router.get('/config', async (_req, res) => {
   }
 });
 
-router.put('/settings/:key', async (req, res) => {
+// Configuration is an admin's to change. These three were reachable by any
+// caller, protected only by the setup screen's nav link being hidden - so one
+// fetch() from a browser console could retire every stage, change how many
+// times a lead is dialled, or switch on "callers see all leads".
+router.put('/settings/:key', authorize('admin'), async (req, res) => {
   try {
     const result = await pool.query(
       `INSERT INTO crm_settings (key, value, updated_by, updated_at)
@@ -229,7 +241,7 @@ router.put('/settings/:key', async (req, res) => {
 // Add or edit a stage. Deleting is not offered on purpose: leads already sitting
 // in a stage would be orphaned by it, so a stage is retired with active=false
 // and stops appearing in the dropdowns while old leads keep their history.
-router.put('/statuses/:slug', async (req, res) => {
+router.put('/statuses/:slug', authorize('admin'), async (req, res) => {
   const { label, tone, sort_order, is_won, is_lost, is_open, active } = req.body ?? {};
   try {
     const result = await pool.query(
@@ -262,7 +274,7 @@ router.put('/statuses/:slug', async (req, res) => {
   }
 });
 
-router.put('/dispositions/:slug', async (req, res) => {
+router.put('/dispositions/:slug', authorize('admin'), async (req, res) => {
   const { label, counts_connected, suggests_status, wants_follow_up, sort_order, active } = req.body ?? {};
   try {
     const result = await pool.query(
@@ -331,6 +343,41 @@ interface Filters {
   where: string;
   values: unknown[];
   next: number;
+}
+
+/**
+ * Whether this person may see every lead, or only their own.
+ *
+ * WHY THIS IS READ ON EVERY REQUEST
+ * `callers_see_all_leads` has existed in settings since the beginning, with a
+ * toggle on the setup screen and a default of off - and no code anywhere read
+ * it. So it was off, looked off, and did nothing: a caller could open the
+ * leads screen, or the CSV export, and take the temple's entire donor base
+ * with lifetime giving figures, twenty thousand rows at a time.
+ *
+ * Only callers are narrowed. An admin, accountant or coordinator sees the lot
+ * by the nature of their job; the setting exists to decide one question, which
+ * is whether a caller's world is their own assignment or the whole temple.
+ *
+ * Unassigned leads stay visible to everybody even when narrowing, because a
+ * lead nobody owns that nobody can see is a lead nobody rings.
+ */
+async function leadScopeFor(user?: { role?: string; userId?: string }): Promise<string | null> {
+  if (user?.role !== 'caller') return null;
+  const r = await pool.query(`SELECT value FROM crm_settings WHERE key = 'callers_see_all_leads'`);
+  if (r.rows[0]?.value === true) return null;
+  return user?.userId ?? null;
+}
+
+/** The SQL that narrows to one caller, appended to a built filter. */
+function withScope(f: Filters, scope: string | null): Filters {
+  if (!scope) return f;
+  const clause = `(l.assigned_to = $${f.next}::uuid OR l.assigned_to IS NULL)`;
+  return {
+    where: f.where ? `${f.where} AND ${clause}` : `WHERE ${clause}`,
+    values: [...f.values, scope],
+    next: f.next + 1,
+  };
 }
 
 // One filter builder for the list, the export and the bulk actions. If the
@@ -436,7 +483,9 @@ function buildLeadFilters(q: Record<string, unknown>, startIdx = 1): Filters {
   }
 
   if (q.open === 'true') conditions.push(`COALESCE(s.is_open, TRUE) = TRUE`);
-  if (q.converted === 'true') conditions.push(`l.converted_donation_id IS NOT NULL`);
+  // Converted means converted. Keying on the donation link hid every lead
+  // that gave by QR or by cash from the leads screen's own Converted filter.
+  if (q.converted === 'true') conditions.push(`l.converted_at IS NOT NULL`);
   if (q.do_not_call === 'true') conditions.push(`l.do_not_call = TRUE`);
   else if (q.do_not_call !== 'include') conditions.push(`l.do_not_call = FALSE`);
 
@@ -511,7 +560,10 @@ router.get('/leads', async (req, res) => {
   const sort = SORTS[String(req.query.sort || '')] || SORTS.due;
 
   try {
-    const f = buildLeadFilters(req.query as Record<string, unknown>);
+    const f = withScope(
+      buildLeadFilters(req.query as Record<string, unknown>),
+      await leadScopeFor(req.user)
+    );
     const [rows, total] = await Promise.all([
       pool.query(
         `SELECT ${LEAD_COLUMNS} ${LEAD_JOINS} ${f.where}
@@ -533,7 +585,16 @@ router.get('/leads', async (req, res) => {
 // rather than as a second request that might not have landed yet.
 router.get('/leads/:id', async (req, res) => {
   try {
-    const lead = await pool.query(`SELECT ${LEAD_COLUMNS} ${LEAD_JOINS} WHERE l.id = $1`, [req.params.id]);
+    const scope = await leadScopeFor(req.user);
+    const lead = await pool.query(
+      `SELECT ${LEAD_COLUMNS} ${LEAD_JOINS}
+        WHERE l.id = $1
+          AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL)`,
+      [req.params.id, scope]
+    );
+    // 404 rather than 403 on purpose: a caller narrowed to their own leads
+    // should not be able to confirm that a given lead id exists by the shape
+    // of the refusal.
     if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
 
     const [activities, donations, reminders] = await Promise.all([
@@ -1002,7 +1063,11 @@ router.post('/leads/:id/call', async (req, res) => {
     // can put the lead back exactly rather than guessing at it afterwards.
     const lead = await client.query(
       `SELECT id, status, person_id, call_attempts, last_contacted_at, last_outcome,
-              next_follow_up_at, follow_up_note, do_not_call, remarks
+              next_follow_up_at, follow_up_note, do_not_call, remarks,
+              -- Needed by the conversion block below, and worth having in the
+              -- undo payload: undoing a call that recorded a donation has to
+              -- be able to put the lead back to not having one.
+              converted_at, converted_amount, converted_via, expected_amount
          FROM leads WHERE id = $1 FOR UPDATE`,
       [req.params.id]
     );
@@ -1145,6 +1210,43 @@ router.post('/leads/:id/call', async (req, res) => {
       );
     }
 
+    // "Donated now" moved the stage and recorded nothing else.
+    //
+    // The disposition suggests the 'converted' stage, so the lead correctly
+    // left the queue - and then every conversion count, every rupee figure,
+    // the leads screen's own Converted filter and the "one of your leads
+    // donated" alert read it as a lead that never converted, because all of
+    // them key on converted_at. A caller taking a donation on the call was the
+    // one path through DRM that recorded a conversion nowhere.
+    //
+    // The amount is whatever the caller said, else what the lead was expected
+    // to give, else nothing - an amount of zero is still a conversion, and a
+    // conversion with no figure is better than a donation DRM denies happened.
+    if (nextStatus === 'converted' && !lead.rows[0].converted_at) {
+      await client.query(
+        `UPDATE leads SET
+           converted_amount   = COALESCE($2::numeric, expected_amount),
+           converted_at       = NOW(),
+           converted_via      = 'manual',
+           converted_note     = COALESCE(converted_note, $3),
+           conversion_seen_at = NOW(),
+           awaiting_qr_at     = NULL
+         WHERE id = $1`,
+        [
+          req.params.id,
+          num(b.donated_amount) ?? num(b.expected_amount),
+          `Gave on the call (${disposition})`,
+        ]
+      );
+      // And the chase stops, exactly as it does on every other path money
+      // arrives by.
+      await client.query(
+        `UPDATE lead_reminders SET status = 'done', completed_at = NOW(), updated_at = NOW()
+          WHERE lead_id = $1 AND status = 'open'`,
+        [req.params.id]
+      );
+    }
+
     if (nextStatus !== lead.rows[0].status) {
       await client.query(
         `INSERT INTO lead_activities (lead_id, user_id, kind, from_value, to_value)
@@ -1259,7 +1361,10 @@ router.post('/leads/:id/follow-up', async (req, res) => {
 
 /* ------------------------------------------------------------ bulk actions */
 
-router.post('/leads/bulk', async (req, res) => {
+// Up to 2,000 leads at a time - reassigned, retired, tagged or silenced.
+// That is an office action by its nature, and a caller reaching it could take
+// the whole board or mark it do-not-call in one request.
+router.post('/leads/bulk', authorize('admin', 'accountant'), async (req, res) => {
   const { ids, action } = req.body ?? {};
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'Select at least one lead' });
   if (ids.length > 2000) return res.status(400).json({ error: 'Too many at once - filter down and work in batches' });
@@ -1273,7 +1378,21 @@ router.post('/leads/bulk', async (req, res) => {
       );
     } else if (action === 'status') {
       result = await pool.query(
-        `UPDATE leads SET status = $1, updated_at = NOW() WHERE id = ANY($2::uuid[]) RETURNING id`,
+        // The callback goes when the new stage is a closed one. Without this,
+        // 300 leads bulk-set to Not interested vanished from the queue but
+        // stayed in the follow-ups board's Overdue column for ever - red,
+        // permanent, and disagreeing with the supervisor's overdue report,
+        // which does honour the stage.
+        `UPDATE leads l SET
+           status = $1,
+           next_follow_up_at = CASE
+             WHEN COALESCE((SELECT s.is_open FROM crm_statuses s WHERE s.slug = $1), TRUE)
+             THEN l.next_follow_up_at ELSE NULL END,
+           awaiting_qr_at = CASE
+             WHEN COALESCE((SELECT s.is_open FROM crm_statuses s WHERE s.slug = $1), TRUE)
+             THEN l.awaiting_qr_at ELSE NULL END,
+           updated_at = NOW()
+         WHERE l.id = ANY($2::uuid[]) RETURNING l.id`,
         [str(req.body.status, 30), ids]
       );
     } else if (action === 'tag') {
@@ -1300,7 +1419,11 @@ router.post('/leads/bulk', async (req, res) => {
       );
     } else if (action === 'do_not_call') {
       result = await pool.query(
-        `UPDATE leads SET do_not_call = TRUE, status = 'dnc', updated_at = NOW() WHERE id = ANY($1::uuid[]) RETURNING id`,
+        // Opting out clears what would otherwise keep reaching them: a booked
+        // callback, and any flag saying they are expected to pay.
+        `UPDATE leads SET do_not_call = TRUE, status = 'dnc',
+           next_follow_up_at = NULL, awaiting_qr_at = NULL, updated_at = NOW()
+         WHERE id = ANY($1::uuid[]) RETURNING id`,
         [ids]
       );
     } else {
@@ -1329,7 +1452,7 @@ router.post('/leads/bulk', async (req, res) => {
  * the difference between an afternoon and a fortnight, and nobody should find
  * that out after the fact.
  */
-router.post('/leads/from-people', async (req, res) => {
+router.post('/leads/from-people', authorize('admin', 'accountant'), async (req, res) => {
   const b = req.body ?? {};
   const conditions: string[] = [`p.phone IS NOT NULL`];
   const values: unknown[] = [];
@@ -1496,7 +1619,7 @@ function mapHeaders(header: string[]): Record<string, number> {
  *   invalid    not a dialable 10-digit mobile
  *   blank      no phone at all
  */
-router.post('/leads/import/preview', async (req, res) => {
+router.post('/leads/import/preview', authorize('admin', 'accountant'), async (req, res) => {
   // Two ways in. `csv` is raw text, which is what the browser sends when it
   // read the file itself. `rows` is a grid the browser already has, which is
   // what it sends for an Excel file - /api/files/parse turned the workbook into
@@ -1604,7 +1727,7 @@ router.post('/leads/import/preview', async (req, res) => {
 // written is exactly what was shown. skip_duplicates defaults to false: the
 // upsert fills gaps in an existing lead without overwriting anything a caller
 // has learned, which is almost always what is wanted.
-router.post('/leads/import/commit', async (req, res) => {
+router.post('/leads/import/commit', authorize('admin', 'accountant'), async (req, res) => {
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
   if (!rows.length) return res.status(400).json({ error: 'Nothing to import' });
   if (rows.length > 10000) return res.status(400).json({ error: 'That is more than 10,000 rows - split the file' });
@@ -1673,7 +1796,10 @@ async function exportLeadsCsv(req: import('express').Request, res: import('expre
   };
 
   try {
-    const f = buildLeadFilters(req.query as Record<string, unknown>);
+    const f = withScope(
+      buildLeadFilters(req.query as Record<string, unknown>),
+      await leadScopeFor(req.user)
+    );
     const rows = await pool.query(
       `SELECT ${LEAD_COLUMNS} ${LEAD_JOINS} ${f.where} ORDER BY l.next_follow_up_at ASC NULLS LAST LIMIT 20000`,
       f.values
@@ -1793,16 +1919,21 @@ router.delete('/activities/:id', async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // Your own call, and only yours. Without the user_id predicate a caller
+    // could undo a colleague's just-logged call, rolling that lead's stage,
+    // attempt count and callback date back inside the half hour the
+    // leaderboard is counting - and an admin can still fix anything.
     const act = await client.query(
       `SELECT * FROM lead_activities
         WHERE id = $1 AND kind = 'call' AND undo_payload IS NOT NULL
           AND created_at > NOW() - INTERVAL '30 minutes'
+          AND ($2::text = 'admin' OR user_id = $3::uuid)
         FOR UPDATE`,
-      [req.params.id]
+      [req.params.id, req.user?.role ?? '', req.user?.userId ?? null]
     );
     if (!act.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Nothing to undo - that call is too old, or was already undone.' });
+      return res.status(404).json({ error: 'Nothing to undo - that call is too old, was already undone, or was not yours.' });
     }
 
     const a = act.rows[0];
@@ -1818,8 +1949,14 @@ router.delete('/activities/:id', async (req, res) => {
          follow_up_note    = $6,
          do_not_call       = $7,
          remarks           = $8,
+         -- A call that recorded a donation has to be undoable as one. Without
+         -- these three, undoing "Donated now" left the lead converted with the
+         -- money still on it while every other trace of the call was removed.
+         converted_at      = $9::timestamptz,
+         converted_amount  = $10::numeric,
+         converted_via     = $11,
          updated_at        = NOW()
-       WHERE id = $9`,
+       WHERE id = $12`,
       [
         before.status,
         before.call_attempts,
@@ -1829,6 +1966,9 @@ router.delete('/activities/:id', async (req, res) => {
         before.follow_up_note,
         before.do_not_call,
         before.remarks,
+        before.converted_at ?? null,
+        before.converted_amount ?? null,
+        before.converted_via ?? null,
         a.lead_id,
       ]
     );
@@ -1898,7 +2038,11 @@ router.get('/conversions/unseen', async (req, res) => {
               d.purpose, d.source_site
          FROM leads l
          LEFT JOIN donations d ON l.converted_donation_id = d.id
-        WHERE l.converted_donation_id IS NOT NULL
+        -- Any conversion the caller has not been told about, not only the
+        -- ones with a receipt row. A QR payment an admin attributed, or cash
+        -- somebody recorded, is exactly the news this alert exists to carry -
+        -- and it could never fire for either.
+        WHERE l.converted_at IS NOT NULL
           AND l.conversion_seen_at IS NULL
           AND (l.assigned_to = $1::uuid OR l.assigned_to IS NULL)
           -- Anything older than a fortnight is history, not news.
@@ -1915,13 +2059,18 @@ router.get('/conversions/unseen', async (req, res) => {
 });
 
 router.post('/conversions/seen', async (req, res) => {
-  const ids: string[] = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  // An empty list used to mean "every lead in the temple", because the
+  // condition collapsed to `AND TRUE`. One request from any caller cleared
+  // every colleague's unseen-donation notices.
+  if (!Array.isArray(req.body?.ids) || !req.body.ids.length) {
+    return res.status(400).json({ error: 'Which conversions have been seen?' });
+  }
+  const ids: string[] = (req.body.ids as string[]).slice(0, 500).map(String);
   try {
     await pool.query(
       `UPDATE leads SET conversion_seen_at = NOW()
-        WHERE conversion_seen_at IS NULL
-          AND (${ids.length ? 'id = ANY($1::uuid[])' : 'TRUE'})`,
-      ids.length ? [ids] : []
+        WHERE conversion_seen_at IS NULL AND id = ANY($1::uuid[])`,
+      [ids]
     );
     res.json({ ok: true });
   } catch (err) {
@@ -2018,7 +2167,7 @@ router.post('/leads/:id/donated', async (req, res) => {
  * Preview first (dry_run, the default), because how many of these exist is
  * unknown until you look and the answer might be four thousand.
  */
-router.post('/leads/sync-abandoned', async (req, res) => {
+router.post('/leads/sync-abandoned', authorize('admin', 'accountant'), async (req, res) => {
   const b = req.body ?? {};
   const days = Math.min(365, Math.max(1, Number(b.days) || 30));
   const since = new Date(Date.now() - days * 86_400_000).toISOString();

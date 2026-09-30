@@ -270,8 +270,12 @@ router.post('/leads/:id/share-qr', authenticate, async (req, res) => {
       `Hare Krishna Movement, Visakhapatnam`;
 
     await pool.query(
+      // 'qr_share', not 'note'. The link-sharing path logs 'whatsapp' and the
+      // lead's history renders that as a sentence; a QR share fell through to
+      // the generic "Note", so the one action that leads to money looked like
+      // somebody typing a remark.
       `INSERT INTO lead_activities (lead_id, user_id, kind, note, session_id)
-       VALUES ($1,$2,'note',$3,$4::uuid)`,
+       VALUES ($1,$2,'qr_share',$3,$4::uuid)`,
       [
         l.id,
         req.user?.userId ?? null,
@@ -1084,7 +1088,7 @@ webhookRouter.post('/webhook', async (req, res) => {
  * twice: the sites reject a duplicate reference number, so a second attempt
  * cannot raise a second receipt for the same money.
  */
-router.post('/qr/payments/:id/issue-receipt', authenticate, async (req, res) => {
+router.post('/qr/payments/:id/issue-receipt', authenticate, authorize('admin', 'accountant'), async (req, res) => {
   try {
     await pool.query(`UPDATE qr_payments SET receipt_status = NULL WHERE id = $1`, [req.params.id]);
     await issueReceiptForPayment(String(req.params.id));
@@ -1117,19 +1121,31 @@ router.get('/qr/payments', authenticate, async (req, res) => {
       : scope === 'unmatched'
       ? 'p.share_id IS NULL'
       : "p.share_id IS NULL OR p.receipt_status IS NULL OR p.receipt_status IN ('failed','skipped','pending')";
+  // A caller sees the money that came through their own QRs, or through a
+  // QR they shared. Not the temple's whole ledger: `p.raw` carries Razorpay's
+  // entire event, and every other donor's payer name, number and VPA with it.
+  // An admin or accountant sees the lot, because reconciling it is their job.
+  const me = req.user?.role === 'caller' ? req.user?.userId ?? null : null;
+
   try {
     const rows = await pool.query(
-      `SELECT p.*, q.label AS qr_label, q.receipt_site AS qr_receipt_site,
+      `SELECT p.id, p.payment_id, p.qr_id, p.amount, p.payer_phone, p.payer_vpa,
+              p.payer_name, p.status, p.received_at, p.share_id, p.person_id,
+              p.receipt_status, p.receipt_error, p.receipt_number, p.receipt_site,
+              p.match_basis, p.match_score, p.match_note, p.last_event,
+              q.label AS qr_label, q.receipt_site AS qr_receipt_site,
               u.name AS qr_owner, l.name AS lead_name, l.id AS lead_id
          FROM qr_payments p
          LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
          LEFT JOIN users u ON q.owner_id = u.id
          LEFT JOIN qr_shares s ON p.share_id = s.id
          LEFT JOIN leads l ON s.lead_id = l.id
-        WHERE ${where}
-        ORDER BY p.received_at DESC LIMIT 200`
+        WHERE (${where})
+          AND ($1::uuid IS NULL OR q.owner_id = $1::uuid OR s.shared_by = $1::uuid)
+        ORDER BY p.received_at DESC LIMIT 200`,
+      [me]
     );
-    res.json({ payments: rows.rows });
+    res.json({ payments: rows.rows, scope: me ? 'mine' : 'all' });
   } catch (err) {
     console.error('crm.qrPayments error:', err);
     res.status(500).json({ error: 'Could not load the QR payments' });
@@ -1137,15 +1153,20 @@ router.get('/qr/payments', authenticate, async (req, res) => {
 });
 
 /** GET /qr/unmatched - payments nobody has claimed. A screen, not a dead letter box. */
-router.get('/qr/unmatched', authenticate, async (_req, res) => {
+router.get('/qr/unmatched', authenticate, async (req, res) => {
+  const me = req.user?.role === 'caller' ? req.user?.userId ?? null : null;
   try {
     const rows = await pool.query(
-      `SELECT p.*, q.label AS qr_label, u.name AS qr_owner
+      `SELECT p.id, p.payment_id, p.qr_id, p.amount, p.payer_phone, p.payer_vpa,
+              p.payer_name, p.status, p.received_at, p.match_note, p.match_score,
+              q.label AS qr_label, u.name AS qr_owner
          FROM qr_payments p
          LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
          LEFT JOIN users u ON q.owner_id = u.id
         WHERE p.share_id IS NULL
-        ORDER BY p.received_at DESC LIMIT 200`
+          AND ($1::uuid IS NULL OR q.owner_id = $1::uuid)
+        ORDER BY p.received_at DESC LIMIT 200`,
+      [me]
     );
     res.json({ payments: rows.rows });
   } catch (err) {
@@ -1193,7 +1214,14 @@ router.get('/qr/shares', authenticate, async (req, res) => {
   }
 });
 
-/** POST /qr/payments/:id/attach - a human links a payment to a share. */
+/**
+ * POST /qr/payments/:id/attach - a human links a payment to a share.
+ *
+ * Attributing a payment credits a conversion to a caller and fires a real 80G
+ * receipt to a named donor, so who may do it matters. A caller may attribute
+ * to their own shares and no one else's; an admin or accountant may attribute
+ * to anybody's, because untangling a mis-sent QR is their job.
+ */
 router.post('/qr/payments/:id/attach', authenticate, async (req, res) => {
   const shareId = str(req.body?.share_id, 36);
   if (!shareId) return res.status(400).json({ error: 'Choose who this payment was from' });
@@ -1206,7 +1234,15 @@ router.post('/qr/payments/:id/attach', authenticate, async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'No such payment' });
     }
-    const share = await client.query(`SELECT * FROM qr_shares WHERE id = $1`, [shareId]);
+    // A caller may only attribute a payment to a QR they themselves shared.
+    // Without this, attributing was a one-click way to move a colleague's
+    // donation onto your own conversion figures - and to raise a real 80G
+    // receipt in the wrong donor's name while doing it.
+    const share = await client.query(
+      `SELECT * FROM qr_shares
+        WHERE id = $1 AND ($2::uuid IS NULL OR shared_by = $2::uuid)`,
+      [shareId, req.user?.role === 'caller' ? req.user?.userId ?? null : null]
+    );
     if (!share.rows.length) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'No such share' });

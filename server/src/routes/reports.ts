@@ -50,10 +50,23 @@ router.get('/donors/top', async (req, res) => {
                FROM people p JOIN donations d ON p.id = d.person_id`;
   const values: unknown[] = [];
   if (period) {
-    query += ` WHERE d.created_at >= NOW() - INTERVAL '${period} months'`;
+    // Parameterised, and a number rather than text.
+    //
+    // This line used to interpolate req.query.period straight into the SQL. A
+    // period of `1' UNION SELECT id, email, password_hash, 1, 1 FROM users--`
+    // returned every account's password hash in a JSON response, to anyone
+    // signed in who was not a caller. It is the only interpolation in this
+    // file that was not a constant from a switch or a shared helper - which is
+    // exactly how one gets missed.
+    //
+    // Clamped as well as bound: make_interval rejects nothing, and a period of
+    // ten million months is a table scan somebody can fire at will.
+    const months = Math.min(600, Math.max(1, Math.round(Number(period) || 12)));
+    query += ` WHERE d.created_at >= NOW() - make_interval(months => $${values.length + 1}::int)`;
+    values.push(months);
   }
-  query += ' GROUP BY p.id ORDER BY total_donated DESC LIMIT $1';
-  values.push(Number(limit));
+  query += ` GROUP BY p.id ORDER BY total_donated DESC LIMIT $${values.length + 1}`;
+  values.push(Math.min(500, Math.max(1, Number(limit) || 10)));
   const result = await pool.query(query, values);
   res.json(result.rows);
 });

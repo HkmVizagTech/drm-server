@@ -18,6 +18,9 @@ import http from 'http';
 import pool from '../src/db/pool';
 import { generateToken } from '../src/middleware/auth';
 import crmReports from '../src/routes/crmReports';
+import crmRoutes from '../src/routes/crm';
+import crmLists from '../src/routes/crmLists';
+import crmReminders from '../src/routes/crmReminders';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
 if (!/_test$/.test(dbName)) {
@@ -30,7 +33,10 @@ if (!/_test$/.test(dbName)) {
 
 const app = express();
 app.use(express.json());
+app.use('/api/crm', crmRoutes);
 app.use('/api/crm', crmReports);
+app.use('/api/crm', crmLists);
+app.use('/api/crm', crmReminders);
 
 let base = '';
 
@@ -47,11 +53,42 @@ function get(path: string, as: { userId: string; role: string }): Promise<{ stat
       (res) => {
         let d = '';
         res.on('data', (c) => (d += c));
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: d ? JSON.parse(d) : {} }));
+        res.on('end', () => {
+          try {
+            resolve({ status: res.statusCode ?? 0, body: d ? JSON.parse(d) : {} });
+          } catch {
+            resolve({ status: res.statusCode ?? 0, body: d });
+          }
+        });
       }
     );
     req.on('error', reject);
     req.end();
+  });
+}
+
+function put(path: string, body: unknown, as: { userId: string; role: string }): Promise<{ status: number; body: any }> {
+  const token = generateToken({ userId: as.userId, email: 'x@test', role: as.role } as never);
+  const raw = Buffer.from(JSON.stringify(body));
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      `${base}${path}`,
+      {
+        method: 'PUT',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          'content-length': raw.length,
+        },
+      },
+      (res) => {
+        let d = '';
+        res.on('data', (c) => (d += c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: d ? JSON.parse(d) : {} }));
+      }
+    );
+    req.on('error', reject);
+    req.end(raw);
   });
 }
 
@@ -193,6 +230,66 @@ async function main() {
     http.get(`${base}/api/crm/dashboard`, (res) => resolve(res.statusCode ?? 0));
   });
   check('401', anon === 401, anon);
+
+  console.log('\n6. a caller cannot read the whole donor base');
+  // `callers_see_all_leads` existed in settings, defaulted to off, had a
+  // toggle on the setup screen - and no server code read it. A caller could
+  // open the leads screen or the CSV export and take everything.
+  await pool.query(`DELETE FROM crm_settings WHERE key = 'callers_see_all_leads'`);
+  await pool.query(`INSERT INTO crm_settings (key, value) VALUES ('callers_see_all_leads','false'::jsonb)`);
+  const mine = await pool.query(
+    `INSERT INTO leads (phone, name, assigned_to) VALUES ('9101010101','Ana lead',$1::uuid) RETURNING id`,
+    [ANA]
+  );
+  const theirs = await pool.query(
+    `INSERT INTO leads (phone, name, assigned_to) VALUES ('9202020202','Ben lead',$1::uuid) RETURNING id`,
+    [BEN]
+  );
+  await pool.query(`INSERT INTO leads (phone, name) VALUES ('9303030303','Nobody lead')`);
+
+  let g = await get('/api/crm/leads?limit=100', { userId: ANA, role: 'caller' });
+  const names = (g.body.leads ?? []).map((l: any) => l.name);
+  check('her own lead is there', names.includes('Ana lead'), names);
+  check('the unassigned one too', names.includes('Nobody lead'), names);
+  check("but NOT a colleague's", !names.includes('Ben lead'), names);
+
+  g = await get(`/api/crm/leads/${theirs.rows[0].id}`, { userId: ANA, role: 'caller' });
+  check("and she cannot open it directly either", g.status === 404, g.status);
+  g = await get(`/api/crm/leads/${mine.rows[0].id}`, { userId: ANA, role: 'caller' });
+  check('her own opens fine', g.status === 200, g.status);
+
+  g = await get('/api/crm/leads/export.csv', { userId: ANA, role: 'caller' });
+  const csv = typeof g.body === 'string' ? g.body : JSON.stringify(g.body);
+  check('the export is narrowed too', !/Ben lead/.test(csv), csv.slice(0, 200));
+
+  // And with the setting on, she sees everything.
+  await pool.query(`UPDATE crm_settings SET value = 'true'::jsonb WHERE key = 'callers_see_all_leads'`);
+  g = await get('/api/crm/leads?limit=100', { userId: ANA, role: 'caller' });
+  check(
+    'switching the setting on opens it up',
+    (g.body.leads ?? []).map((l: any) => l.name).includes('Ben lead'),
+    (g.body.leads ?? []).length
+  );
+  const admin2 = await get('/api/crm/leads?limit=100', { userId: ADMIN, role: 'admin' });
+  const adminNames = (admin2.body.leads ?? []).map((l: any) => l.name);
+  check(
+    'an admin always sees everything',
+    ['Ana lead', 'Ben lead', 'Nobody lead'].every((n) => adminNames.includes(n)),
+    adminNames.length
+  );
+
+  console.log('\n7. a caller cannot rewrite the temple\'s configuration');
+  for (const path of ['/api/crm/settings/max_attempts', '/api/crm/statuses/new', '/api/crm/dispositions/interested']) {
+    const r2 = await put(path, { value: 1, label: 'x' }, { userId: ANA, role: 'caller' });
+    check(`${path} → 403`, r2.status === 403, r2.status);
+  }
+
+  console.log('\n8. the top-donor report cannot be used to read the users table');
+  const inj = await get(
+    `/api/crm/../reports/donors/top?period=${encodeURIComponent("1' UNION SELECT id,email,password_hash,1,1 FROM users--")}`,
+    { userId: ADMIN, role: 'admin' }
+  );
+  check('the injection does not execute', inj.status !== 200 || !JSON.stringify(inj.body).includes('password'), inj.status);
 
   console.log(failures ? `\n${failures} FAILURE(S)\n` : '\nall green\n');
   server.close();

@@ -93,6 +93,10 @@ router.get('/reminders', async (req, res) => {
   const values: unknown[] = [];
   let i = 1;
 
+  // Same rule as the alert poll below: a donor who has asked not to be called
+  // is not somebody to be reminded to ring.
+  conditions.push(`l.do_not_call = FALSE`);
+
   if (scope === 'open') conditions.push(`r.status = 'open'`);
   else if (scope !== 'all') {
     conditions.push(`r.status = $${i++}`);
@@ -195,6 +199,11 @@ router.get('/reminders/alerts', async (req, res) => {
        FROM leads l
       WHERE r.lead_id = l.id
         AND r.status = 'open'
+        -- Never somebody who has asked not to be called. Every other path in
+        -- DRM honours this - the queue, the leads list, the follow-up report -
+        -- and this one did not, so a reminder created before a donor opted out
+        -- still fired, in a popup with a one-tap dial button next to it.
+        AND l.do_not_call = FALSE
         -- Alert the person it belongs to, and everyone when it belongs to
         -- nobody. An unassigned reminder that alerts no-one is worse than no
         -- reminder at all, because it looks handled.
@@ -275,9 +284,38 @@ router.post('/leads/:id/reminders', async (req, res) => {
  * reminder pushed from this evening to tomorrow evening would never alert
  * again, because every one of its offsets is already marked fired.
  */
+/**
+ * Yours, or an admin's.
+ *
+ * A reminder is a promise a donor made to a particular caller. Without this,
+ * any caller could edit or delete a colleague's "he said ten thousand at
+ * Govardhan Puja" - and nobody would ring. Unassigned ones are fair game for
+ * anybody, on the same principle the alert poll uses: a promise nobody owns
+ * that nobody may touch is a promise that gets missed.
+ */
+async function mayTouchReminder(
+  id: string,
+  user?: { role?: string; userId?: string }
+): Promise<boolean> {
+  if (user?.role === 'admin') return true;
+  const r = await pool.query(
+    `SELECT 1 FROM lead_reminders r
+       JOIN leads l ON r.lead_id = l.id
+      WHERE r.id = $1
+        AND (COALESCE(r.assigned_to, l.assigned_to) = $2::uuid
+             OR COALESCE(r.assigned_to, l.assigned_to) IS NULL)`,
+    [id, user?.userId ?? null]
+  );
+  return r.rows.length > 0;
+}
+
 router.put('/reminders/:id', async (req, res) => {
   const b = req.body ?? {};
   const action = String(b.action ?? 'update');
+
+  if (!(await mayTouchReminder(req.params.id, req.user))) {
+    return res.status(404).json({ error: 'No such reminder' });
+  }
 
   try {
     let result;
@@ -348,6 +386,10 @@ router.put('/reminders/:id', async (req, res) => {
 });
 
 router.delete('/reminders/:id', async (req, res) => {
+  if (!(await mayTouchReminder(req.params.id, req.user))) {
+    return res.status(404).json({ error: 'No such reminder' });
+  }
+
   try {
     const result = await pool.query(`DELETE FROM lead_reminders WHERE id = $1 RETURNING id`, [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Reminder not found' });

@@ -822,5 +822,6 @@ function describe(a: Activity): string {
   if (a.kind === "reminder") return a.to_value ? `Reminder set for ${shortDate(a.to_value)}` : "Reminder set";
   if (a.kind === "import") return "Added to the list";
   if (a.kind === "whatsapp") return "Opened WhatsApp with a link";
+  if (a.kind === "qr_share") return "Sent a QR on WhatsApp";
   return "Note";
 }
