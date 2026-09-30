@@ -19,7 +19,8 @@
 // (switch it off) removes it from the dropdowns while old records keep their
 // meaning.
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { Badge, buttonPrimary, buttonSecondary, Card, CardHeader, inputClass, PageHeader, Select, TableShell, Td, Th, Toggle, Modal } from "@/components/ui";
 import { apiClient as api } from "@/lib/api";
@@ -83,7 +84,41 @@ const SETTING_COPY: Record<string, { label: string; help: string; kind: "number"
   },
 };
 
+/**
+ * The tabs, in the order somebody is likely to need them.
+ *
+ * Queue first because it is what changes most often; storage last because it
+ * is set up once and then forgotten.
+ */
+const TABS = [
+  { key: "queue", label: "Queue" },
+  { key: "stages", label: "Stages & outcomes" },
+  { key: "preachers", label: "Preachers" },
+  { key: "qr", label: "QR codes" },
+  { key: "links", label: "Links" },
+  { key: "storage", label: "Storage" },
+] as const;
+
+type TabKey = (typeof TABS)[number]["key"];
+
+// useSearchParams needs a Suspense boundary, so the screen is split in two.
 export default function CallingSettingsPage() {
+  return (
+    <Suspense fallback={<div className="max-w-4xl"><Card><div className="h-40 animate-pulse rounded bg-slate-100" /></Card></div>}>
+      <CallingSettings />
+    </Suspense>
+  );
+}
+
+function CallingSettings() {
+  const router = useRouter();
+  const params = useSearchParams();
+  // In the URL rather than in state, so a refresh keeps you where you were and
+  // a link to "the preacher list" is a link somebody can actually send.
+  const requested = params.get("tab");
+  const tab: TabKey = (TABS.find((t) => t.key === requested)?.key ?? "queue") as TabKey;
+  const setTab = (k: TabKey) => router.replace(`/calling/settings?tab=${k}`, { scroll: false });
+
   const [config, setConfig] = useState<Config | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -139,13 +174,41 @@ export default function CallingSettingsPage() {
   }
 
   return (
-    <div className="max-w-4xl">
-      <PageHeader title="Calling settings" subtitle="How the queue behaves, and the words your team uses" />
+    // Wider than the old max-w-4xl: the QR and preacher tables carry seven or
+    // eight columns and were being clipped at the right edge, which hid the
+    // money. Tables inside still scroll on a narrow screen.
+    <div className="max-w-6xl">
+      <PageHeader
+        title="Calling settings"
+        subtitle="How the queue behaves, the words your team uses, and what they can send"
+      />
 
       {error && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}
 
+      {/* One screen at a time. This page had grown to eight stacked cards and
+          about four thousand pixels: finding the preacher list meant scrolling
+          past every queue setting, and nobody could send somebody a link to
+          the part they meant. The tab lives in the URL for exactly that. */}
+      <div className="mb-5 flex flex-wrap gap-1 border-b border-[var(--line-soft)]">
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            aria-current={tab === t.key ? "page" : undefined}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
+              tab === t.key
+                ? "border-[var(--accent)] font-semibold text-[var(--accent-ink)]"
+                : "border-transparent text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       <div className="space-y-6">
-        {/* ---------------------------------------------------- how it works */}
+        {tab === "queue" && (
+          <>
         <Card>
           <CardHeader title="How the queue behaves" />
           <div className="space-y-4">
@@ -180,7 +243,10 @@ export default function CallingSettingsPage() {
           </div>
         </Card>
 
-        {/* --------------------------------------------------------- stages */}
+          </>
+        )}
+        {tab === "stages" && (
+          <>
         <Card padded={false}>
           <div className="px-5 pt-5">
             <CardHeader
@@ -291,19 +357,15 @@ export default function CallingSettingsPage() {
           </TableShell>
         </Card>
 
-        {/* ------------------------------------------------------ preachers */}
-        <PreachersSection />
+          </>
+        )}
+        {tab === "preachers" && <PreachersSection />}
+        {tab === "qr" && <QrSection />}
+        {tab === "links" && <LinksSection />}
+        {tab === "storage" && <StorageSection />}
 
-        {/* --------------------------------------------------------- QR codes */}
-        <QrSection />
-
-        {/* ---------------------------------------------------- file storage */}
-        <StorageSection />
-
-        {/* ---------------------------------------------------------- links */}
-        <LinksSection />
-
-        {/* ------------------------------------------------ what is not here */}
+        {tab === "queue" && (
+          <>
         <Card>
           <CardHeader title="Call recording and automatic call logs" />
           <p className="text-sm text-slate-600">
@@ -318,6 +380,8 @@ export default function CallingSettingsPage() {
             — only the dialling itself.
           </p>
         </Card>
+          </>
+        )}
       </div>
     </div>
   );
@@ -830,7 +894,7 @@ function QrSection() {
     <Card padded={false}>
       <div className="flex flex-wrap items-end justify-between gap-3 px-5 pt-5">
         <CardHeader
-          title={`Razorpay QR codes${rows.length ? ` \u00b7 ${rows.length}` : ""}`}
+          title={`Razorpay QR codes${rows.length ? ` · ${rows.length}` : ""}`}
           subtitle="Make them in the Razorpay dashboard, then paste each one's id here and say whose it is."
         />
         <button onClick={() => setAdding(true)} className={buttonPrimary}>
@@ -865,7 +929,10 @@ function QrSection() {
           ) : (
             rows.map((q) => (
               <tr key={q.id} className={`hover:bg-slate-50/60 ${q.active ? "" : "opacity-60"}`}>
-                <Td>
+                {/* The label is what a caller picks from mid-call, so it has
+                    to be readable here — the column was being squeezed to
+                    "Annac" by the dropdowns beside it. */}
+                <Td className="min-w-[11rem]">
                   <input
                     defaultValue={q.label}
                     onBlur={(e) => e.target.value.trim() && e.target.value !== q.label && void save(q.id, { label: e.target.value })}
@@ -905,10 +972,10 @@ function QrSection() {
                 </Td>
                 <Td align="right" className="tabular-nums text-slate-600">{number(q.shares)}</Td>
                 <Td align="right" className="tabular-nums text-slate-700">
-                  {q.matched ? number(q.matched) : <span className="text-slate-300">\u2014</span>}
+                  {q.matched ? number(q.matched) : <span className="text-slate-300">—</span>}
                 </Td>
                 <Td align="right" className="tabular-nums font-medium text-slate-900">
-                  {Number(q.raised) ? currency(Number(q.raised)) : <span className="text-slate-300">\u2014</span>}
+                  {Number(q.raised) ? currency(Number(q.raised)) : <span className="text-slate-300">—</span>}
                 </Td>
                 <Td align="center">
                   <Toggle on={q.active} onChange={(v) => void save(q.id, { active: v })} label={`${q.label} in use`} />
@@ -925,9 +992,19 @@ function QrSection() {
       <div className="border-t border-[var(--line-soft)] px-5 py-4">
         <p className="text-xs text-slate-500">
           When a caller shares a QR, DRM records who it went to. Razorpay then reports the payment to
-          <span className="font-mono"> /api/crm/qr/webhook</span>, and DRM matches it back to that lead by the QR,
+          <span className="font-mono"> /api/razorpay/webhook</span>, and DRM matches it back to that lead by the QR,
           the timing and the amount. A payment it cannot place with confidence waits on the unmatched list rather
           than being credited to a guess.
+        </p>
+        {/* Named explicitly because it is the one setting that silently stops
+            all of this working: a Razorpay payment object does not say which QR
+            it was paid into, and qr_code.credited is the only delivery that
+            does. Subscribed to payment.captured alone, every QR donation
+            arrives attached to nothing. */}
+        <p className="mt-2 text-xs text-slate-500">
+          In Razorpay&apos;s webhook settings, tick <span className="font-mono">qr_code.credited</span>. That is the
+          only event that tells DRM which QR the money went into — <span className="font-mono">payment.captured</span>{" "}
+          on its own does not carry it, and every donation would land unmatched.
         </p>
       </div>
 
@@ -970,7 +1047,7 @@ function AddQrDialog({
 
       <p className="mb-4 text-sm text-slate-600">
         In Razorpay, open the QR you want to use and copy its id and image link. DRM never creates or changes a QR
-        \u2014 it only needs to recognise payments that come through one.
+        — it only needs to recognise payments that come through one.
       </p>
 
       <div className="grid gap-3 sm:grid-cols-2">
@@ -979,7 +1056,7 @@ function AddQrDialog({
           <input
             value={label}
             onChange={(e) => setLabel(e.target.value)}
-            placeholder="e.g. Annadan \u2014 Ravi"
+            placeholder="e.g. Annadan — Ravi"
             className={`${inputClass} mt-1 w-full`}
           />
         </label>
@@ -997,7 +1074,7 @@ function AddQrDialog({
           <input
             value={imageUrl}
             onChange={(e) => setImageUrl(e.target.value.trim())}
-            placeholder="https://\u2026"
+            placeholder="https://…"
             className={`${inputClass} mt-1 w-full`}
           />
           <span className="mt-0.5 block text-[11px] text-slate-400">
@@ -1034,7 +1111,7 @@ function AddQrDialog({
             options={[
               { value: "hkmv", label: "harekrishnavizag.org" },
               { value: "annadan", label: "annadan" },
-              { value: "", label: "None \u2014 record it, issue nothing" },
+              { value: "", label: "None — record it, issue nothing" },
             ]}
           />
           <span className="mt-0.5 block text-[11px] text-slate-400">
@@ -1068,7 +1145,7 @@ function AddQrDialog({
           }}
           className={buttonPrimary}
         >
-          {busy ? "Saving\u2026" : "Add it"}
+          {busy ? "Saving…" : "Add it"}
         </button>
       </div>
     </Modal>

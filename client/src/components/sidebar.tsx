@@ -59,7 +59,13 @@ const navGroups: { heading: string; items: NavItem[]; roles?: string[] }[] = [
     heading: "Calling",
     roles: CALLING_AND_UP,
     items: [
-      { href: "/calling", label: "Overview", icon: "M3 3v18h18M7 15l3-4 3 3 5-7", roles: ["admin"] },
+      // Shown to callers too. It used to be admin-only, which meant a caller
+      // had no screen answering "how is my day going" - and the restriction
+      // was only this line: the page and its endpoint served the whole team's
+      // figures to anyone who typed the URL. The endpoint now scopes itself by
+      // role, so a caller opening this sees their own work and the link can be
+      // theirs honestly.
+      { href: "/calling", label: "Overview", icon: "M3 3v18h18M7 15l3-4 3 3 5-7" },
       // Lists are the unit of work now, so they sit at the top of the group.
       { href: "/calling/lists", label: "Lists", icon: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" },
       { href: "/leads", label: "Leads", icon: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8M20 8v6M23 11h-6" },

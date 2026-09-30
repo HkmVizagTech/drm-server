@@ -52,7 +52,7 @@ export function SendQr({
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sent, setSent] = useState<{ label: string; at: number } | null>(null);
+  const [sent, setSent] = useState<{ label: string; at: number; copied: boolean } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -80,9 +80,84 @@ export function SendQr({
     setError(null);
   }, [leadId, expectedAmount]);
 
+  /** The fallback when the clipboard is unavailable: save it and attach by hand. */
+  async function downloadImage(qrRowId: string) {
+    try {
+      const res = await fetch(`/api/crm/qrs/${qrRowId}/image.png`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` },
+      });
+      if (!res.ok) throw new Error("Could not fetch the image");
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `qr-${qrRowId}.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not download that image");
+    }
+  }
+
   if (!qrs.length) return null;
 
   const current = qrs.find((q) => q.id === chosen) ?? null;
+
+  /**
+   * Put the QR picture on the clipboard.
+   *
+   * WHY THE CALLER HAS TO PASTE
+   * WhatsApp's click-to-chat link carries text and nothing else - there is no
+   * way to attach a picture to it. The only ways to put an actual image in a
+   * chat are the Business API (a paid message per send) or a human pressing
+   * paste. This is the second.
+   *
+   * PNG via a canvas, because the clipboard is only dependable with PNG: a
+   * JPEG written directly is rejected by some browsers and the copy silently
+   * does nothing, which looks exactly like a broken button.
+   */
+  async function copyImage(qrRowId: string): Promise<boolean> {
+    try {
+      if (!navigator.clipboard || typeof ClipboardItem === "undefined") return false;
+      // Served by DRM rather than fetched from R2 or Razorpay: reading pixels
+      // out of a cross-origin image is blocked, and neither of those origins
+      // is ours to add CORS headers to.
+      const res = await fetch(`/api/crm/qrs/${qrRowId}/image.png`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` },
+      });
+      if (!res.ok) return false;
+      const blob = await res.blob();
+
+      const png =
+        blob.type === "image/png"
+          ? blob
+          : await new Promise<Blob | null>((resolve) => {
+              const img = new Image();
+              const url = URL.createObjectURL(blob);
+              img.onload = () => {
+                const c = document.createElement("canvas");
+                c.width = img.naturalWidth;
+                c.height = img.naturalHeight;
+                c.getContext("2d")?.drawImage(img, 0, 0);
+                URL.revokeObjectURL(url);
+                c.toBlob(resolve, "image/png");
+              };
+              img.onerror = () => {
+                URL.revokeObjectURL(url);
+                resolve(null);
+              };
+              img.src = url;
+            });
+
+      if (!png) return false;
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+      return true;
+    } catch {
+      // Blocked, unsupported, or the tab lost focus mid-copy. The caller still
+      // gets the chat and the message; they just attach the picture the way
+      // they do today.
+      return false;
+    }
+  }
 
   async function share() {
     if (!chosen || busy) return;
@@ -97,10 +172,16 @@ export function SendQr({
           session_id: sessionId ?? undefined,
         }
       );
+
+      // Copy BEFORE opening WhatsApp. The clipboard API needs the document
+      // focused, and window.open takes focus away - do it the other way round
+      // and the copy fails every time.
+      const copied = await copyImage(chosen);
+
       // Opened after the record is written, so a payment always has a share to
       // match even if the caller closes DRM the moment WhatsApp appears.
       window.open(r.wa_url, "_blank", "noopener,noreferrer");
-      setSent({ label: r.qr.label, at: Date.now() });
+      setSent({ label: r.qr.label, at: Date.now(), copied });
       onShared?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not share that QR");
@@ -160,7 +241,7 @@ export function SendQr({
           <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor" aria-hidden>
             <path d="M3 11h8V3H3v8zm2-6h4v4H5V5zM3 21h8v-8H3v8zm2-6h4v4H5v-4zM13 3v8h8V3h-8zm6 6h-4V5h4v4zM13 13h2v2h-2zM17 13h2v2h-2zM15 15h2v2h-2zM13 17h2v2h-2zM17 17h2v2h-2zM19 15h2v2h-2zM19 19h2v2h-2z" />
           </svg>
-          {busy ? "…" : "Send QR"}
+          {busy ? "…" : "Copy QR & open chat"}
         </button>
       </div>
 
@@ -172,10 +253,32 @@ export function SendQr({
       )}
 
       {sent && (
-        <p className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
-          {sent.label} opened in WhatsApp for {leadName || "this donor"}. When they pay, it will show up against
-          this lead on its own.
-        </p>
+        <div className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+          {sent.copied ? (
+            <p>
+              <strong>The QR picture is copied.</strong> In the WhatsApp window that just opened, press{" "}
+              <kbd className="rounded border border-emerald-300 bg-white px-1">Ctrl</kbd>+
+              <kbd className="rounded border border-emerald-300 bg-white px-1">V</kbd> to paste it, then send.
+              The message is already in the box.
+            </p>
+          ) : (
+            <p>
+              {sent.label} opened in WhatsApp with the message ready. The picture could not be copied on this
+              computer —{" "}
+              <button
+                type="button"
+                onClick={() => void downloadImage(chosen)}
+                className="underline underline-offset-2"
+              >
+                download the QR
+              </button>{" "}
+              and attach it.
+            </p>
+          )}
+          <p className="mt-1 text-emerald-800">
+            When they pay, it shows up against this lead on its own.
+          </p>
+        </div>
       )}
       {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
     </div>

@@ -347,6 +347,60 @@ router.post('/qrs/:id/image', authenticate, authorize('admin'), async (req, res)
   }
 });
 
+/**
+ * GET /qrs/:id/image.png - the QR image, served by DRM.
+ *
+ * WHY PROXY SOMETHING WE ALREADY HAVE A URL FOR
+ * The caller's browser copies this image to the clipboard so they can paste it
+ * into WhatsApp, and reading pixels out of a cross-origin image is blocked
+ * unless the far end sends CORS headers. An R2 public bucket does not by
+ * default, and Razorpay's CDN is not ours to configure. Served from DRM's own
+ * origin, the question does not arise.
+ *
+ * Always PNG on the way out: the clipboard API is only dependable with PNG,
+ * and a JPEG that silently fails to copy would look like a broken button.
+ */
+router.get('/qrs/:id/image.png', authenticate, async (req, res) => {
+  try {
+    const r = await pool.query(`SELECT image_key, image_url, label FROM razorpay_qrs WHERE id = $1`, [
+      req.params.id,
+    ]);
+    if (!r.rows.length) return res.status(404).json({ error: 'No such QR' });
+    const q = r.rows[0];
+
+    let buf: Buffer | null = null;
+    let type = 'image/png';
+
+    if (q.image_key) {
+      buf = await storage.getObject(q.image_key);
+      if (q.image_key.endsWith('.jpg') || q.image_key.endsWith('.jpeg')) type = 'image/jpeg';
+      else if (q.image_key.endsWith('.webp')) type = 'image/webp';
+    }
+
+    // Nothing uploaded, so fetch Razorpay's own image and pass it through.
+    if (!buf && q.image_url) {
+      const upstream = await fetch(q.image_url).catch(() => null);
+      if (upstream?.ok) {
+        buf = Buffer.from(await upstream.arrayBuffer());
+        type = upstream.headers.get('content-type') ?? 'image/png';
+      }
+    }
+
+    if (!buf) {
+      return res.status(404).json({
+        error: 'This QR has no image yet. Upload one, or paste the Razorpay image link.',
+      });
+    }
+
+    res.setHeader('Content-Type', type);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.send(buf);
+  } catch (err) {
+    console.error('crm.qrImageProxy error:', err);
+    res.status(500).json({ error: 'Could not fetch that image' });
+  }
+});
+
 /** Back to Razorpay's own image. */
 router.delete('/qrs/:id/image', authenticate, authorize('admin'), async (req, res) => {
   try {
@@ -416,29 +470,102 @@ function scoreShare(share: ShareRow, payment: { amount: number; payer_phone: str
 /** A score at or above this is applied without asking anybody. */
 const CONFIDENT = 60;
 
+/** What tied the payment to the share - or would have, had it worked. */
+type MatchBasis = 'qr' | 'phone';
+
+interface MatchResult {
+  matched: boolean;
+  shareId?: string;
+  score?: number;
+  basis?: MatchBasis;
+  /** Why not, in words a person can act on. Only set when matched is false. */
+  reason?: string;
+}
+
+/**
+ * Record why a payment stayed unattached, and hand the reason back.
+ *
+ * WHY THIS IS WRITTEN DOWN
+ * An unmatched payment used to be a row on a screen with no explanation, and
+ * "why is this one sitting here" was answerable only by reading the code. The
+ * three reasons are very different jobs: a QR nobody shared from DRM is an
+ * office process to fix, a missing QR id is a webhook subscription to add, and
+ * a near-miss score is one click of human judgement. The screen can only say
+ * which if the matcher says which.
+ */
+/** A lead's name for a note, or their number when they have no name yet. */
+async function leadLabel(leadId: string): Promise<string | null> {
+  const r = await pool.query(`SELECT name, phone FROM leads WHERE id = $1`, [leadId]);
+  if (!r.rows.length) return null;
+  return r.rows[0].name || r.rows[0].phone || null;
+}
+
+async function note(rowId: string, result: MatchResult): Promise<MatchResult> {
+  await pool
+    .query(
+      `UPDATE qr_payments SET match_basis = $2, match_score = $3::int, match_note = $4 WHERE id = $1`,
+      [rowId, result.basis ?? null, result.score == null ? null : Math.round(result.score), result.reason ?? null]
+    )
+    .catch((e) => console.error('crm.matchNote error:', (e as Error).message));
+  return result;
+}
+
 /**
  * Take a payment Razorpay has reported and try to attach it to a share.
  *
  * Exported so the webhook and the reconcile sweep use one implementation -
  * two copies of a matching rule is how a payment ends up credited twice.
  */
-export async function matchPayment(paymentId: string): Promise<{ matched: boolean; shareId?: string; score?: number }> {
+export async function matchPayment(paymentId: string): Promise<MatchResult> {
   const p = await pool.query(`SELECT * FROM qr_payments WHERE payment_id = $1`, [paymentId]);
-  if (!p.rows.length || p.rows[0].share_id) return { matched: false };
+  if (!p.rows.length) return { matched: false, reason: 'No such payment' };
+  if (p.rows[0].share_id) return { matched: false, reason: 'Already attached' };
   const pay = p.rows[0];
+
+  // Money that did not arrive must not move a lead to Donated. A failed
+  // payment is still stored - the caller may want to ring back - but it is
+  // never attributed to anybody.
+  const status = String(pay.status ?? '');
+  if (status && status !== 'captured' && status !== 'authorized') {
+    return await note(pay.id, { matched: false, reason: `The payment is ${status}, not captured` });
+  }
+
+  // HOW A PAYMENT IS TIED BACK TO A SHARE
+  // By the QR it was paid into, when Razorpay tells us which one that was; and
+  // failing that, by the payer's own phone number, when Razorpay has one. If
+  // it has neither there is nothing here to reason from, and guessing on
+  // amount and timing alone would credit the wrong caller sooner or later.
+  const basis: MatchBasis | null = pay.qr_id ? 'qr' : pay.payer_phone ? 'phone' : null;
+  if (!basis) {
+    return await note(pay.id, {
+      matched: false,
+      reason:
+        'Razorpay did not say which QR this was paid into, and the payment carries no phone number. ' +
+        'Subscribe to the qr_code.credited event if this keeps happening.',
+    });
+  }
 
   const candidates = await pool.query(
     `SELECT s.* FROM qr_shares s
        JOIN razorpay_qrs q ON s.qr_id = q.id
-      WHERE q.qr_id = $1
+      WHERE CASE WHEN $1::text IS NOT NULL THEN q.qr_id = $1 ELSE s.phone = $3::text END
         AND s.matched_at IS NULL
         AND s.created_at > $2::timestamptz - INTERVAL '7 days'
         AND s.created_at <= $2::timestamptz + INTERVAL '5 minutes'
       ORDER BY s.created_at DESC
       LIMIT 50`,
-    [pay.qr_id, pay.received_at]
+    [pay.qr_id, pay.received_at, pay.payer_phone]
   );
-  if (!candidates.rows.length) return { matched: false };
+  if (!candidates.rows.length) {
+    return await note(pay.id, {
+      matched: false,
+      basis,
+      reason:
+        basis === 'qr'
+          ? 'That QR was not shared from DRM in the week before this payment'
+          : 'Nothing was shared to that number in the week before this payment',
+    });
+  }
 
   let best: { share: ShareRow; score: number } | null = null;
   for (const s of candidates.rows as ShareRow[]) {
@@ -450,7 +577,39 @@ export async function matchPayment(paymentId: string): Promise<{ matched: boolea
     if (score !== null && (!best || score > best.score)) best = { share: s, score };
   }
 
-  if (!best || best.score < CONFIDENT) return { matched: false, score: best?.score };
+  if (!best || best.score < CONFIDENT) {
+    return await note(pay.id, {
+      matched: false,
+      basis,
+      score: best?.score,
+      reason: best
+        ? 'The best candidate was not certain enough to apply on its own'
+        : 'Every candidate was outside the window for this payment',
+    });
+  }
+
+  // A phone match is a suggestion, never a decision - and this is the reason.
+  //
+  // The temple's websites take their donations through the same Razorpay
+  // account, so with payment.captured subscribed, a donation made on
+  // harekrishnavizag.org arrives here too, carrying no QR id and the donor's
+  // own number. If that donor had been rung last week and sent a QR, the phone
+  // would match, DRM would credit the caller, and - far worse - it would raise
+  // a SECOND 80G receipt for money the site has already receipted.
+  //
+  // Razorpay cannot tell DRM which of the two it was. A person can, in one
+  // click, so the payment waits for them with the likely answer written on it.
+  if (basis === 'phone') {
+    const who = best.share.lead_id ? await leadLabel(best.share.lead_id) : null;
+    return await note(pay.id, {
+      matched: false,
+      basis,
+      score: best.score,
+      reason:
+        `Looks like ${who ?? `the share to ${best.share.phone}`}, but Razorpay did not say this came ` +
+        'through a QR - it may be a website donation that is already receipted. Confirm it here.',
+    });
+  }
 
   await pool.query(
     `UPDATE qr_shares SET
@@ -460,8 +619,10 @@ export async function matchPayment(paymentId: string): Promise<{ matched: boolea
     [best.share.id, pay.payment_id, pay.amount]
   );
   await pool.query(
-    `UPDATE qr_payments SET share_id = $2, person_id = $3 WHERE id = $1`,
-    [pay.id, best.share.id, best.share.person_id]
+    `UPDATE qr_payments SET share_id = $2, person_id = $3,
+       match_basis = $4, match_score = $5::int, match_note = NULL
+     WHERE id = $1`,
+    [pay.id, best.share.id, best.share.person_id, basis, Math.round(best.score)]
   );
 
   // Move the lead. Recorded as 'manual' rather than 'auto' on purpose: 'auto'
@@ -491,7 +652,7 @@ export async function matchPayment(paymentId: string): Promise<{ matched: boolea
     console.error('crm.issueReceipt error:', (e as Error).message)
   );
 
-  return { matched: true, shareId: best.share.id, score: best.score };
+  return { matched: true, shareId: best.share.id, score: best.score, basis };
 }
 
 /**
@@ -603,6 +764,68 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
 }
 
 /**
+ * The events this endpoint acts on, and why exactly these.
+ *
+ * WHICH EVENT CARRIES THE QR ID - THE WHOLE POINT OF THIS LIST
+ * A Razorpay payment object does NOT say which QR it was paid into. There is
+ * no qr_id on it, and there is no field to look one up from. The only delivery
+ * that names the QR is `qr_code.credited`, whose payload carries both the
+ * qr_code entity AND the payment entity:
+ *
+ *   qr_code.credited  -> payload.qr_code.entity.id  +  payload.payment.entity
+ *   payment.captured  -> payload.payment.entity                (no QR anywhere)
+ *
+ * So `qr_code.credited` is the one subscription DRM genuinely needs. An
+ * earlier version of this handler ignored every event that did not begin with
+ * "payment" and then read the QR id out of payload.qr_code - a field that
+ * filter had already thrown away. On a `payment.captured` subscription alone
+ * it stored every QR donation with a null QR id and matched precisely none of
+ * them, forever.
+ *
+ * `payment.captured` and `payment.authorized` are kept as a second path
+ * because they arrive for every payment including ones taken outside a QR, and
+ * because the two events can arrive in either order: whichever comes first
+ * creates the row, and the other fills in what it knows. `payment.failed` is
+ * stored too, so a caller ringing back can see the donor tried.
+ */
+const HANDLED_EVENTS = new Set([
+  'qr_code.credited',
+  'payment.captured',
+  'payment.authorized',
+  'payment.failed',
+]);
+
+/**
+ * Find the QR id anywhere in a webhook body.
+ *
+ * WHY THIS IS A SEARCH AND NOT A PATH
+ * The documented place is payload.qr_code.entity.id, and that is tried first.
+ * But the whole of this feature rests on getting that one string out of one
+ * delivery, and a provider that moves or nests a field differently than the
+ * docs show would break it silently - a null column, no error, every donation
+ * unattributed until somebody noticed weeks later. A Razorpay QR id has a
+ * shape nothing else in the payload shares (qr_ followed by an id), so after
+ * the known paths this walks the body and takes the first one it finds.
+ *
+ * Bounded depth, and it never looks inside `notes`, which is free text the
+ * temple controls and could contain anything.
+ */
+function findQrId(body: unknown, depth = 0): string | null {
+  if (depth > 6 || body === null || typeof body !== 'object') return null;
+  for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
+    if (key === 'notes') continue;
+    if (typeof value === 'string') {
+      // `id` on a qr_code entity, or any field carrying the same shape.
+      if (/^qr_[A-Za-z0-9]{6,}$/.test(value)) return value.slice(0, 60);
+    } else {
+      const found = findQrId(value, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
  * POST /qr/webhook - Razorpay tells us about a payment.
  *
  * Mounted without the JWT (Razorpay has no token) and verified by signature
@@ -627,34 +850,104 @@ webhookRouter.post('/webhook', async (req, res) => {
   if (!ok) return res.status(401).json({ error: 'Bad signature' });
 
   try {
-    const event = req.body?.event as string;
-    const entity = req.body?.payload?.payment?.entity as Record<string, unknown> | undefined;
-    if (!entity || !String(event ?? '').startsWith('payment')) return res.json({ ignored: true });
+    const event = String(req.body?.event ?? '');
+    const payload = (req.body?.payload ?? {}) as {
+      payment?: { entity?: Record<string, unknown> };
+      qr_code?: { entity?: Record<string, unknown> };
+    };
+    const entity = payload.payment?.entity;
+
+    if (!HANDLED_EVENTS.has(event) || !entity?.id) {
+      // Answered 200 on purpose. Razorpay lets you subscribe to events DRM has
+      // no use for, and retrying those for hours helps nobody.
+      return res.json({ ignored: true, event: event || null });
+    }
 
     const notes = (entity.notes ?? {}) as Record<string, unknown>;
     const contact = String(entity.contact ?? '').replace(/\D/g, '').slice(-10);
 
+    // The QR id, in order of how much it is worth trusting: what Razorpay
+    // itself says on a qr_code.credited, then a qr_id somebody put in the QR's
+    // notes by hand. The notes fallback exists because notes ride along onto
+    // every payment taken through that QR, so a temple that fills them in gets
+    // matching even on a payment.captured-only subscription.
+    const qrId =
+      str(payload.qr_code?.entity?.id, 60) ??
+      str((payload.qr_code as { id?: unknown } | undefined)?.id, 60) ??
+      findQrId(payload) ??
+      str(notes.qr_id ?? notes.qrId ?? notes.qr_code, 60);
+
+    // WHY NOT EVERY PAYMENT IS STORED
+    // The temple's websites take their donations through this same Razorpay
+    // account. With payment.captured subscribed, every website donation is
+    // delivered here as well - and those are already recorded, already
+    // receipted, and already synced into DRM from the site itself. Keeping
+    // them would turn this table into a second, worse copy of the donations
+    // table and bury the handful of QR payments a caller actually needs to
+    // see.
+    //
+    // So a payment is kept when there is a reason to think it is one of ours:
+    // Razorpay named the QR, or it came from a number a caller sent a QR to in
+    // the last week. Anything else is somebody else's business, answered 200
+    // and forgotten. The payment.captured for a real QR donation that arrives
+    // before its qr_code.credited is not lost by this - the credited event
+    // that follows carries the QR id and stores it.
+    const keep =
+      !!qrId ||
+      (!!contact &&
+        (
+          await pool.query(
+            `SELECT 1 FROM qr_shares
+              WHERE phone = $1 AND matched_at IS NULL
+                AND created_at > NOW() - INTERVAL '7 days'
+              LIMIT 1`,
+            [contact]
+          )
+        ).rows.length > 0);
+
+    if (!keep) {
+      return res.json({ ignored: true, event, reason: 'not a payment DRM shared a QR for' });
+    }
+
     const stored = await pool.query(
       `INSERT INTO qr_payments
-         (payment_id, qr_id, amount, payer_phone, payer_vpa, payer_name, status, raw, received_at)
-       VALUES ($1,$2,$3::numeric,$4,$5,$6,$7,$8::jsonb, to_timestamp($9))
-       ON CONFLICT (payment_id) DO UPDATE SET status = EXCLUDED.status, raw = EXCLUDED.raw
-       RETURNING id, payment_id`,
+         (payment_id, qr_id, amount, payer_phone, payer_vpa, payer_name, status, raw, received_at, last_event)
+       VALUES ($1,$2,$3::numeric,$4,$5,$6,$7,$8::jsonb, to_timestamp($9), $10)
+       ON CONFLICT (payment_id) DO UPDATE SET
+         -- Whichever delivery knows the QR wins, and neither can erase it:
+         -- the two events arrive in either order, and a payment.captured that
+         -- knows nothing must not blank out what qr_code.credited established.
+         qr_id      = COALESCE(EXCLUDED.qr_id, qr_payments.qr_id),
+         payer_phone = COALESCE(EXCLUDED.payer_phone, qr_payments.payer_phone),
+         payer_vpa  = COALESCE(EXCLUDED.payer_vpa, qr_payments.payer_vpa),
+         payer_name = COALESCE(EXCLUDED.payer_name, qr_payments.payer_name),
+         status     = COALESCE(EXCLUDED.status, qr_payments.status),
+         raw        = EXCLUDED.raw,
+         last_event = EXCLUDED.last_event
+       RETURNING id, payment_id, share_id`,
       [
         String(entity.id),
-        str(req.body?.payload?.qr_code?.entity?.id ?? notes.qr_id, 60),
+        qrId,
         Number(entity.amount ?? 0) / 100,
         contact || null,
         str(entity.vpa, 120),
         str(notes.name ?? entity.email, 160),
         str(entity.status, 20),
-        JSON.stringify(entity),
+        // The WHOLE event, not just the payment entity. When a QR id fails to
+        // turn up, the only way to find out what Razorpay actually sent is to
+        // look at what it sent - and by then the delivery is long gone.
+        JSON.stringify(req.body),
         Number(entity.created_at ?? Math.floor(Date.now() / 1000)),
+        event.slice(0, 40),
       ]
     );
 
+    // Run on every delivery, not only the first. A payment stored unmatched by
+    // payment.captured is matched by the qr_code.credited that follows it,
+    // which is the whole reason the two paths exist. matchPayment returns
+    // early once a payment already has a share, so a third redelivery is free.
     const result = await matchPayment(stored.rows[0].payment_id);
-    res.json({ stored: true, ...result });
+    res.json({ stored: true, event, ...result });
   } catch (err) {
     console.error('crm.qrWebhook error:', err);
     // Still 200: Razorpay would otherwise retry for hours over a bug of ours.

@@ -57,6 +57,11 @@ interface Payment {
   receipt_status: string | null;
   receipt_error: string | null;
   receipt_number: string | null;
+  /** Why this one is still sitting here, written down by the matcher. */
+  match_note: string | null;
+  match_score: number | null;
+  match_basis: string | null;
+  last_event: string | null;
 }
 
 interface Share {
@@ -229,7 +234,17 @@ export default function QrPaymentsPage() {
                         {p.lead_name || "a lead"}
                       </Link>
                     ) : (
-                      <Badge tone="warn">nobody yet</Badge>
+                      <>
+                        <Badge tone="warn">nobody yet</Badge>
+                        {/* The reason, not just the state. Each one asks for a
+                            different fix, and only the matcher knows which. */}
+                        {p.match_note && (
+                          <p className="mt-1 max-w-[16rem] text-[11px] leading-snug text-slate-500">
+                            {p.match_note}
+                            {p.match_score != null && ` (scored ${p.match_score} of ${60} needed)`}
+                          </p>
+                        )}
+                      </>
                     )}
                   </Td>
                   <Td>{receiptBadge(p)}</Td>
@@ -266,9 +281,17 @@ export default function QrPaymentsPage() {
 
         <div className="border-t border-[var(--line-soft)] px-5 py-4">
           <p className="text-xs text-slate-500">
-            DRM matches a payment on the QR it came through, the payer&apos;s number, the amount and how soon it
-            arrived after the QR was shared. Anything it cannot place confidently waits here rather than being
-            credited to a guess — a donation attributed to the wrong caller is worse than one attributed to nobody.
+            DRM matches a payment on the QR it came through, the amount, and how soon it arrived after the QR was
+            shared. Anything it cannot place confidently waits here rather than being credited to a guess — a
+            donation attributed to the wrong caller is worse than one attributed to nobody.
+          </p>
+          {/* Said out loud because it is the one case where DRM knows the
+              answer and still refuses to act on it, which otherwise looks like
+              a fault rather than the safeguard it is. */}
+          <p className="mt-2 text-xs text-slate-500">
+            A payment that only matches on the donor&apos;s phone number is never applied on its own. The websites
+            take their donations through the same Razorpay account, so that payment might be a website donation
+            that already has a receipt — linking it here would raise a second one for the same money.
           </p>
         </div>
       </Card>

@@ -23,6 +23,14 @@ import { Badge, Card, CardHeader, EmptyState, PageHeader, StatTile, buttonPrimar
 
 interface Dashboard {
   range: { from: string; to: string; label: string };
+  /**
+   * Whose figures these are, decided by the server from the role - not by
+   * anything this page asks for. A caller gets "mine" and sees their own work;
+   * an admin gets "team". The page reads it rather than inferring from the
+   * role, so the heading can never claim one thing while the numbers are the
+   * other.
+   */
+  scope: "mine" | "team";
   leads: { received: number; converted: number; conversion_rate: number; raised: number };
   calls: {
     made: number;
@@ -40,6 +48,7 @@ interface Dashboard {
   by_status: { status: string; label: string; tone: string; n: number; value: string }[];
   by_source: { source: string; n: number; converted: number }[];
   callers_today: { id: string; name: string; calls: number; connected: number }[];
+  qr: { shared: number; paid: number; raised: number; awaiting: number };
 }
 
 const PRESETS = [
@@ -93,20 +102,33 @@ export default function CallingDashboardPage() {
   const c = data?.calls;
   const f = data?.follow_ups;
   const maxStatus = Math.max(1, ...(data?.by_status ?? []).map((s) => s.n));
+  // A caller's own screen. Not a cut-down admin dashboard: the same honest
+  // figures about a smaller thing, with the two cards that only make sense
+  // across a team swapped for the one thing a caller cannot otherwise see -
+  // whether the QRs they sent were ever paid.
+  const mine = data?.scope === "mine";
 
   return (
     <div>
       <PageHeader
-        title="Calling"
-        subtitle="Phone outreach to donors — what has been done, and what is owed"
+        title={mine ? "Your calling" : "Calling"}
+        subtitle={
+          mine
+            ? "Your leads, your calls, and what you are owed — nobody else's"
+            : "Phone outreach to donors — what has been done, and what is owed"
+        }
         actions={
           <div className="flex flex-wrap gap-2">
-            <Link href="/calling/reports" className={buttonSecondary}>
-              Reports
-            </Link>
-            <Link href="/calling/settings" className={buttonSecondary}>
-              Settings
-            </Link>
+            {!mine && (
+              <>
+                <Link href="/calling/reports" className={buttonSecondary}>
+                  Reports
+                </Link>
+                <Link href="/calling/settings" className={buttonSecondary}>
+                  Settings
+                </Link>
+              </>
+            )}
             <Link href="/calling/lists" className={buttonSecondary}>
               Lists
             </Link>
@@ -166,12 +188,12 @@ export default function CallingDashboardPage() {
       {/* ------------------------------------------------------------ tiles */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-5">
         <StatTile
-          label="Leads received"
+          label={mine ? "Your leads" : "Leads received"}
           value={loading ? "—" : number(data?.leads.received ?? 0)}
-          sub="added in this period"
+          sub={mine ? "assigned to you in this period" : "added in this period"}
         />
         <StatTile
-          label="Calls made"
+          label={mine ? "Calls you made" : "Calls made"}
           value={loading ? "—" : number(c?.made ?? 0)}
           sub={c ? `across ${number(c.leads_touched)} ${c.leads_touched === 1 ? "person" : "people"}` : undefined}
         />
@@ -232,9 +254,16 @@ export default function CallingDashboardPage() {
       <div className="grid gap-5 lg:grid-cols-2">
         {/* ------------------------------------------------- where leads are */}
         <Card>
-          <CardHeader title="Where the leads are" subtitle="Every lead, by stage" />
+          <CardHeader title="Where the leads are" subtitle={mine ? "Your leads, by stage" : "Every lead, by stage"} />
           {!data?.by_status.length ? (
-            <EmptyState title="No leads yet" message="Add a list or pull some donors in to get started." />
+            <EmptyState
+              title={mine ? "No leads yet" : "No leads yet"}
+              message={
+                mine
+                  ? "Nothing has been assigned to you yet. Ask for a list, or open Lists to see what is going."
+                  : "Add a list or pull some donors in to get started."
+              }
+            />
           ) : (
             <ul className="space-y-2.5">
               {data.by_status.map((s) => (
@@ -257,7 +286,14 @@ export default function CallingDashboardPage() {
 
         {/* ------------------------------------------------ where they came from */}
         <Card>
-          <CardHeader title="Where they came from" subtitle="Leads added in this period, and how many gave" />
+          <CardHeader
+            title="Where they came from"
+            subtitle={
+              mine
+                ? "Your leads in this period, and how many gave"
+                : "Leads added in this period, and how many gave"
+            }
+          />
           {!data?.by_source.length ? (
             <EmptyState title="Nothing in this period" message="Try a wider date range." />
           ) : (
@@ -275,7 +311,49 @@ export default function CallingDashboardPage() {
           )}
         </Card>
 
+        {/* --------------------------------------------------- QRs and money */}
+        {/* Shown to everyone, because "was that QR ever paid" is the one
+            question the rest of this screen cannot answer. On a caller's
+            screen it counts only the QRs they sent. */}
+        <Card className={mine ? "lg:col-span-2" : ""}>
+          <CardHeader
+            title={mine ? "QRs you sent" : "QRs sent"}
+            subtitle="Shared during calls, and what came back"
+            action={
+              <Link href="/calling/payments" className="text-xs text-[var(--accent)] hover:underline">
+                QR payments →
+              </Link>
+            }
+          />
+          {!data?.qr.shared ? (
+            <EmptyState
+              title="No QRs sent in this period"
+              message="During a call, pick a QR and press send — the payment finds its way back here on its own."
+            />
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-3">
+              <StatTile label="Sent" value={number(data.qr.shared)} sub="during calls in this period" />
+              <StatTile
+                label="Paid"
+                value={number(data.qr.paid)}
+                accent="good"
+                sub={`${currency(data.qr.raised)} in all`}
+              />
+              <StatTile
+                label="Still waiting"
+                value={number(data.qr.awaiting)}
+                accent={data.qr.awaiting > 0 ? "warn" : "default"}
+                sub="sent in the last 7 days, no payment yet"
+              />
+            </div>
+          )}
+        </Card>
+
         {/* ------------------------------------------------------ on the phone */}
+        {/* Withheld from callers, and not merely hidden: the server does not
+            send it to them. A leaderboard of one person is not a leaderboard,
+            and a caller has no business reading their colleagues' numbers. */}
+        {!mine && (
         <Card className="lg:col-span-2">
           <CardHeader
             title="On the phone today"
@@ -302,6 +380,7 @@ export default function CallingDashboardPage() {
             </ul>
           )}
         </Card>
+        )}
       </div>
     </div>
   );

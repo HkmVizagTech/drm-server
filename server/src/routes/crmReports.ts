@@ -33,7 +33,7 @@
 
 import { Router } from 'express';
 import pool from '../db/pool';
-import { authenticate } from '../middleware/auth';
+import { authenticate, authorize } from '../middleware/auth';
 import { reconcileConversions } from './crm';
 
 const router = Router();
@@ -74,21 +74,48 @@ const WINDOW = (col: string, a: number, b: number) => `${col} >= $${a}::date AND
 
 /* --------------------------------------------------------------- dashboard */
 
+/**
+ * WHOSE NUMBERS THESE ARE
+ *
+ * This endpoint used to answer the same thing to everybody, and the only
+ * protection was that the nav link was hidden from callers - so a caller who
+ * typed the URL saw the whole team's figures and today's leaderboard. That is
+ * not a security boundary, it is a decoration.
+ *
+ * Now the scope comes from the role, server-side: an admin sees the temple,
+ * and a caller sees their own work and nothing else. Every query below takes
+ * the same `me` parameter and narrows on it - leads assigned to them, calls
+ * they logged, follow-ups they owe - so there is no query left that could
+ * leak the team's totals through a tile nobody remembered to scope. The
+ * leaderboard is not narrowed; it is simply not sent.
+ *
+ * A caller's page is not a lesser copy of the admin's. It is the same figures
+ * about a smaller thing, which is what makes it worth reading on a shift.
+ */
+function scopeOf(req: { user?: { role?: string; userId?: string } }): string | null {
+  return req.user?.role === 'caller' ? req.user?.userId ?? null : null;
+}
+
 router.get('/dashboard', async (req, res) => {
   const { from, to, label } = range(req.query as Record<string, unknown>);
+  // NULL means "no narrowing" - every predicate below is written to pass
+  // everything when it is NULL, so one parameter serves both audiences.
+  const me = scopeOf(req);
 
   try {
     // Link any donations that have landed since a lead was created, so the
     // conversion figures below are current rather than a day behind.
     await reconcileConversions();
 
-    const [leads, calls, pipeline, followUps, byStatus, bySource, callers] = await Promise.all([
+    const [leads, calls, pipeline, followUps, byStatus, bySource, callers, qr] = await Promise.all([
       pool.query(
         `SELECT COUNT(*)::int AS received,
                 COUNT(*) FILTER (WHERE converted_donation_id IS NOT NULL)::int AS converted,
                 COALESCE(SUM(converted_amount) FILTER (WHERE converted_donation_id IS NOT NULL), 0)::numeric AS raised
-           FROM leads WHERE ${WINDOW('created_at', 1, 2)}`,
-        [from, to]
+           FROM leads
+          WHERE ${WINDOW('created_at', 1, 2)}
+            AND ($3::uuid IS NULL OR assigned_to = $3::uuid)`,
+        [from, to, me]
       ),
       pool.query(
         `SELECT COUNT(*)::int AS made,
@@ -100,14 +127,17 @@ router.get('/dashboard', async (req, res) => {
                 COALESCE(SUM(duration_seconds), 0)::int AS total_seconds,
                 COUNT(*) FILTER (WHERE duration_seconds IS NOT NULL)::int AS with_duration
            FROM lead_activities
-          WHERE kind = 'call' AND ${WINDOW('occurred_at', 1, 2)}`,
-        [from, to]
+          WHERE kind = 'call' AND ${WINDOW('occurred_at', 1, 2)}
+            AND ($3::uuid IS NULL OR user_id = $3::uuid)`,
+        [from, to, me]
       ),
       pool.query(
         `SELECT COALESCE(SUM(l.expected_amount), 0)::numeric AS pipeline,
                 COUNT(*)::int AS open_leads
            FROM leads l LEFT JOIN crm_statuses s ON l.status = s.slug
-          WHERE COALESCE(s.is_open, TRUE) AND l.do_not_call = FALSE`
+          WHERE COALESCE(s.is_open, TRUE) AND l.do_not_call = FALSE
+            AND ($1::uuid IS NULL OR l.assigned_to = $1::uuid)`,
+        [me]
       ),
       pool.query(
         `SELECT
@@ -118,29 +148,55 @@ router.get('/dashboard', async (req, res) => {
                               AND next_follow_up_at <  date_trunc('day', NOW()) + INTERVAL '8 days')::int AS next_7_days,
            COUNT(*) FILTER (WHERE next_follow_up_at IS NULL)::int AS unscheduled
          FROM leads l LEFT JOIN crm_statuses s ON l.status = s.slug
-        WHERE COALESCE(s.is_open, TRUE) AND l.do_not_call = FALSE`
+        WHERE COALESCE(s.is_open, TRUE) AND l.do_not_call = FALSE
+          AND ($1::uuid IS NULL OR l.assigned_to = $1::uuid)`,
+        [me]
       ),
       pool.query(
         `SELECT l.status, COALESCE(s.label, l.status) AS label, COALESCE(s.tone,'slate') AS tone,
                 COUNT(*)::int AS n, COALESCE(SUM(l.expected_amount),0)::numeric AS value
            FROM leads l LEFT JOIN crm_statuses s ON l.status = s.slug
+          WHERE ($1::uuid IS NULL OR l.assigned_to = $1::uuid)
           GROUP BY l.status, s.label, s.tone, s.sort_order
-          ORDER BY MIN(COALESCE(s.sort_order, 999))`
+          ORDER BY MIN(COALESCE(s.sort_order, 999))`,
+        [me]
       ),
       pool.query(
         `SELECT source, COUNT(*)::int AS n,
                 COUNT(*) FILTER (WHERE converted_donation_id IS NOT NULL)::int AS converted
-           FROM leads WHERE ${WINDOW('created_at', 1, 2)} GROUP BY source ORDER BY n DESC`,
-        [from, to]
+           FROM leads
+          WHERE ${WINDOW('created_at', 1, 2)}
+            AND ($3::uuid IS NULL OR assigned_to = $3::uuid)
+          GROUP BY source ORDER BY n DESC`,
+        [from, to, me]
       ),
-      // Today's leaderboard - who has actually been on the phone.
+      // Today's leaderboard - who has actually been on the phone. Not narrowed
+      // to one caller, because a leaderboard of one is not a leaderboard: it is
+      // withheld from callers entirely below.
+      me
+        ? Promise.resolve({ rows: [] })
+        : pool.query(
+            `SELECT u.id, u.name,
+                    COUNT(*)::int AS calls,
+                    COUNT(*) FILTER (WHERE a.connected)::int AS connected
+               FROM lead_activities a JOIN users u ON a.user_id = u.id
+              WHERE a.kind = 'call' AND a.occurred_at >= date_trunc('day', NOW())
+              GROUP BY u.id, u.name ORDER BY calls DESC LIMIT 10`
+          ),
+      // QR codes shared and what came back. On a caller's own screen this is
+      // the answer to "did that QR I sent this morning ever get paid", which
+      // was previously only findable by scrolling the payments list.
       pool.query(
-        `SELECT u.id, u.name,
-                COUNT(*)::int AS calls,
-                COUNT(*) FILTER (WHERE a.connected)::int AS connected
-           FROM lead_activities a JOIN users u ON a.user_id = u.id
-          WHERE a.kind = 'call' AND a.occurred_at >= date_trunc('day', NOW())
-          GROUP BY u.id, u.name ORDER BY calls DESC LIMIT 10`
+        `SELECT COUNT(*)::int AS shared,
+                COUNT(*) FILTER (WHERE s.matched_at IS NOT NULL)::int AS paid,
+                COALESCE(SUM(s.matched_amount), 0)::numeric AS raised,
+                COUNT(*) FILTER (
+                  WHERE s.matched_at IS NULL AND s.created_at > NOW() - INTERVAL '7 days'
+                )::int AS awaiting
+           FROM qr_shares s
+          WHERE ${WINDOW('s.created_at', 1, 2)}
+            AND ($3::uuid IS NULL OR s.shared_by = $3::uuid)`,
+        [from, to, me]
       ),
     ]);
 
@@ -149,6 +205,10 @@ router.get('/dashboard', async (req, res) => {
 
     res.json({
       range: { from, to, label },
+      // The screen says whose figures these are rather than leaving the reader
+      // to assume. A caller reading temple-wide totals as their own, or the
+      // reverse, is the failure this one field prevents.
+      scope: me ? 'mine' : 'team',
       leads: {
         received: l.received,
         converted: l.converted,
@@ -176,6 +236,12 @@ router.get('/dashboard', async (req, res) => {
       by_status: byStatus.rows,
       by_source: bySource.rows,
       callers_today: callers.rows,
+      qr: {
+        shared: qr.rows[0].shared,
+        paid: qr.rows[0].paid,
+        raised: Number(qr.rows[0].raised),
+        awaiting: qr.rows[0].awaiting,
+      },
     });
   } catch (err) {
     console.error('crm.dashboard error:', err);
@@ -184,6 +250,18 @@ router.get('/dashboard', async (req, res) => {
 });
 
 /* ----------------------------------------------------------------- reports */
+
+/**
+ * Everything under /reports is supervisory and stays that way.
+ *
+ * These five compare callers against each other - calls made, connect rates,
+ * whose follow-ups are late - which is a supervisor's job and nobody else's.
+ * The dashboard above could be narrowed to one caller and still mean
+ * something; a caller-versus-caller table cannot. So this is a refusal rather
+ * than a scope, and it sits here, in front of all of them, rather than being
+ * remembered separately on each new report somebody adds later.
+ */
+router.use('/reports', authorize('admin', 'accountant'));
 
 // Employee/caller-wise activity. The columns a temple supervisor actually asks
 // for: how many calls, how many got through, how long on the phone, how many

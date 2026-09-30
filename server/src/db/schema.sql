@@ -1398,6 +1398,22 @@ ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS receipt_number VARCHAR(80);
 ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS external_donation_id VARCHAR(80);
 ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS receipt_site   VARCHAR(20);
 
+-- Why a payment is, or is not, attached to a share.
+--
+-- An unmatched payment on a screen with no explanation is a question nobody
+-- can answer without reading the code, and the answers call for very different
+-- work: a QR that DRM never shared is an office habit to correct, a missing QR
+-- id is a webhook subscription to add in Razorpay, and a near-miss score is one
+-- click of human judgement. The matcher writes down which.
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS match_basis VARCHAR(10);
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS match_score INT;
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS match_note  TEXT;
+-- The last Razorpay event that touched this row. Diagnostic: if every row says
+-- payment.captured and none says qr_code.credited, the subscription that
+-- carries the QR id is missing, which is the one setting that stops all of
+-- this working.
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS last_event VARCHAR(40);
+
 CREATE INDEX IF NOT EXISTS idx_qr_payments_receipt_pending
   ON qr_payments(received_at DESC)
   WHERE share_id IS NOT NULL AND receipt_status IN ('pending', 'failed');

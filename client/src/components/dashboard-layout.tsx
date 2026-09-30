@@ -67,7 +67,18 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
       {/* min-w-0 matters: without it a wide table inside a flex child refuses to
           shrink and pushes the whole layout sideways instead of scrolling. */}
-      <main className="flex-1 min-w-0 overflow-y-auto">
+      {/* `relative` is load-bearing, not decoration.
+          Tailwind's `sr-only` is `position: absolute`, and an absolutely
+          positioned element with no positioned ancestor is laid out against
+          the initial containing block - so it escapes this scroller's
+          clipping entirely. Every hidden file input and screen-reader label
+          deep inside a long page was landing thousands of pixels down the
+          DOCUMENT, giving the window a second scrollbar that dragged the whole
+          fixed-height shell out of view and left a screenful of blank page
+          below it.
+          Making this the containing block puts them back inside, where the
+          overflow rule can clip them. */}
+      <main className="relative flex-1 min-w-0 overflow-y-auto">
         {/* ONE header, at both sizes, and exactly ONE ReminderBell in the whole
             app. That matters: the bell polls the server every minute, and a
             second copy - say one in the sidebar for desktop and one here for
