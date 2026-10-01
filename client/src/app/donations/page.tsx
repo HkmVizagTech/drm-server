@@ -95,6 +95,7 @@ export default function DonationsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [purpose, setPurpose] = useState("");
@@ -139,8 +140,15 @@ export default function DonationsPage() {
     if (groupFilter) params.set("group", groupFilter);
     apiClient
       .get<DonationsResponse>(`/api/donations?${params}`)
-      .then(setData)
-      .catch(console.error)
+      .then((d) => {
+        setData(d);
+        setLoadError(null);
+      })
+      // An empty table is what a failed request used to look like. The screen
+      // said "no records" when the truth was "the server refused", or "the
+      // server broke" - indistinguishable to anybody without DevTools open,
+      // and the reason a permissions bug can sit unnoticed for weeks.
+      .catch((e) => setLoadError(e instanceof Error ? e.message : "Could not load this list"))
       .finally(() => setLoading(false));
   }, [page, debouncedSearch, purpose, receipt, fromDate, toDate, siteFilter, pageFilter, groupFilter]);
 
@@ -195,6 +203,12 @@ export default function DonationsPage() {
 
       {/* The filtered sum is the number staff actually want when they slice by
           purpose or date - without it the page shows rows but never a total. */}
+      {loadError && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          {loadError}
+        </div>
+      )}
+
       {data && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
           <StatTile

@@ -10,7 +10,8 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "test:qr": "tsx scripts/test-qr-webhook.ts",
     "test:scope": "tsx scripts/test-dashboard-scope.ts",
-    "test:promises": "tsx scripts/test-promises.ts"
+    "test:promises": "tsx scripts/test-promises.ts",
+    "test:access": "tsx scripts/test-role-access.ts"
   },
   "keywords": [],
   "author": "",

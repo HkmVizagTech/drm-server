@@ -554,6 +554,132 @@ router.get('/leads/sample.xlsx', async (_req, res) => {
 // import does: staff must never be able to export rows the screen cannot show.
 router.get('/leads/export.csv', (req, res) => exportLeadsCsv(req, res));
 
+/* ------------------------------------------------- unfinished donations
+ *
+ * REGISTERED BEFORE /leads/:id, AND THAT IS THE WHOLE POINT
+ *
+ * Express matches in registration order. With these below the `/leads/:id`
+ * handler, a request for /leads/abandoned was read as a lead whose id is the
+ * word "abandoned", which Postgres then refused to cast to a uuid - so the
+ * page answered 500 with "Could not load that lead" and the screen showed
+ * zeroes with no explanation of what had gone wrong.
+ */
+
+/**
+ * GET /leads/abandoned - the list a caller works through.
+ *
+ * Open to callers, unlike the bulk import below. The whole point is that a
+ * caller can see who nearly gave and ring them; making them ask an admin to
+ * run a sync first is how a list like this goes stale and stops being used.
+ *
+ * By default it hides the people who have since given and shows the ones who
+ * have not. Both counts come back either way, so the screen can say "and 12
+ * of these have since given" rather than silently dropping them.
+ */
+router.get('/leads/abandoned', async (req, res) => {
+  const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+  const minMinutes = Math.max(15, Number(req.query.min_minutes) || 60);
+  const includeSettled = req.query.include_settled === 'true';
+  const sites = (String(req.query.sites ?? '').split(',').filter(Boolean) as SiteKey[]);
+
+  try {
+    const { rows, siteErrors, cached } = await loadAbandoned(
+      days,
+      minMinutes,
+      sites.length ? sites : (['hkmv', 'annadan'] as SiteKey[]),
+      req.query.fresh === 'true'
+    );
+
+    const settled = rows.filter((r) => r.gave_anyway);
+    const open = rows.filter((r) => !r.gave_anyway);
+    const shown = includeSettled ? rows : open;
+
+    res.json({
+      rows: shown.slice(0, 500),
+      total: rows.length,
+      open: open.length,
+      gave_anyway: settled.length,
+      already_leads: open.filter((r) => r.lead_id).length,
+      // What walked away, over the people still worth ringing. This is the
+      // number that decides whether the list is worth a shift.
+      value_at_stake: open.reduce((sum, r) => sum + (r.amount ?? 0), 0),
+      cached,
+      site_errors: siteErrors,
+    });
+  } catch (err) {
+    console.error('crm.abandoned error:', err);
+    res.status(500).json({ error: 'Could not fetch unfinished donations from the sites' });
+  }
+});
+
+/**
+ * POST /leads/abandoned/adopt - turn one of them into a lead, ready to ring.
+ *
+ * One at a time and by a caller, because that is how the list is actually
+ * worked: read a row, decide it is worth a call, take it. The bulk sync below
+ * stays for the office deciding to work a whole month at once.
+ *
+ * Refuses somebody who has since given. The client hides them, but a stale
+ * screen must not be able to create the one lead this feature exists to avoid.
+ */
+router.post('/leads/abandoned/adopt', async (req, res) => {
+  const b = req.body ?? {};
+  const phone = normalizePhone(b.phone);
+  if (!isDialable(phone)) return res.status(400).json({ error: 'That is not a number DRM can ring' });
+
+  try {
+    const gave = await pool.query(
+      `SELECT MAX(d.created_at) AS last_gift
+         FROM people p JOIN donations d ON d.person_id = p.id
+        WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = $1`,
+      [phone]
+    );
+    const last = gave.rows[0]?.last_gift ? new Date(gave.rows[0].last_gift) : null;
+    if (last && b.attempted_at && last >= new Date(String(b.attempted_at))) {
+      return res.status(409).json({
+        error: 'They gave after that attempt — there is nothing to chase. Refresh the list.',
+      });
+    }
+
+    const { lead, created } = await upsertLead(
+      {
+        phone,
+        name: b.name,
+        email: b.email,
+        source: 'website',
+        source_detail: `Unfinished donation${b.source_page ? ` on ${b.source_page}` : ''}`,
+        source_site: b.source_site,
+        expected_amount: b.amount ?? null,
+        // Theirs to ring, since they are the one who took it off the list.
+        assigned_to: b.assigned_to ?? req.user?.userId ?? null,
+        tags: ['abandoned'],
+      },
+      req.user?.userId ?? null
+    );
+
+    if (created) {
+      await pool.query(
+        `INSERT INTO lead_activities (lead_id, user_id, kind, note, occurred_at)
+         VALUES ($1,$2,'import',$3,COALESCE($4::timestamptz, NOW()))`,
+        [
+          lead.id,
+          req.user?.userId ?? null,
+          `Started a donation of ${b.amount ?? '?'}${b.purpose ? ` for ${b.purpose}` : ''} and did not complete it` +
+            (Number(b.attempts) > 1 ? ` (${b.attempts} attempts)` : ''),
+          b.attempted_at ?? null,
+        ]
+      );
+    }
+
+    res.status(created ? 201 : 200).json({ lead, created });
+  } catch (err) {
+    const status = (err as { status?: number }).status ?? 500;
+    if (status === 400) return res.status(400).json({ error: (err as Error).message });
+    console.error('crm.adoptAbandoned error:', err);
+    res.status(500).json({ error: 'Could not add that person as a lead' });
+  }
+});
+
 router.get('/leads', async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(200, Number(req.query.limit) || 50);
@@ -2374,7 +2500,17 @@ async function loadAbandoned(
   const siteErrors: { site: string; error: string }[] = [];
 
   for (const site of sites) {
-    if (!isSiteConfigured(site)) continue;
+    // A site with no credentials used to be skipped in silence, so the screen
+    // showed a confident zero that actually meant "DRM never asked". Said out
+    // loud instead - the difference between "nobody abandoned a donation" and
+    // "annadan is not connected" is the whole value of the page.
+    if (!isSiteConfigured(site)) {
+      siteErrors.push({
+        site,
+        error: 'Not connected — its URL and internal secret are not set on DRM, so it was not asked.',
+      });
+      continue;
+    }
     try {
       for (let page = 1; page <= 10; page++) {
         const result = await fetchAbandonedPage(site, { page, limit: 200, since, minMinutes });
@@ -2444,124 +2580,12 @@ async function loadAbandoned(
   }
 
   rows.sort((a, b) => new Date(b.attemptedAt).getTime() - new Date(a.attemptedAt).getTime());
-  abandonedCache.set(key, { at: Date.now(), rows, siteErrors });
+  // Only a clean answer is cached. Caching a failure would mean a site that
+  // was briefly down looked empty for three minutes after it came back, and
+  // "Check the sites again" would do nothing.
+  if (!siteErrors.length) abandonedCache.set(key, { at: Date.now(), rows, siteErrors });
   return { rows, siteErrors, cached: false };
 }
-
-/**
- * GET /leads/abandoned - the list a caller works through.
- *
- * Open to callers, unlike the bulk import below. The whole point is that a
- * caller can see who nearly gave and ring them; making them ask an admin to
- * run a sync first is how a list like this goes stale and stops being used.
- *
- * By default it hides the people who have since given and shows the ones who
- * have not. Both counts come back either way, so the screen can say "and 12
- * of these have since given" rather than silently dropping them.
- */
-router.get('/leads/abandoned', async (req, res) => {
-  const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
-  const minMinutes = Math.max(15, Number(req.query.min_minutes) || 60);
-  const includeSettled = req.query.include_settled === 'true';
-  const sites = (String(req.query.sites ?? '').split(',').filter(Boolean) as SiteKey[]);
-
-  try {
-    const { rows, siteErrors, cached } = await loadAbandoned(
-      days,
-      minMinutes,
-      sites.length ? sites : (['hkmv', 'annadan'] as SiteKey[]),
-      req.query.fresh === 'true'
-    );
-
-    const settled = rows.filter((r) => r.gave_anyway);
-    const open = rows.filter((r) => !r.gave_anyway);
-    const shown = includeSettled ? rows : open;
-
-    res.json({
-      rows: shown.slice(0, 500),
-      total: rows.length,
-      open: open.length,
-      gave_anyway: settled.length,
-      already_leads: open.filter((r) => r.lead_id).length,
-      // What walked away, over the people still worth ringing. This is the
-      // number that decides whether the list is worth a shift.
-      value_at_stake: open.reduce((sum, r) => sum + (r.amount ?? 0), 0),
-      cached,
-      site_errors: siteErrors,
-    });
-  } catch (err) {
-    console.error('crm.abandoned error:', err);
-    res.status(500).json({ error: 'Could not fetch unfinished donations from the sites' });
-  }
-});
-
-/**
- * POST /leads/abandoned/adopt - turn one of them into a lead, ready to ring.
- *
- * One at a time and by a caller, because that is how the list is actually
- * worked: read a row, decide it is worth a call, take it. The bulk sync below
- * stays for the office deciding to work a whole month at once.
- *
- * Refuses somebody who has since given. The client hides them, but a stale
- * screen must not be able to create the one lead this feature exists to avoid.
- */
-router.post('/leads/abandoned/adopt', async (req, res) => {
-  const b = req.body ?? {};
-  const phone = normalizePhone(b.phone);
-  if (!isDialable(phone)) return res.status(400).json({ error: 'That is not a number DRM can ring' });
-
-  try {
-    const gave = await pool.query(
-      `SELECT MAX(d.created_at) AS last_gift
-         FROM people p JOIN donations d ON d.person_id = p.id
-        WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = $1`,
-      [phone]
-    );
-    const last = gave.rows[0]?.last_gift ? new Date(gave.rows[0].last_gift) : null;
-    if (last && b.attempted_at && last >= new Date(String(b.attempted_at))) {
-      return res.status(409).json({
-        error: 'They gave after that attempt — there is nothing to chase. Refresh the list.',
-      });
-    }
-
-    const { lead, created } = await upsertLead(
-      {
-        phone,
-        name: b.name,
-        email: b.email,
-        source: 'website',
-        source_detail: `Unfinished donation${b.source_page ? ` on ${b.source_page}` : ''}`,
-        source_site: b.source_site,
-        expected_amount: b.amount ?? null,
-        // Theirs to ring, since they are the one who took it off the list.
-        assigned_to: b.assigned_to ?? req.user?.userId ?? null,
-        tags: ['abandoned'],
-      },
-      req.user?.userId ?? null
-    );
-
-    if (created) {
-      await pool.query(
-        `INSERT INTO lead_activities (lead_id, user_id, kind, note, occurred_at)
-         VALUES ($1,$2,'import',$3,COALESCE($4::timestamptz, NOW()))`,
-        [
-          lead.id,
-          req.user?.userId ?? null,
-          `Started a donation of ${b.amount ?? '?'}${b.purpose ? ` for ${b.purpose}` : ''} and did not complete it` +
-            (Number(b.attempts) > 1 ? ` (${b.attempts} attempts)` : ''),
-          b.attempted_at ?? null,
-        ]
-      );
-    }
-
-    res.status(created ? 201 : 200).json({ lead, created });
-  } catch (err) {
-    const status = (err as { status?: number }).status ?? 500;
-    if (status === 400) return res.status(400).json({ error: (err as Error).message });
-    console.error('crm.adoptAbandoned error:', err);
-    res.status(500).json({ error: 'Could not add that person as a lead' });
-  }
-});
 
 export default router;
 export { reconcileConversions, normalizePhone as normalizeLeadPhone, isDialable };

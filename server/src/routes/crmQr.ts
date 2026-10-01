@@ -1088,7 +1088,22 @@ webhookRouter.post('/webhook', async (req, res) => {
  * twice: the sites reject a duplicate reference number, so a second attempt
  * cannot raise a second receipt for the same money.
  */
-router.post('/qr/payments/:id/issue-receipt', authenticate, authorize('admin', 'accountant'), async (req, res) => {
+router.post('/qr/payments/:id/issue-receipt', authenticate, async (req, res) => {
+  // A caller may raise or re-raise the receipt for money that came through
+  // their own QR, or a share they made. That is the point of the button: the
+  // donor is often still on the phone saying it has not arrived. Anyone else's
+  // payment is refused, and an admin or accountant may do any of them.
+  if (req.user?.role === 'caller') {
+    const ok = await pool.query(
+      `SELECT 1 FROM qr_payments p
+         LEFT JOIN qr_shares s ON p.share_id = s.id
+         LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
+        WHERE p.id = $1 AND (s.shared_by = $2::uuid OR q.owner_id = $2::uuid)`,
+      [req.params.id, req.user?.userId ?? null]
+    );
+    if (!ok.rows.length) return res.status(404).json({ error: 'No such payment' });
+  }
+
   try {
     await pool.query(`UPDATE qr_payments SET receipt_status = NULL WHERE id = $1`, [req.params.id]);
     await issueReceiptForPayment(String(req.params.id));

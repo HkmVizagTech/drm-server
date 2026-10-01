@@ -44,6 +44,7 @@ const sortOptions = [
 export default function PeoplePage() {
   const [data, setData] = useState<PeopleResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("");
@@ -81,8 +82,15 @@ export default function PeoplePage() {
     if (groupFilter) params.set("group", groupFilter);
     apiClient
       .get<PeopleResponse>(`/api/people?${params}`)
-      .then(setData)
-      .catch(console.error)
+      .then((d) => {
+        setData(d);
+        setLoadError(null);
+      })
+      // An empty table is what a failed request used to look like. The screen
+      // said "no records" when the truth was "the server refused", or "the
+      // server broke" - indistinguishable to anybody without DevTools open,
+      // and the reason a permissions bug can sit unnoticed for weeks.
+      .catch((e) => setLoadError(e instanceof Error ? e.message : "Could not load this list"))
       .finally(() => setLoading(false));
   }, [page, sort, debouncedSearch, roleFilter, siteFilter, groupFilter]);
 
@@ -153,6 +161,12 @@ export default function PeoplePage() {
           </>
         }
       />
+
+      {loadError && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+          {loadError}
+        </div>
+      )}
 
       {importMessage && (
         <div className="mb-4 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-900">

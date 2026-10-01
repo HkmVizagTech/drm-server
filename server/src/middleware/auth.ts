@@ -106,13 +106,40 @@ export function denyRole(...roles: UserRole[]) {
   ];
 }
 
+/**
+ * Actions that are POSTs but change nothing about the record.
+ *
+ * Read-only has to mean "cannot change the donor's data", not "cannot press
+ * any button". Resending a receipt sends the donor a copy of a document that
+ * already exists - it writes nothing, issues no number, and is exactly what a
+ * caller is for when somebody says on the phone that it never arrived. Before
+ * this, the method alone decided, so the one thing a caller most needed to do
+ * during a call answered 403.
+ *
+ * Kept as an explicit, short list rather than a flag on the route, so adding
+ * to it is a deliberate act somebody has to justify here.
+ */
+const HARMLESS_WRITES: { method: string; path: RegExp }[] = [
+  // POST /api/donations/:id/resend-receipt
+  { method: 'POST', path: /^\/[^/]+\/resend-receipt\/?$/ },
+];
+
 export function readOnlyFor(...roles: UserRole[]) {
   // authenticate first — see the note in denyRole. Without it this guard reads
   // an empty req.user and waves every write through.
   return [
     authenticate,
     (req: Request, res: Response, next: NextFunction) => {
-      if (req.user && roles.includes(req.user.role) && req.method !== 'GET' && req.method !== 'HEAD') {
+      const harmless = HARMLESS_WRITES.some(
+        (w) => w.method === req.method && w.path.test(req.path)
+      );
+      if (
+        req.user &&
+        roles.includes(req.user.role) &&
+        req.method !== 'GET' &&
+        req.method !== 'HEAD' &&
+        !harmless
+      ) {
         return res.status(403).json({
           error: 'Your account can look at donor records but not change them.',
         });
