@@ -1,9 +1,26 @@
 @import "tailwindcss";
 
 /* ---------------------------------------------------------------------------
-   Theme tokens.
+   DRM's design tokens.
 
-   The four surface colours are the ones chosen for this project:
+   WHY THIS FILE GREW
+
+   The palette below was right and barely reachable. Four tokens were mapped
+   into Tailwind's theme and ten were not, so every screen wrote
+   `bg-[var(--surface)]` and `border-[var(--line-soft)]` by hand - and when a
+   value is that awkward to use, people stop using it. That is how one codebase
+   ended up with fourteen different button class strings, seven corner radii,
+   four modal backdrops and three table-header treatments: not through
+   carelessness, but because the shared thing was harder to type than a
+   one-off.
+
+   So everything is mapped now. `bg-surface`, `border-line`, `text-ink-muted`,
+   `rounded-card`, `shadow-raised` are all real utilities, and the arbitrary
+   value syntax is no longer the path of least resistance.
+
+   THE PALETTE
+
+   Four surface colours were chosen for this project:
      #F0FFDF  pale green   - sidebar
      #EBF4F6  pale blue    - page plane behind cards
      #A8DF8E  light green  - active/selected fills
@@ -11,9 +28,14 @@
 
    None of those four can carry text or a button: measured against white they
    land between 1.05:1 and 1.99:1, far below the 4.5:1 needed for text and the
-   3:1 needed for UI. They are surfaces. So the accent is a deeper green from
-   the same family (#2b6e2f, 6.2:1 on white) used for buttons, links and active
-   state, with #A8DF8E as the soft fill behind dark green text (5.9:1).
+   3:1 needed for UI. They are surfaces. The accent is a deeper green from the
+   same family (#2b6e2f, 6.2:1 on white) for buttons, links and active state,
+   with #A8DF8E as the soft fill behind dark green text (5.9:1).
+
+   The full 50-900 ramp below is built around those two so that hover, pressed,
+   focused and disabled states are steps on one scale rather than opacity
+   tricks. An interface where every state is `hover:opacity-90` reads as flat,
+   which was the complaint this work started from.
 
    This admin is deliberately light-only - staff use it beside printed receipt
    books and the live site, and an automatic dark flip would invert tables and
@@ -21,33 +43,172 @@
 --------------------------------------------------------------------------- */
 
 :root {
-  --page: #ebf4f6;
-  --sidebar: #f0ffdf;
+  /* ---- brand ramp ------------------------------------------------------ */
+  --brand-50: #f2faec;
+  --brand-100: #e0f4d2;
+  --brand-200: #c6e9ad;
+  --brand-300: #a8df8e;
+  --brand-400: #7fc765;
+  --brand-500: #52a344;
+  --brand-600: #2b6e2f;
+  --brand-700: #256029;
+  --brand-800: #1e5128;
+  --brand-900: #163b1d;
+
+  /* ---- surfaces -------------------------------------------------------- */
+  --page: #eef5f7;
+  --sidebar: #f3fbe6;
   --surface: #ffffff;
+  /* One step back from --surface, for table headers, toolbars and the inside
+     of a well. Having a named second surface is what stops six files each
+     inventing their own bg-slate-50/80. */
+  --surface-sunken: #f6f9fa;
+  --surface-raised: #ffffff;
 
+  /* ---- lines ----------------------------------------------------------- */
   --line: #acbac4;
-  --line-soft: rgba(172, 186, 196, 0.45);
-  --line-strong: rgba(172, 186, 196, 0.8);
+  --line-soft: rgba(140, 160, 173, 0.32);
+  --line-strong: rgba(118, 139, 153, 0.62);
 
-  --accent: #2b6e2f;
-  --accent-hover: #256029;
-  --accent-soft: #a8df8e;
-  --accent-ink: #1e5128;
+  /* ---- accent aliases, kept so existing markup does not break ----------- */
+  --accent: var(--brand-600);
+  --accent-hover: var(--brand-700);
+  --accent-soft: var(--brand-300);
+  --accent-ink: var(--brand-800);
   --accent-wash: rgba(168, 223, 142, 0.28);
 
-  --ink: #0f172a;
-  --ink-soft: #475569;
-  --ink-muted: #64748b;
+  /* ---- ink ------------------------------------------------------------- */
+  --ink: #0f1f2b;
+  --ink-soft: #40566a;
+  --ink-muted: #647a8c;
+  --ink-faint: #90a4b3;
+
+  /* ---- status ---------------------------------------------------------- */
+  --good: #15803d;
+  --good-wash: #ecfdf3;
+  --warn: #b45309;
+  --warn-wash: #fffaeb;
+  --danger: #b42318;
+  --danger-wash: #fef3f2;
+  --info: #0369a1;
+  --info-wash: #eff8ff;
 
   --background: var(--page);
   --foreground: var(--ink);
+
+  /* ---- elevation -------------------------------------------------------
+     Two-layer shadows: a tight contact shadow that anchors the element to the
+     plane, and a wider soft one that gives it height. A single blurred shadow
+     reads as a grey smudge, which is what `shadow-sm` on a card against a
+     tinted page looked like - technically present, visually absent. Tinted
+     toward the page's blue-grey rather than pure black so it sits in the
+     palette instead of dirtying it. */
+  --elev-flat: 0 1px 2px rgba(15, 31, 43, 0.05);
+  --elev-card: 0 1px 2px rgba(15, 31, 43, 0.06), 0 1px 3px rgba(15, 31, 43, 0.05);
+  --elev-raised: 0 1px 2px rgba(15, 31, 43, 0.07), 0 4px 12px -2px rgba(15, 31, 43, 0.09);
+  --elev-float: 0 2px 4px rgba(15, 31, 43, 0.06), 0 12px 28px -6px rgba(15, 31, 43, 0.16);
+  --elev-dialog: 0 8px 16px rgba(15, 31, 43, 0.1), 0 24px 56px -12px rgba(15, 31, 43, 0.26);
+  /* A button needs to look pressable, which means a light top edge and a
+     定 contact shadow, not a flat rectangle of colour. */
+  --elev-button: 0 1px 2px rgba(15, 31, 43, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  --elev-focus: 0 0 0 3px rgba(43, 110, 47, 0.22);
 }
 
 @theme inline {
+  /* Colours ------------------------------------------------------------- */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+
+  --color-brand-50: var(--brand-50);
+  --color-brand-100: var(--brand-100);
+  --color-brand-200: var(--brand-200);
+  --color-brand-300: var(--brand-300);
+  --color-brand-400: var(--brand-400);
+  --color-brand-500: var(--brand-500);
+  --color-brand-600: var(--brand-600);
+  --color-brand-700: var(--brand-700);
+  --color-brand-800: var(--brand-800);
+  --color-brand-900: var(--brand-900);
+
   --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-wash: var(--accent-wash);
+
+  --color-page: var(--page);
+  --color-sidebar: var(--sidebar);
   --color-surface: var(--surface);
+  --color-sunken: var(--surface-sunken);
+
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-line-strong: var(--line-strong);
+
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+
+  --color-good: var(--good);
+  --color-good-wash: var(--good-wash);
+  --color-warn: var(--warn);
+  --color-warn-wash: var(--warn-wash);
+  --color-danger: var(--danger);
+  --color-danger-wash: var(--danger-wash);
+  --color-info: var(--info);
+  --color-info-wash: var(--info-wash);
+
+  /* Type -----------------------------------------------------------------
+     THE FONTS WERE DOWNLOADED AND NEVER USED.
+
+     layout.tsx has loaded Geist and Geist Mono through next/font since the
+     beginning, putting --font-geist-sans and --font-geist-mono on <html>. But
+     nothing mapped them into the theme, and the body rule below set
+     `font-family: system-ui` unconditionally - so every page paid for two
+     webfonts and then rendered in Segoe UI. Mapping them here is four lines
+     and changes the character of the whole product more than any component
+     work does. */
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  /* A real scale, so a heading is a decision rather than whichever text-* a
+     page happened to reach for. The line heights are set per step because an
+     8-line paragraph and a page title want very different ones. */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg: 1.0625rem;
+  --text-lg--line-height: 1.625rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 2rem;
+  --text-3xl: 1.875rem;
+  --text-3xl--line-height: 2.25rem;
+
+  /* Radii ---------------------------------------------------------------
+     Named by role rather than size. `rounded-card` says what it is for, so
+     two cards cannot end up on different radii because one author typed
+     rounded-xl and the other rounded-2xl. */
+  --radius-control: 0.5rem;
+  --radius-card: 0.75rem;
+  --radius-panel: 1rem;
+  --radius-pill: 9999px;
+
+  /* Elevation ----------------------------------------------------------- */
+  --shadow-flat: var(--elev-flat);
+  --shadow-card: var(--elev-card);
+  --shadow-raised: var(--elev-raised);
+  --shadow-float: var(--elev-float);
+  --shadow-dialog: var(--elev-dialog);
+  --shadow-button: var(--elev-button);
+  --shadow-focus: var(--elev-focus);
 }
 
 html {
@@ -57,21 +218,70 @@ html {
 body {
   background: var(--page);
   color: var(--ink);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Geist has real small-caps-ish figures; keeping them lining and tabular by
+     default means money columns align everywhere without each table opting in
+     and half of them forgetting. */
+  font-variant-numeric: tabular-nums lining-nums;
+  text-rendering: optimizeLegibility;
 }
 
-/* Money and counts sit in columns that must line up vertically; proportional
-   figures make those columns look ragged. */
+/* Headings carry the weight that makes a page scannable. Set here rather than
+   per-page because six pages had `text-2xl font-bold text-gray-900` and the
+   other twenty had `text-2xl font-semibold tracking-tight text-slate-900`. */
+h1, h2, h3, h4 {
+  letter-spacing: -0.014em;
+  color: var(--ink);
+}
+
+/* Prose and long remarks read better with proportional figures; tables and
+   money do not. This class is the opt-out. */
+.proportional-nums {
+  font-variant-numeric: proportional-nums;
+}
+
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
 
 /* Focus ring in the accent, so keyboard navigation is obvious without the
-   browser default blue fighting the palette. */
-:where(a, button, input, select, textarea):focus-visible {
+   browser default blue fighting the palette. A ring as well as an outline:
+   the outline survives on elements with their own background, and the ring
+   gives it the soft halo that makes it visible against the green fills. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+  border-radius: var(--radius-control);
+}
+
+/* Disabled controls should read as unavailable at a glance, not as a slightly
+   paler version of available. */
+:where(button, input, select, textarea):disabled {
+  cursor: not-allowed;
+}
+
+::selection {
+  background: var(--brand-200);
+  color: var(--brand-900);
+}
+
+/* Date and time inputs show a native picker icon that is invisible against a
+   white field until hovered. Tinting it to the accent makes the control
+   look like something you can open, which is most of the complaint about
+   filters being hard to find. */
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+input[type="time"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 120ms ease;
+}
+input[type="date"]:hover::-webkit-calendar-picker-indicator,
+input[type="datetime-local"]:hover::-webkit-calendar-picker-indicator,
+input[type="time"]:hover::-webkit-calendar-picker-indicator {
+  opacity: 1;
 }
 
 /* ---------------------------------------------------------------------------
@@ -151,24 +361,72 @@ aside::-webkit-scrollbar-thumb {
   border-width: 2px;
 }
 
-/* Rows animate open in the donations table; keep it quick so a list of
-   expandable rows never feels sluggish. */
+/* ---------------------------------------------------------------------------
+   Motion.
+
+   Short, and only where it tells you something: a row opening, a panel
+   arriving, a skeleton breathing. Every one of these is disabled under
+   prefers-reduced-motion at the bottom of the file, in one place, so a new
+   animation cannot forget to honour it.
+--------------------------------------------------------------------------- */
+
 @keyframes rowExpand {
-  from {
-    opacity: 0;
-    transform: translateY(-2px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: none; }
 }
-.row-expand {
-  animation: rowExpand 120ms ease-out;
+.row-expand { animation: rowExpand 120ms ease-out; }
+
+@keyframes fadeRise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.fade-rise { animation: fadeRise 160ms cubic-bezier(0.22, 1, 0.36, 1); }
+
+@keyframes dialogIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+.dialog-in { animation: dialogIn 160ms cubic-bezier(0.22, 1, 0.36, 1); }
+
+@keyframes backdropIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.backdrop-in { animation: backdropIn 140ms ease-out; }
+
+/* A skeleton that pulses opacity reads as broken; one with a highlight
+   travelling across it reads as loading. */
+@keyframes shimmer {
+  from { background-position: -200% 0; }
+  to { background-position: 200% 0; }
+}
+.shimmer {
+  background-image: linear-gradient(
+    90deg,
+    rgba(140, 160, 173, 0.12) 25%,
+    rgba(140, 160, 173, 0.22) 37%,
+    rgba(140, 160, 173, 0.12) 63%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
 }
 
+@keyframes spin360 {
+  to { transform: rotate(360deg); }
+}
+.spin { animation: spin360 640ms linear infinite; }
+
 @media (prefers-reduced-motion: reduce) {
-  .row-expand {
+  .row-expand,
+  .fade-rise,
+  .dialog-in,
+  .backdrop-in,
+  .shimmer,
+  .spin {
     animation: none;
+  }
+  .shimmer {
+    background-image: none;
+    background-color: rgba(140, 160, 173, 0.16);
   }
 }

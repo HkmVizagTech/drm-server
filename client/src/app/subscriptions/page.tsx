@@ -1,9 +1,28 @@
 "use client";
 
-import { useEffect, useState, FormEvent } from "react";
+import { useCallback, useEffect, useState, FormEvent } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
-import { Select } from "@/components/ui";
+import { ExportButton } from "@/components/export-button";
+import { number, shortDate } from "@/lib/format";
+import {
+  Alert,
+  Button,
+  EmptyState,
+  Field,
+  Input,
+  Modal,
+  MoneyCell,
+  PageHeader,
+  Select,
+  StatusBadge,
+  TableShell,
+  Tabs,
+  Tbody,
+  Td,
+  Th,
+  Thead,
+} from "@/components/ui";
 
 interface Subscription {
   id: string;
@@ -18,11 +37,12 @@ interface Subscription {
   created_at: string;
 }
 
-const inr = (n: number) => `₹${Number(n).toLocaleString("en-IN")}`;
-const statusTone = (status: string) =>
-  status === "active" ? "bg-green-50 text-green-700" : status === "paused" ? "bg-amber-50 text-amber-700" : "bg-red-50 text-red-700";
-
 const statusTabs = ["active", "paused", "cancelled", "all"] as const;
+
+const TABS = statusTabs.map((s) => ({
+  key: s,
+  label: s === "all" ? "All" : s[0].toUpperCase() + s.slice(1),
+}));
 
 export default function SubscriptionsPage() {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
@@ -30,83 +50,105 @@ export default function SubscriptionsPage() {
   const [tab, setTab] = useState<(typeof statusTabs)[number]>("active");
   const [showModal, setShowModal] = useState(false);
 
-  const fetchData = () => {
+  // The one place the tab becomes query params, so the list request and the
+  // download are built from the same value. Rebuilding them separately is how
+  // somebody filters to "paused", downloads, and acts on a file that quietly
+  // contains every cancelled donor as well.
+  const filterParams = useCallback(() => {
     const params = new URLSearchParams();
     if (tab !== "all") params.set("status", tab);
+    return params;
+  }, [tab]);
+
+  const fetchData = useCallback(() => {
     apiClient
-      .get<{ subscriptions: Subscription[]; total: number }>(`/api/subscriptions?${params}`)
+      .get<{ subscriptions: Subscription[]; total: number }>(`/api/subscriptions?${filterParams()}`)
       .then((res) => {
         setSubscriptions(res.subscriptions);
         setTotal(res.total);
       })
       .catch(console.error);
-  };
+  }, [filterParams]);
 
-  useEffect(fetchData, [tab]);
+  useEffect(fetchData, [fetchData]);
 
   return (
     <div>
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Recurring Donations</h1>
-        <button
-          onClick={() => setShowModal(true)}
-          className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-lg text-sm font-medium"
-        >
-          + New Subscription
-        </button>
-      </div>
+      <PageHeader
+        eyebrow="Donors"
+        title="Recurring donations"
+        subtitle="Standing donations and when each one is next due."
+        actions={
+          <>
+            <ExportButton
+              path="/api/subscriptions/export"
+              params={filterParams()}
+              filename="recurring-donations"
+            />
+            <Button icon="plus" onClick={() => setShowModal(true)}>
+              New subscription
+            </Button>
+          </>
+        }
+      />
 
-      <div className="flex gap-2 mb-6">
-        {statusTabs.map((s) => (
-          <button
-            key={s}
-            onClick={() => setTab(s)}
-            className={`px-3 py-1.5 rounded-full text-sm capitalize transition-colors ${
-              tab === s ? "bg-[var(--accent)] text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-            }`}
-          >
-            {s}
-          </button>
-        ))}
-      </div>
+      <Tabs
+        variant="pill"
+        items={TABS}
+        value={tab}
+        onChange={(key) => setTab(key as (typeof statusTabs)[number])}
+        className="mb-4"
+      />
 
-      <div className="bg-white rounded-xl shadow overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 text-left text-gray-600">
+      <TableShell>
+        <Thead>
+          <Th>Donor</Th>
+          <Th align="right">Amount</Th>
+          <Th>Frequency</Th>
+          <Th>Purpose</Th>
+          <Th>Next charge</Th>
+          <Th>Status</Th>
+        </Thead>
+        {subscriptions.length === 0 ? (
+          <tbody>
             <tr>
-              <th className="px-6 py-3 font-medium">Donor</th>
-              <th className="px-6 py-3 font-medium">Amount</th>
-              <th className="px-6 py-3 font-medium">Frequency</th>
-              <th className="px-6 py-3 font-medium">Purpose</th>
-              <th className="px-6 py-3 font-medium">Next charge</th>
-              <th className="px-6 py-3 font-medium">Status</th>
+              <td colSpan={6}>
+                <EmptyState
+                  icon="refresh"
+                  title="No recurring donations here"
+                  message="Nothing matches this status. Try another tab, or set one up with the button above."
+                />
+              </td>
             </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
+          </tbody>
+        ) : (
+          <Tbody>
             {subscriptions.map((s) => (
-              <tr key={s.id} className="hover:bg-gray-50">
-                <td className="px-6 py-3 font-medium text-gray-900">
-                  <Link href={`/people/${s.person_id}`} className="hover:underline">
+              <tr key={s.id}>
+                <Td>
+                  <Link
+                    href={`/people/${s.person_id}`}
+                    className="font-medium text-ink hover:text-brand-700 hover:underline"
+                  >
                     {s.donor_name || "—"}
                   </Link>
-                  <p className="text-xs text-gray-400">{s.donor_phone}</p>
-                </td>
-                <td className="px-6 py-3 font-semibold">{inr(s.amount)}</td>
-                <td className="px-6 py-3 capitalize">{s.frequency}</td>
-                <td className="px-6 py-3 capitalize">{s.purpose.replace("_", " ")}</td>
-                <td className="px-6 py-3 text-gray-500">
-                  {s.next_charge_date ? new Date(s.next_charge_date).toLocaleDateString() : "—"}
-                </td>
-                <td className="px-6 py-3">
-                  <span className={`px-2 py-0.5 rounded-full text-xs capitalize ${statusTone(s.status)}`}>{s.status}</span>
-                </td>
+                  <p className="text-xs text-ink-faint">{s.donor_phone}</p>
+                </Td>
+                <Td align="right">
+                  <MoneyCell value={s.amount} />
+                </Td>
+                <Td className="capitalize">{s.frequency}</Td>
+                <Td className="capitalize">{s.purpose.replace("_", " ")}</Td>
+                <Td className="text-ink-muted">{shortDate(s.next_charge_date)}</Td>
+                <Td>
+                  <StatusBadge status={s.status} />
+                </Td>
               </tr>
             ))}
-          </tbody>
-        </table>
-        {subscriptions.length === 0 && <div className="p-8 text-center text-gray-500">No subscriptions found</div>}
-      </div>
-      <p className="mt-4 text-sm text-gray-500">{total} total records</p>
+          </Tbody>
+        )}
+      </TableShell>
+      <p className="mt-4 text-sm text-ink-muted">{number(total)} total records</p>
 
       {showModal && <NewSubscriptionModal onClose={() => setShowModal(false)} onAdded={fetchData} />}
     </div>
@@ -152,55 +194,84 @@ function NewSubscriptionModal({ onClose, onAdded }: { onClose: () => void; onAdd
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <form onSubmit={handleSubmit} className="bg-white rounded-2xl p-8 w-full max-w-md space-y-4">
-        <h2 className="text-xl font-bold">New Recurring Donation</h2>
-        {error && <div className="bg-red-50 text-red-600 text-sm p-3 rounded-lg">{error}</div>}
-        <input
-          value={form.name}
-          onChange={(e) => setForm({ ...form, name: e.target.value })}
-          placeholder="Donor name *"
-          required
-          className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
-        />
-        <input
-          value={form.phone}
-          onChange={(e) => setForm({ ...form, phone: e.target.value })}
-          placeholder="Phone number *"
-          required
-          className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none"
-        />
-        <input
-          type="number"
-          step="0.01"
-          value={form.amount}
-          onChange={(e) => setForm({ ...form, amount: e.target.value })}
-          placeholder="Amount per cycle (₹) *"
-          required
-          className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none"
-        />
-        <div className="grid grid-cols-2 gap-3">
-          <Select value={form.frequency} onChange={(v) => setForm({ ...form, frequency: v })} className="w-full">
-            <option value="monthly">Monthly</option>
-            <option value="quarterly">Quarterly</option>
-            <option value="yearly">Yearly</option>
-          </Select>
-          <Select value={form.purpose} onChange={(v) => setForm({ ...form, purpose: v })} className="w-full">
-            <option value="annadan">Annadan</option>
-            <option value="temple_maintenance">Temple maintenance</option>
-            <option value="festival">Festival</option>
-            <option value="general">General</option>
-          </Select>
-        </div>
-        <div className="flex gap-3 pt-2">
-          <button type="button" onClick={onClose} className="flex-1 px-4 py-2.5 border border-slate-300 rounded-lg hover:bg-gray-50">
+    <Modal
+      title="New recurring donation"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
             Cancel
-          </button>
-          <button type="submit" disabled={loading} className="flex-1 px-4 py-2.5 bg-[var(--accent)] text-white rounded-lg hover:bg-[var(--accent-hover)] disabled:opacity-50">
-            {loading ? "Saving..." : "Create Subscription"}
-          </button>
+          </Button>
+          {/* The submit button lives in the dialog's footer rather than in the
+              form, so it stays put on a small screen where the fields scroll.
+              `form` is what still ties it to the form's submit handler, and
+              with it Enter in any field does the same thing the button does. */}
+          <Button type="submit" form="new-subscription" loading={loading}>
+            Create subscription
+          </Button>
+        </>
+      }
+    >
+      <form id="new-subscription" onSubmit={handleSubmit} className="space-y-4">
+        {error && <Alert tone="danger">{error}</Alert>}
+
+        <Field label="Donor name" htmlFor="sub-name" required>
+          <Input
+            id="sub-name"
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            required
+            placeholder="As it should read on the receipt"
+          />
+        </Field>
+
+        <Field label="Phone number" htmlFor="sub-phone" required>
+          <Input
+            id="sub-phone"
+            value={form.phone}
+            onChange={(e) => setForm({ ...form, phone: e.target.value })}
+            required
+            placeholder="10 digits"
+          />
+        </Field>
+
+        <Field label="Amount per cycle (₹)" htmlFor="sub-amount" required>
+          <Input
+            id="sub-amount"
+            type="number"
+            step="0.01"
+            value={form.amount}
+            onChange={(e) => setForm({ ...form, amount: e.target.value })}
+            required
+          />
+        </Field>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Frequency">
+            <Select
+              value={form.frequency}
+              onChange={(v) => setForm({ ...form, frequency: v })}
+              ariaLabel="Frequency"
+            >
+              <option value="monthly">Monthly</option>
+              <option value="quarterly">Quarterly</option>
+              <option value="yearly">Yearly</option>
+            </Select>
+          </Field>
+          <Field label="Purpose">
+            <Select
+              value={form.purpose}
+              onChange={(v) => setForm({ ...form, purpose: v })}
+              ariaLabel="Purpose"
+            >
+              <option value="annadan">Annadan</option>
+              <option value="temple_maintenance">Temple maintenance</option>
+              <option value="festival">Festival</option>
+              <option value="general">General</option>
+            </Select>
+          </Field>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }

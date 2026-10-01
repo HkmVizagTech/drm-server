@@ -13,8 +13,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiClient } from "@/lib/api";
-import { currency, number, relativeDate, shortDate } from "@/lib/format";
+import { currency, number, relativeDate, shortDate, titleCase } from "@/lib/format";
 import { siteLabel } from "@/components/source";
+import { ExportButton } from "@/components/export-button";
 import {
   downloadFromApi,
   downloadSample,
@@ -23,7 +24,31 @@ import {
   SPREADSHEET_ACCEPT,
   type ParsedSheet,
 } from "@/lib/spreadsheet";
-import { Badge, buttonPrimary, buttonSecondary, Card, EmptyState, inputClass, PageHeader, Pagination, Select, StatusBadge, TableShell, Td, Th } from "@/components/ui";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Checkbox,
+  EmptyState,
+  Field,
+  Icon,
+  Input,
+  Modal,
+  PageHeader,
+  Pagination,
+  SearchInput,
+  Select,
+  SkeletonRows,
+  StatusBadge,
+  TableShell,
+  Tabs,
+  Tbody,
+  Td,
+  Th,
+  Thead,
+  Toolbar,
+} from "@/components/ui";
 
 interface Delivery {
   id: string;
@@ -114,27 +139,22 @@ function downloadSampleCsv() {
 // wizard and decides the sample was no help.
 function SampleButtons({ onError }: { onError?: (m: string) => void }) {
   return (
-    <span className="inline-flex overflow-hidden rounded-lg border border-[var(--line)]">
-      <button
-        type="button"
-        onClick={downloadSampleCsv}
-        className="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
-      >
+    <>
+      <Button variant="secondary" icon="fileText" onClick={downloadSampleCsv}>
         Sample file (CSV)
-      </button>
-      <span className="w-px bg-[var(--line)]" aria-hidden />
-      <button
-        type="button"
+      </Button>
+      <Button
+        variant="secondary"
+        icon="sheet"
         onClick={() =>
           downloadFromApi("/api/prasadam/import/sample.xlsx", "prasadam-upload-sample.xlsx").catch((e) =>
             onError?.(e instanceof Error ? e.message : "Could not download the sample")
           )
         }
-        className="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
       >
         Excel
-      </button>
-    </span>
+      </Button>
+    </>
   );
 }
 
@@ -278,23 +298,10 @@ export default function PrasadamPage() {
     }
   };
 
-  const download = async () => {
-    try {
-      const blob = await apiClient.getBlob(`/api/prasadam/export.csv?${filterParams()}`);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `prasadam-${tab}-${new Date().toISOString().slice(0, 10)}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setNotice({ tone: "bad", text: (e as Error).message });
-    }
-  };
-
   return (
     <div>
       <PageHeader
+        eyebrow="Fulfilment"
         title="Prasadam deliveries"
         subtitle={
           data
@@ -302,65 +309,56 @@ export default function PrasadamPage() {
             : undefined
         }
         actions={
-          <div className="flex flex-wrap gap-2">
+          <>
             {/* The sample sits out here as well as inside the upload dialog:
                 someone preparing a file for the courier needs the format
                 BEFORE they have anything to upload, so hiding it behind the
                 upload button is exactly the wrong way round. */}
             <SampleButtons onError={(text) => setNotice({ tone: "bad", text })} />
-            <button onClick={download} className={buttonSecondary}>
-              Download list
-            </button>
-            <button onClick={() => setImportOpen(true)} className={buttonPrimary}>
+            {/* The same filterParams() the list request used, so the file is
+                the whole filtered set and not the page on screen. */}
+            <ExportButton
+              path="/api/prasadam/export"
+              params={filterParams()}
+              filename={`prasadam-${tab}`}
+            />
+            <Button icon="upload" onClick={() => setImportOpen(true)}>
               Upload courier file
-            </button>
-          </div>
+            </Button>
+          </>
         }
       />
 
       {notice && (
-        <div
-          className={
-            "mb-4 rounded-lg px-4 py-2.5 text-sm flex items-start justify-between gap-4 " +
-            (notice.tone === "good"
-              ? "bg-[var(--accent-soft)]/30 text-[var(--accent-ink)]"
-              : "bg-red-50 text-red-800")
-          }
-        >
-          <span>{notice.text}</span>
-          <button onClick={() => setNotice(null)} aria-label="Dismiss" className="leading-none">
-            ×
-          </button>
-        </div>
+        <Alert tone={notice.tone === "good" ? "good" : "danger"} onDismiss={() => setNotice(null)}>
+          {notice.text}
+        </Alert>
       )}
 
-      <Card className="mb-4">
-        <div className="flex flex-wrap gap-2 mb-3">
-          {STATUS_TABS.map((s) => (
-            <button
-              key={s}
-              onClick={() => setTab(s)}
-              className={
-                "px-3 py-1.5 rounded-full text-xs capitalize transition-colors " +
-                (tab === s
-                  ? "bg-[var(--accent)] text-white"
-                  : "bg-slate-100 text-slate-600 hover:bg-slate-200")
-              }
-            >
-              {s}
-              {data?.byStatus[s] !== undefined && s !== "all" ? ` (${number(data.byStatus[s])})` : ""}
-            </button>
-          ))}
-        </div>
+      <div className="mb-4">
+        <Tabs
+          variant="pill"
+          value={tab}
+          onChange={(k) => setTab(k as Tab)}
+          items={STATUS_TABS.map((s) => ({
+            key: s,
+            label: titleCase(s),
+            count: s !== "all" ? data?.byStatus[s] : undefined,
+          }))}
+        />
+      </div>
 
-        <div className="flex flex-wrap gap-2">
-          <input
+      <Toolbar>
+        <Field label="Search" htmlFor="prasadam-search" className="flex-1 min-w-[16rem]">
+          <SearchInput
+            id="prasadam-search"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={setSearch}
             placeholder="Donor name, phone or tracking number"
-            className={`${inputClass} flex-1 min-w-[16rem]`}
           />
-          <Select value={site} onChange={(v) => setSite(v)} className="flex-1 min-w-[9rem]">
+        </Field>
+        <Field label="Site" className="flex-1 min-w-[9rem]">
+          <Select value={site} onChange={(v) => setSite(v)} ariaLabel="Site">
             <option value="">All sites</option>
             {options.sites.map((s) => (
               <option key={s.site} value={s.site}>
@@ -368,17 +366,21 @@ export default function PrasadamPage() {
               </option>
             ))}
           </Select>
-          <Select value={group} onChange={(v) => setGroup(v)} className="flex-1 min-w-[9rem]">
+        </Field>
+        <Field label="Page" className="flex-1 min-w-[9rem]">
+          <Select value={group} onChange={(v) => setGroup(v)} ariaLabel="Page group">
             {PAGE_GROUPS.map((g) => (
               <option key={g.key} value={g.key}>
                 {g.label}
               </option>
             ))}
           </Select>
+        </Field>
+        <Field label="Include seva" className="flex-1 min-w-[9rem]">
           <Select
             value={includePurpose}
             onChange={(v) => setIncludePurpose(v)}
-            className="flex-1 min-w-[9rem]"
+            ariaLabel="Include seva"
           >
             <option value="">Include any seva</option>
             {options.purposes.map((p) => (
@@ -387,10 +389,12 @@ export default function PrasadamPage() {
               </option>
             ))}
           </Select>
+        </Field>
+        <Field label="Exclude seva" className="flex-1 min-w-[9rem]">
           <Select
             value={excludePurpose}
             onChange={(v) => setExcludePurpose(v)}
-            className="flex-1 min-w-[9rem]"
+            ariaLabel="Exclude seva"
           >
             <option value="">Exclude nothing</option>
             {options.purposes.map((p) => (
@@ -399,66 +403,76 @@ export default function PrasadamPage() {
               </option>
             ))}
           </Select>
-          <input
+        </Field>
+        <Field label="Queued from" htmlFor="prasadam-from" className="w-40">
+          <Input
+            id="prasadam-from"
             type="date"
             value={fromDate}
             onChange={(e) => setFromDate(e.target.value)}
-            className={inputClass}
-            aria-label="Queued from"
           />
-          <input
+        </Field>
+        <Field label="Queued to" htmlFor="prasadam-to" className="w-40">
+          <Input
+            id="prasadam-to"
             type="date"
             value={toDate}
             onChange={(e) => setToDate(e.target.value)}
-            className={inputClass}
-            aria-label="Queued to"
           />
-        </div>
-      </Card>
+        </Field>
+      </Toolbar>
 
       {/* The bulk bar only exists while something is ticked, so it can never be
           clicked against an empty selection by accident. */}
       {selected.size > 0 && (
-        <Card className="mb-4 border-[var(--accent)]/40 bg-[var(--accent-soft)]/15">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium text-[var(--accent-ink)]">
+        <Card tone="brand" className="mb-4">
+          <div className="flex flex-wrap items-end gap-2.5">
+            <span className="mb-2 text-sm font-medium text-brand-800">
+              {/* Sits on the input baseline rather than the label row: every
+                  control beside it is a Field, which is a label stacked over a
+                  control, so bottom-aligning is what lines this up with them. */}
               {number(selected.size)} selected
             </span>
-            <input
-              value={courier}
-              onChange={(e) => setCourier(e.target.value)}
-              placeholder="Courier (optional)"
-              className={`${inputClass} w-40`}
-            />
-            <input
-              value={tracking}
-              onChange={(e) => setTracking(e.target.value)}
-              placeholder="Tracking no (optional)"
-              className={`${inputClass} w-44`}
-            />
-            <input
-              type="date"
-              value={deliveredOn}
-              onChange={(e) => setDeliveredOn(e.target.value)}
-              className={`${inputClass} w-40`}
-              aria-label="Delivered on"
-              title="Leave blank to use today"
-            />
-            <button disabled={working} onClick={() => applyBulk("shipped")} className={buttonSecondary}>
+            <Field label="Courier" htmlFor="bulk-courier" className="w-40">
+              <Input
+                id="bulk-courier"
+                value={courier}
+                onChange={(e) => setCourier(e.target.value)}
+                placeholder="Optional"
+              />
+            </Field>
+            <Field label="Tracking no" htmlFor="bulk-tracking" className="w-44">
+              <Input
+                id="bulk-tracking"
+                value={tracking}
+                onChange={(e) => setTracking(e.target.value)}
+                placeholder="Optional"
+              />
+            </Field>
+            <Field label="Delivered on" htmlFor="bulk-delivered" className="w-40">
+              <Input
+                id="bulk-delivered"
+                type="date"
+                value={deliveredOn}
+                onChange={(e) => setDeliveredOn(e.target.value)}
+                title="Leave blank to use today"
+              />
+            </Field>
+            <Button variant="secondary" disabled={working} onClick={() => applyBulk("shipped")}>
               Mark shipped
-            </button>
-            <button disabled={working} onClick={() => applyBulk("delivered")} className={buttonPrimary}>
+            </Button>
+            <Button disabled={working} onClick={() => applyBulk("delivered")}>
               Mark delivered
-            </button>
-            <button onClick={() => setSelected(new Set())} className="text-xs text-slate-500 hover:underline">
+            </Button>
+            <Button variant="ghost" icon="x" onClick={() => setSelected(new Set())}>
               Clear
-            </button>
+            </Button>
           </div>
           {[...selected].some((id) => {
             const d = deliveries.find((x) => x.id === id);
             return d && hasMultiple(d);
           }) && (
-            <p className="text-xs text-[var(--accent-ink)] mt-2">
+            <p className="mt-2 text-xs text-brand-800">
               Some of these donors have more than one open delivery. Check you have ticked the right
               donation — the row expands to show which donation it belongs to.
             </p>
@@ -467,38 +481,31 @@ export default function PrasadamPage() {
       )}
 
       <TableShell>
-        <thead className="bg-slate-50/80">
-          <tr>
-            <Th className="w-10">
-              <input
-                type="checkbox"
-                checked={allSelected}
-                onChange={() =>
-                  setSelected(allSelected ? new Set() : new Set(deliveries.map((d) => d.id)))
-                }
-                aria-label="Select all on this page"
-              />
-            </Th>
-            <Th>Donor</Th>
-            <Th>Donation</Th>
-            <Th>Address</Th>
-            <Th>Status</Th>
-            <Th align="right">Actions</Th>
-          </tr>
-        </thead>
+        <Thead>
+          <Th className="w-10">
+            <Checkbox
+              checked={allSelected}
+              indeterminate={selected.size > 0}
+              onChange={() =>
+                setSelected(allSelected ? new Set() : new Set(deliveries.map((d) => d.id)))
+              }
+              label={<span className="sr-only">Select all on this page</span>}
+            />
+          </Th>
+          <Th>Donor</Th>
+          <Th>Donation</Th>
+          <Th>Address</Th>
+          <Th>Status</Th>
+          <Th align="right">Actions</Th>
+        </Thead>
         {loading ? (
-          <tbody className="divide-y divide-slate-100">
-            <tr>
-              <td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-400">
-                Loading…
-              </td>
-            </tr>
-          </tbody>
+          <SkeletonRows rows={8} cols={6} />
         ) : deliveries.length === 0 ? (
           <tbody>
             <tr>
               <td colSpan={6}>
                 <EmptyState
+                  icon="box"
                   title="Nothing here"
                   message="No deliveries match these filters. Try a different status or widen the dates."
                 />
@@ -506,22 +513,21 @@ export default function PrasadamPage() {
             </tr>
           </tbody>
         ) : (
-          <tbody className="divide-y divide-slate-100">
+          <Tbody>
             {deliveries.map((d) => (
-              <tr key={d.id} className={selected.has(d.id) ? "bg-[var(--accent-soft)]/10" : undefined}>
+              <tr key={d.id} className={selected.has(d.id) ? "bg-brand-50/60" : undefined}>
                 <Td>
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={selected.has(d.id)}
                     onChange={() => toggle(d.id)}
-                    aria-label={`Select delivery for ${d.donor_name}`}
+                    label={<span className="sr-only">Select delivery for {d.donor_name}</span>}
                   />
                 </Td>
                 <Td>
-                  <span className="block font-medium text-slate-900">{d.donor_name}</span>
-                  <span className="block text-xs text-slate-500 tabular-nums">{d.donor_phone}</span>
+                  <span className="block font-medium text-ink">{d.donor_name}</span>
+                  <span className="block text-xs tabular-nums text-ink-muted">{d.donor_phone}</span>
                   {hasMultiple(d) && (
-                    <span className="inline-block mt-1">
+                    <span className="mt-1 inline-block">
                       <Badge tone="warn">several open</Badge>
                     </span>
                   )}
@@ -529,28 +535,28 @@ export default function PrasadamPage() {
                 <Td>
                   {d.donation_id ? (
                     <>
-                      <span className="block text-sm tabular-nums text-slate-900">
+                      <span className="block text-sm tabular-nums text-ink">
                         {currency(Number(d.donation_amount ?? 0))}
                       </span>
-                      <span className="block text-xs text-slate-500">
+                      <span className="block text-xs text-ink-muted">
                         {d.donation_purpose ?? "—"}
                         {d.donation_date ? ` · ${shortDate(d.donation_date)}` : ""}
                       </span>
-                      <span className="block text-[11px] text-slate-400 font-mono">
+                      <span className="block font-mono text-2xs text-ink-faint">
                         {siteLabel(d.source_site)}
                         {d.donation_page ? ` ${d.donation_page}` : ""}
                       </span>
                     </>
                   ) : (
-                    <span className="text-xs text-slate-400">No donation linked</span>
+                    <span className="text-xs text-ink-faint">No donation linked</span>
                   )}
                 </Td>
                 <Td>
-                  <span className="block text-xs text-slate-600 max-w-[18rem] truncate" title={d.address}>
+                  <span className="block max-w-[18rem] truncate text-xs text-ink-soft" title={d.address}>
                     {d.address}
                   </span>
                   {d.tracking_number && (
-                    <span className="block text-[11px] text-slate-400 font-mono">
+                    <span className="block font-mono text-2xs text-ink-faint">
                       {d.courier_name ? `${d.courier_name} ` : ""}
                       {d.tracking_number}
                     </span>
@@ -559,75 +565,85 @@ export default function PrasadamPage() {
                 <Td>
                   <StatusBadge status={d.status} />
                   {d.delivered_at && (
-                    <span className="block text-[11px] text-slate-400 mt-1">
+                    <span className="mt-1 block text-2xs text-ink-faint">
                       {relativeDate(d.delivered_at)}
                     </span>
                   )}
                   {d.marked_by_name && (
-                    <span className="block text-[11px] text-slate-400">
+                    <span className="block text-2xs text-ink-faint">
                       by {d.marked_by_name}
                       {d.marked_via ? ` (${d.marked_via})` : ""}
                     </span>
                   )}
                 </Td>
                 <Td align="right">
-                  <div className="flex gap-2 justify-end">
+                  <div className="flex justify-end gap-1.5">
                     {d.status !== "delivered" && (
-                      <button
+                      <Button
+                        size="xs"
+                        variant="secondary"
+                        icon="check"
                         disabled={working}
                         onClick={() => markOne(d, "delivered")}
-                        className="text-xs text-[var(--accent)] hover:underline"
                       >
                         Delivered
-                      </button>
+                      </Button>
                     )}
-                    <button
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      icon={expanded === d.id ? "chevronUp" : "eye"}
                       onClick={() => setExpanded(expanded === d.id ? null : d.id)}
-                      className="text-xs text-slate-500 hover:underline"
                     >
                       {expanded === d.id ? "Hide" : "View"}
-                    </button>
+                    </Button>
                   </div>
                   {expanded === d.id && (
-                    <div className="mt-2 text-left text-xs text-slate-600 bg-slate-50 rounded-lg p-3 space-y-1">
+                    <div className="mt-2 space-y-1 rounded-card bg-sunken p-3 text-left text-xs text-ink-soft">
                       <p>
-                        <span className="text-slate-400">Queued</span> {shortDate(d.created_at)}
+                        <span className="text-ink-faint">Queued</span> {shortDate(d.created_at)}
                       </p>
                       {d.dispatched_at && (
                         <p>
-                          <span className="text-slate-400">Dispatched</span> {shortDate(d.dispatched_at)}
+                          <span className="text-ink-faint">Dispatched</span> {shortDate(d.dispatched_at)}
                         </p>
                       )}
                       {d.donation_receipt && (
                         <p>
-                          <span className="text-slate-400">Receipt</span> {d.donation_receipt}
+                          <span className="text-ink-faint">Receipt</span> {d.donation_receipt}
                         </p>
                       )}
                       {d.notes && (
                         <p>
-                          <span className="text-slate-400">Notes</span> {d.notes}
+                          <span className="text-ink-faint">Notes</span> {d.notes}
                         </p>
                       )}
-                      <p className="text-slate-400">{d.address}</p>
+                      <p className="text-ink-faint">{d.address}</p>
                     </div>
                   )}
                 </Td>
               </tr>
             ))}
-          </tbody>
+          </Tbody>
+        )}
+
+        {data && (
+          <tfoot>
+            <tr>
+              <td colSpan={6} className="p-0">
+                <Pagination
+                  page={data.page}
+                  limit={data.limit}
+                  total={data.total}
+                  totalPages={data.totalPages}
+                  onPage={setPage}
+                  unit="deliveries"
+                />
+              </td>
+            </tr>
+          </tfoot>
         )}
       </TableShell>
-
-      {data && (
-        <Pagination
-          page={data.page}
-          limit={data.limit}
-          total={data.total}
-          totalPages={data.totalPages}
-          onPage={setPage}
-          unit="deliveries"
-        />
-      )}
 
       {importOpen && (
         <ImportDialog
@@ -771,280 +787,270 @@ function ImportDialog({
     : 0;
 
   return (
-    <div className="fixed inset-0 bg-slate-900/40 flex items-start justify-center p-4 overflow-y-auto z-50">
-      <Card className="w-full max-w-4xl my-8">
-        <div className="flex items-start justify-between gap-4 mb-4">
-          <div>
-            <h2 className="text-sm font-semibold text-slate-900">Upload courier file</h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Nothing is changed until you press Apply. Rows matching more than one open delivery
-              wait for you to choose.
-            </p>
-          </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600" aria-label="Close">
-            ×
-          </button>
-        </div>
+    <Modal
+      title="Upload courier file"
+      onClose={onClose}
+      wide
+      // The action for the step you are on, in the one place the eye goes back
+      // to. The dialog is long enough on a preview with twenty ambiguous rows
+      // that a button at the bottom of the body scrolls out of reach.
+      footer={
+        <>
+          {preview && unresolved > 0 && (
+            <span className="mr-auto text-xs text-ink-muted">
+              {number(unresolved)} still unchosen and will be skipped
+            </span>
+          )}
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          {preview ? (
+            <Button loading={busy} onClick={commit}>
+              {`Apply ${number(preview.summary.matched + Object.keys(choices).length)} deliveries`}
+            </Button>
+          ) : (
+            headers.length > 0 && (
+              <Button loading={busy} onClick={runPreview}>
+                Check the file
+              </Button>
+            )
+          )}
+        </>
+      }
+    >
+      <p className="mb-4 text-xs text-ink-muted">
+        Nothing is changed until you press Apply. Rows matching more than one open delivery wait for
+        you to choose.
+      </p>
 
-        {error && <p className="mb-3 text-sm text-red-700 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
+      {error && <Alert tone="danger">{error}</Alert>}
 
-        {/* A real drop target rather than the browser's default "Choose File"
-            control, which is tiny, unlabelled and gives no hint about what
-            kind of file is wanted. Clicking anywhere in the box opens the
-            picker, and a file can also be dragged straight in from the
-            courier's email. */}
-        <input
-          ref={fileRef}
-          type="file"
-          accept={SPREADSHEET_ACCEPT}
-          onChange={(e) => e.target.files?.[0] && readFile(e.target.files[0])}
-          className="sr-only"
-        />
+      {/* A real drop target rather than the browser's default "Choose File"
+          control, which is tiny, unlabelled and gives no hint about what
+          kind of file is wanted. Clicking anywhere in the box opens the
+          picker, and a file can also be dragged straight in from the
+          courier's email. */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept={SPREADSHEET_ACCEPT}
+        onChange={(e) => e.target.files?.[0] && readFile(e.target.files[0])}
+        className="sr-only"
+      />
 
-        {!preview && (
-          <div className="mb-5">
-            <div
-              role="button"
-              tabIndex={0}
-              onClick={() => fileRef.current?.click()}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  fileRef.current?.click();
-                }
-              }}
-              onDragOver={(e) => {
+      {!preview && (
+        <div className="mb-5">
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => fileRef.current?.click()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
-                setDragging(true);
-              }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={(e) => {
-                e.preventDefault();
-                setDragging(false);
-                const f = e.dataTransfer.files?.[0];
-                if (f) readFile(f);
-              }}
-              className={
-                "rounded-xl border-2 border-dashed px-6 py-8 text-center cursor-pointer transition-colors " +
-                (dragging
-                  ? "border-[var(--accent)] bg-[var(--accent-soft)]/30"
-                  : fileName
-                  ? "border-[var(--accent)]/40 bg-[var(--accent-soft)]/15"
-                  : "border-[var(--line)]/70 hover:border-[var(--accent)]/50 hover:bg-slate-50")
+                fileRef.current?.click();
               }
-            >
-              <svg
-                viewBox="0 0 24 24"
-                className="w-8 h-8 mx-auto text-[var(--accent)]/70"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden
-              >
-                <path d="M12 16V4M12 4l-4 4M12 4l4 4" />
-                <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
-              </svg>
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              const f = e.dataTransfer.files?.[0];
+              if (f) readFile(f);
+            }}
+            className={
+              "cursor-pointer rounded-card border-2 border-dashed px-6 py-8 text-center transition-colors " +
+              (dragging
+                ? "border-brand-600 bg-brand-50"
+                : fileName
+                ? "border-brand-300 bg-brand-50/50"
+                : "border-line-strong hover:border-brand-400 hover:bg-sunken")
+            }
+          >
+            <Icon name="upload" size={32} className="mx-auto text-brand-500" />
 
-              {fileName ? (
-                <>
-                  <p className="mt-3 text-sm font-medium text-slate-900">{fileName}</p>
-                  <p className="text-xs text-slate-500 mt-1">
-                    {number(rows.length)} rows read · click to choose a different file
-                  </p>
-                </>
-              ) : (
-                <>
-                  <p className="mt-3 text-sm font-medium text-slate-900">
-                    Drop the courier's file here
-                  </p>
-                  <p className="text-xs text-slate-500 mt-1">
-                    or click to choose one — Excel or CSV, and only a phone column is required
-                  </p>
-                </>
-              )}
-            </div>
-
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-              <SampleButtons onError={setError} />
-              <span className="text-xs text-slate-500 max-w-md">
-                Not sure of the format? The sample shows the columns. The file from “Download list”
-                also works as-is — it already has Phone and Tracking number columns.
-              </span>
-            </div>
+            {fileName ? (
+              <>
+                <p className="mt-3 text-sm font-medium text-ink">{fileName}</p>
+                <p className="mt-1 text-xs text-ink-muted">
+                  {number(rows.length)} rows read · click to choose a different file
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="mt-3 text-sm font-medium text-ink">Drop the courier&apos;s file here</p>
+                <p className="mt-1 text-xs text-ink-muted">
+                  or click to choose one — Excel or CSV, and only a phone column is required
+                </p>
+              </>
+            )}
           </div>
-        )}
 
-        {headers.length > 0 && !preview && (
-          <>
-            {/* Only when there is a choice to make. A CSV, and the great
-                majority of workbooks, have one sheet and should not be asked
-                about it. */}
-            {sheets.length > 1 && (
-              <label className="block text-xs text-slate-500 mb-3">
-                This workbook has {sheets.length} sheets — which one is the courier&apos;s?
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap gap-2">
+              <SampleButtons onError={setError} />
+            </div>
+            <span className="max-w-md text-xs text-ink-muted">
+              Not sure of the format? The sample shows the columns. The file from “Download” also
+              works as-is — it already has Phone and Tracking number columns.
+            </span>
+          </div>
+        </div>
+      )}
+
+      {headers.length > 0 && !preview && (
+        <>
+          {/* Only when there is a choice to make. A CSV, and the great
+              majority of workbooks, have one sheet and should not be asked
+              about it. */}
+          {sheets.length > 1 && (
+            <Field
+              label={`This workbook has ${sheets.length} sheets — which one is the courier's?`}
+              className="mb-3"
+            >
+              <Select
+                value={String(sheetIndex)}
+                onChange={(v) => pickSheet(Number(v))}
+                ariaLabel="Sheet"
+              >
+                {sheets.map((s, i) => (
+                  <option key={i} value={i}>
+                    {s.name} ({number(s.rows.length)} rows)
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
+          <p className="mb-2 text-xs text-ink-muted">
+            {number(rows.length)} rows read. Check the columns were picked up correctly:
+          </p>
+          <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {(
+              [
+                ["phone", "Phone (required)"],
+                ["name", "Name"],
+                ["tracking", "Tracking no"],
+                ["delivered", "Delivered date"],
+              ] as const
+            ).map(([key, label]) => (
+              <Field key={key} label={label}>
+                {/* Select is a string-valued control and the column index is
+                    a number, so it is stringified here and parsed back on
+                    change - simpler than teaching the component about types
+                    only this one dropdown uses. */}
                 <Select
-                  value={String(sheetIndex)}
-                  onChange={(v) => pickSheet(Number(v))}
-                  className="w-full mt-1"
+                  value={String(cols[key])}
+                  onChange={(v) => setCols({ ...cols, [key]: Number(v) })}
+                  ariaLabel={label}
                 >
-                  {sheets.map((s, i) => (
+                  <option value={-1}>— none —</option>
+                  {headers.map((h, i) => (
                     <option key={i} value={i}>
-                      {s.name} ({number(s.rows.length)} rows)
+                      {h || `Column ${i + 1}`}
                     </option>
                   ))}
                 </Select>
-              </label>
-            )}
-            <p className="text-xs text-slate-500 mb-2">
-              {number(rows.length)} rows read. Check the columns were picked up correctly:
-            </p>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
-              {(
-                [
-                  ["phone", "Phone (required)"],
-                  ["name", "Name"],
-                  ["tracking", "Tracking no"],
-                  ["delivered", "Delivered date"],
-                ] as const
-              ).map(([key, label]) => (
-                <label key={key} className="text-xs text-slate-500">
-                  {label}
-                  {/* Select is a string-valued control and the column index is
-                      a number, so it is stringified here and parsed back on
-                      change - simpler than teaching the component about types
-                      only this one dropdown uses. */}
-                  <Select
-                    value={String(cols[key])}
-                    onChange={(v) => setCols({ ...cols, [key]: Number(v) })}
-                    className="w-full mt-1"
-                  >
-                    <option value={-1}>— none —</option>
-                    {headers.map((h, i) => (
-                      <option key={i} value={i}>
-                        {h || `Column ${i + 1}`}
-                      </option>
-                    ))}
-                  </Select>
-                </label>
-              ))}
-            </div>
-            <button disabled={busy} onClick={runPreview} className={buttonPrimary}>
-              {busy ? "Checking…" : "Check the file"}
-            </button>
-          </>
-        )}
+              </Field>
+            ))}
+          </div>
+        </>
+      )}
 
-        {preview && (
-          <>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-              {[
-                ["Rows", preview.summary.rows],
-                ["Ready", preview.summary.matched],
-                ["Need a choice", preview.summary.ambiguous],
-                ["No match", preview.summary.unmatched],
-              ].map(([label, value]) => (
-                <div key={label as string} className="rounded-lg border border-[var(--line-soft)] p-3">
-                  <p className="text-[11px] uppercase tracking-wide text-slate-400">{label}</p>
-                  <p className="text-xl font-semibold tabular-nums text-slate-900">
-                    {number(value as number)}
-                  </p>
-                </div>
-              ))}
-            </div>
-
-            {preview.ambiguous.length > 0 && (
-              <div className="mb-4">
-                <p className="text-xs font-medium text-slate-700 mb-2">
-                  These donors have more than one open delivery. Pick which donation arrived:
+      {preview && (
+        <>
+          <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {[
+              ["Rows", preview.summary.rows],
+              ["Ready", preview.summary.matched],
+              ["Need a choice", preview.summary.ambiguous],
+              ["No match", preview.summary.unmatched],
+            ].map(([label, value]) => (
+              <div key={label as string} className="rounded-card border border-line-soft p-3">
+                <p className="text-2xs uppercase tracking-wide text-ink-muted">{label}</p>
+                <p className="text-xl font-semibold tabular-nums text-ink">
+                  {number(value as number)}
                 </p>
-                <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-                  {preview.ambiguous.map((a) => (
-                    <div key={a.row.rowNumber} className="rounded-lg border border-[var(--line-soft)] p-3">
-                      <p className="text-xs text-slate-500 mb-2">
-                        Row {a.row.rowNumber} · {a.row.name || "—"} · {a.row.phone}
-                      </p>
-                      <div className="space-y-1">
-                        {a.candidates.map((c) => (
-                          <label
-                            key={c.id}
-                            className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer"
-                          >
-                            <input
-                              type="radio"
-                              name={`row-${a.row.rowNumber}`}
-                              checked={choices[a.row.rowNumber] === c.id}
-                              onChange={() => setChoices({ ...choices, [a.row.rowNumber]: c.id })}
-                            />
-                            <span className="tabular-nums">
-                              {currency(Number(c.donation_amount ?? 0))}
-                            </span>
-                            <span>{c.donation_purpose ?? "no seva recorded"}</span>
-                            <span className="text-slate-400">
-                              {c.donation_date ? shortDate(c.donation_date) : ""} · {c.status}
-                            </span>
-                          </label>
-                        ))}
-                        <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+              </div>
+            ))}
+          </div>
+
+          {preview.ambiguous.length > 0 && (
+            <div className="mb-4">
+              <p className="mb-2 text-xs font-medium text-ink-soft">
+                These donors have more than one open delivery. Pick which donation arrived:
+              </p>
+              <div className="max-h-80 space-y-3 overflow-y-auto pr-1">
+                {preview.ambiguous.map((a) => (
+                  <div key={a.row.rowNumber} className="rounded-card border border-line-soft p-3">
+                    <p className="mb-2 text-xs text-ink-muted">
+                      Row {a.row.rowNumber} · {a.row.name || "—"} · {a.row.phone}
+                    </p>
+                    <div className="space-y-1">
+                      {a.candidates.map((c) => (
+                        <label
+                          key={c.id}
+                          className="flex cursor-pointer items-center gap-2 text-xs text-ink-soft"
+                        >
                           <input
                             type="radio"
                             name={`row-${a.row.rowNumber}`}
-                            checked={!choices[a.row.rowNumber]}
-                            onChange={() => {
-                              const next = { ...choices };
-                              delete next[a.row.rowNumber];
-                              setChoices(next);
-                            }}
+                            checked={choices[a.row.rowNumber] === c.id}
+                            onChange={() => setChoices({ ...choices, [a.row.rowNumber]: c.id })}
+                            className="accent-brand-600"
                           />
-                          Skip this row
+                          <span className="tabular-nums">
+                            {currency(Number(c.donation_amount ?? 0))}
+                          </span>
+                          <span>{c.donation_purpose ?? "no seva recorded"}</span>
+                          <span className="text-ink-faint">
+                            {c.donation_date ? shortDate(c.donation_date) : ""} · {c.status}
+                          </span>
                         </label>
-                      </div>
+                      ))}
+                      <label className="flex cursor-pointer items-center gap-2 text-xs text-ink-faint">
+                        <input
+                          type="radio"
+                          name={`row-${a.row.rowNumber}`}
+                          checked={!choices[a.row.rowNumber]}
+                          onChange={() => {
+                            const next = { ...choices };
+                            delete next[a.row.rowNumber];
+                            setChoices(next);
+                          }}
+                          className="accent-brand-600"
+                        />
+                        Skip this row
+                      </label>
                     </div>
-                  ))}
-                </div>
+                  </div>
+                ))}
               </div>
-            )}
-
-            {preview.unmatched.length > 0 && (
-              <details className="mb-4">
-                <summary className="text-xs text-slate-500 cursor-pointer">
-                  {number(preview.unmatched.length)} rows matched nothing — see why
-                </summary>
-                <ul className="mt-2 space-y-1 max-h-40 overflow-y-auto">
-                  {preview.unmatched.map((u) => (
-                    <li key={u.row.rowNumber} className="text-[11px] text-slate-500">
-                      Row {u.row.rowNumber} ({u.row.phone || "no phone"}): {u.reason}
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            )}
-
-            <div className="flex flex-wrap items-center gap-2 border-t border-[var(--line-soft)] pt-4">
-              <input
-                value={courier}
-                onChange={(e) => setCourier(e.target.value)}
-                placeholder="Courier name (optional)"
-                className={`${inputClass} w-48`}
-              />
-              <button disabled={busy} onClick={commit} className={buttonPrimary}>
-                {busy
-                  ? "Applying…"
-                  : `Apply ${number(preview.summary.matched + Object.keys(choices).length)} deliveries`}
-              </button>
-              {unresolved > 0 && (
-                <span className="text-xs text-slate-500">
-                  {number(unresolved)} still unchosen and will be skipped
-                </span>
-              )}
-              <button onClick={onClose} className={buttonSecondary}>
-                Cancel
-              </button>
             </div>
-          </>
-        )}
-      </Card>
-    </div>
+          )}
+
+          {preview.unmatched.length > 0 && (
+            <details className="mb-4">
+              <summary className="cursor-pointer text-xs text-ink-muted">
+                {number(preview.unmatched.length)} rows matched nothing — see why
+              </summary>
+              <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto">
+                {preview.unmatched.map((u) => (
+                  <li key={u.row.rowNumber} className="text-2xs text-ink-muted">
+                    Row {u.row.rowNumber} ({u.row.phone || "no phone"}): {u.reason}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+
+          <Field label="Courier name" hint="Optional — recorded against every row this file marks" className="w-60">
+            <Input value={courier} onChange={(e) => setCourier(e.target.value)} />
+          </Field>
+        </>
+      )}
+    </Modal>
   );
 }

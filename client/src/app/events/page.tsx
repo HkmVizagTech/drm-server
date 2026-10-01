@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { apiClient } from "@/lib/api";
+import { shortDate } from "@/lib/format";
+import { Card, EmptyState, Icon, PageHeader } from "@/components/ui";
 
 interface Event {
   id: string;
@@ -20,23 +22,33 @@ export default function EventsPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">Events</h1>
+      <PageHeader
+        eyebrow="Fulfilment"
+        title="Events"
+        subtitle="Festivals and programmes whose dates are still ahead."
+      />
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-        {events.map((ev) => (
-          <div key={ev.id} className="bg-white rounded-xl shadow p-6">
-            <h2 className="text-lg font-semibold text-gray-900">{ev.name}</h2>
-            <p className="text-sm text-gray-500 mt-1">
-              {new Date(ev.date_start).toLocaleDateString()} → {new Date(ev.date_end).toLocaleDateString()}
-            </p>
-            {ev.description && <p className="text-sm text-gray-600 mt-3">{ev.description}</p>}
-          </div>
-        ))}
-      </div>
-
-      {events.length === 0 && (
-        <div className="bg-white rounded-xl shadow p-8 text-center text-gray-500">
-          No upcoming events. Create one soon!
+      {events.length === 0 ? (
+        <Card padded={false}>
+          <EmptyState
+            icon="calendar"
+            title="No upcoming events"
+            message="Nothing with a date still ahead of it is recorded. This screen only reads the event list — there is no way to add or edit an event from the admin yet."
+          />
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
+          {events.map((ev) => (
+            <Card key={ev.id}>
+              <h2 className="text-base font-semibold text-ink">{ev.name}</h2>
+              <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
+                {shortDate(ev.date_start)}
+                <Icon name="arrowRight" size={12} />
+                {shortDate(ev.date_end)}
+              </p>
+              {ev.description && <p className="mt-3 text-sm text-ink-soft">{ev.description}</p>}
+            </Card>
+          ))}
         </div>
       )}
     </div>

@@ -7,14 +7,20 @@ import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency, currencyCompact, number, relativeDate, titleCase } from "@/lib/format";
 import {
+  Alert,
   Avatar,
+  buttonClass,
   Card,
   CardHeader,
   EmptyState,
+  Icon,
   PageHeader,
+  Skeleton,
   StatTile,
+  Tbody,
   Td,
   Th,
+  Thead,
   TableShell,
 } from "@/components/ui";
 import { CategoryBars, MonthlyTrendChart } from "@/components/charts";
@@ -73,6 +79,23 @@ interface Dashboard {
   }[];
 }
 
+/**
+ * A "see the rest of it" link.
+ *
+ * next/link carrying a button's classes rather than the shared LinkButton:
+ * LinkButton renders a plain anchor, and a plain anchor to an internal route
+ * reloads the whole admin instead of routing on the client. This keeps the
+ * routing and still takes its look from the one button scale.
+ */
+function MoreLink({ href, children }: { href: string; children: string }) {
+  return (
+    <Link href={href} className={buttonClass("ghost", "xs")}>
+      {children}
+      <Icon name="arrowRight" size={13} />
+    </Link>
+  );
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const { user } = useAuth();
@@ -96,23 +119,35 @@ export default function DashboardPage() {
 
   if (error) {
     return (
-      <Card>
-        <EmptyState title="Dashboard unavailable" message={error} />
-      </Card>
+      <div>
+        <PageHeader eyebrow="Overview" title="Dashboard" />
+        <Alert tone="danger" title="Dashboard unavailable">
+          {error}
+        </Alert>
+      </div>
     );
   }
 
   if (!data) {
+    // The labels are known before the numbers are, so they are shown straight
+    // away and only the figures shimmer - the screen does not rearrange itself
+    // when the response lands.
     return (
-      <div>
-        <PageHeader title="Dashboard" subtitle="Loading…" />
+      <div className="space-y-6">
+        <PageHeader eyebrow="Overview" title="Dashboard" />
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Card key={i}>
-              <div className="h-3 w-24 bg-slate-100 rounded animate-pulse" />
-              <div className="h-7 w-32 bg-slate-100 rounded animate-pulse mt-3" />
-            </Card>
-          ))}
+          <StatTile label="Total donated" value="" icon="rupee" accent="brand" loading />
+          <StatTile label="This month" value="" icon="trendUp" loading />
+          <StatTile label="Recurring / month" value="" icon="refresh" accent="good" loading />
+          <StatTile label="Average donation" value="" icon="chart" loading />
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <Card className="lg:col-span-2">
+            <Skeleton className="h-64 w-full" />
+          </Card>
+          <Card>
+            <Skeleton className="h-64 w-full" />
+          </Card>
         </div>
       </div>
     );
@@ -152,6 +187,7 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       <PageHeader
+        eyebrow="Overview"
         title="Dashboard"
         subtitle={`${number(people.donors)} donors · ${number(giving.lifetimeCount)} recorded donations`}
       />
@@ -161,6 +197,7 @@ export default function DashboardPage() {
           label="Total donated"
           value={currency(giving.lifetimeTotal)}
           sub={`${number(giving.lifetimeCount)} donations`}
+          icon="rupee"
           accent="brand"
         />
         <StatTile
@@ -168,23 +205,27 @@ export default function DashboardPage() {
           value={currency(giving.thisMonth)}
           delta={{ current: giving.thisMonth, previous: giving.lastMonth, label: "vs last month" }}
           sub={giving.lastMonth ? undefined : `${number(giving.thisMonthCount)} donations`}
+          icon="trendUp"
         />
         <StatTile
           label="Recurring / month"
           value={currency(recurring.monthlyValue)}
           sub={`${number(recurring.activeCount)} active`}
+          icon="refresh"
           accent="good"
         />
         <StatTile
           label="Average donation"
           value={currency(giving.avgGift)}
           sub={`${number(people.newThisMonth)} new people this month`}
+          icon="chart"
         />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2">
           <CardHeader
+            icon="chart"
             title="Donations over the last 12 months"
             subtitle="Hover a month for its total and number of donations"
           />
@@ -192,7 +233,11 @@ export default function DashboardPage() {
         </Card>
 
         <Card>
-          <CardHeader title="Where it goes" subtitle="Share of total donations by purpose" />
+          <CardHeader
+            icon="tag"
+            title="Where it goes"
+            subtitle="Share of total donations by purpose"
+          />
           <CategoryBars data={data.byPurpose} labelKey="purpose" valueKey="total" />
         </Card>
       </div>
@@ -203,29 +248,24 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {data.bySite.length === 0 ? (
           <Card className="sm:col-span-2">
-            <p className="text-sm text-slate-400">No donations recorded yet.</p>
+            <EmptyState
+              icon="rupee"
+              title="No donations recorded yet"
+              message="Donations made on the HKMV and Annadan sites appear here as soon as the first one arrives."
+            />
           </Card>
         ) : (
           data.bySite.map((s) => (
-            <Link
-              key={s.site}
-              href={`/donations?site=${encodeURIComponent(s.site)}`}
-              className="block group"
-            >
-              <Card className="h-full transition-colors group-hover:border-[var(--accent)]/40">
+            <Link key={s.site} href={`/donations?site=${encodeURIComponent(s.site)}`} className="block">
+              <Card interactive className="h-full">
                 <div className="flex items-start justify-between gap-2">
                   <SiteBadge site={s.site} />
-                  <span
-                    className="text-slate-300 group-hover:text-[var(--accent)] transition-colors"
-                    aria-hidden
-                  >
-                    →
-                  </span>
+                  <Icon name="arrowRight" size={16} className="mt-0.5 text-ink-faint" />
                 </div>
-                <p className="text-3xl font-semibold mt-3 tabular-nums text-slate-900">
+                <p className="mt-3 text-3xl font-semibold tabular-nums text-ink">
                   {currency(s.total)}
                 </p>
-                <p className="text-xs text-slate-500 mt-1 tabular-nums">
+                <p className="mt-1 text-xs tabular-nums text-ink-muted">
                   {number(s.count)} {s.count === 1 ? "donation" : "donations"} ·{" "}
                   {currency(s.thisMonth)} this month
                 </p>
@@ -247,75 +287,80 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2">
           <CardHeader
+            icon="list"
             title="HKM Vizag — by page"
             subtitle="Where on the main site the donation came from"
-            action={
-              <Link href="/pages" className="text-xs text-[var(--accent)] hover:underline">
-                Full breakdown
-              </Link>
-            }
+            action={<MoreLink href="/pages">Full breakdown</MoreLink>}
           />
 
+          {/* Tiles rather than nested Cards: these sit inside a card already,
+              and a bordered, shadowed surface inside another one draws the
+              double edge the design system exists to stop. */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {(data.pageGroups ?? []).map((g) => (
-              <Link key={g.key} href={`/pages#${g.key}`} className="block group">
+              <Link key={g.key} href={`/pages#${g.key}`} className="group block">
                 <div
                   className={
-                    "h-full rounded-lg border p-3 transition-colors " +
+                    "h-full rounded-card border p-3 transition-colors " +
                     (g.key === "other"
-                      ? "border-[var(--line)]/60 bg-white group-hover:border-[var(--accent)]/40"
-                      : "border-[var(--accent)]/30 bg-[var(--accent-soft)]/20 group-hover:border-[var(--accent)]/60")
+                      ? "border-line-soft bg-surface group-hover:border-brand-300"
+                      : "border-brand-200 bg-brand-50 group-hover:border-brand-400")
                   }
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <p className="text-xs font-medium text-[var(--accent-ink)]">{g.label}</p>
-                    <span
-                      className="text-[var(--accent)]/40 group-hover:text-[var(--accent)] transition-colors flex-none"
-                      aria-hidden
-                    >
-                      →
-                    </span>
+                    <p className="text-xs font-medium text-brand-800">{g.label}</p>
+                    <Icon
+                      name="arrowRight"
+                      size={14}
+                      className="text-ink-faint transition-colors group-hover:text-brand-700"
+                    />
                   </div>
-                  <p className="text-2xl font-semibold mt-2 tabular-nums text-slate-900">
+                  <p className="mt-2 text-2xl font-semibold tabular-nums text-ink">
                     {currency(g.total)}
                   </p>
-                  <p className="text-xs text-slate-600 mt-1 tabular-nums">
+                  <p className="mt-1 text-xs tabular-nums text-ink-muted">
                     {number(g.count)} {g.count === 1 ? "donation" : "donations"} across{" "}
                     {number(g.pageCount)} {g.pageCount === 1 ? "page" : "pages"}
                   </p>
-                  <p className="text-xs text-slate-600 mt-2 tabular-nums">
+                  <p className="mt-2 text-xs tabular-nums text-ink-muted">
                     {currency(g.thisMonth)} this month
-                    <span className="text-slate-500"> · {currency(g.lastMonth)} last</span>
+                    <span className="text-ink-faint"> · {currency(g.lastMonth)} last</span>
                   </p>
                 </div>
               </Link>
             ))}
           </div>
 
-          <p className="text-[11px] uppercase tracking-wide text-slate-400 mt-5 mb-1">
+          <p className="mb-1 mt-5 text-2xs font-semibold uppercase tracking-[0.06em] text-ink-muted">
             Busiest pages
           </p>
           {(() => {
             const rest = data.bySourcePage.filter((r) => r.site === "hkmv");
             if (rest.length === 0) {
-              return <p className="text-sm text-slate-400">No page attribution recorded yet.</p>;
+              return (
+                <EmptyState
+                  icon="list"
+                  title="No page attribution recorded yet"
+                  message="Donations started carrying the page they came from recently; older ones have nothing to attribute."
+                />
+              );
             }
             return (
-              <ul className="divide-y divide-slate-100">
+              <ul className="divide-y divide-line-soft">
                 {rest.slice(0, 8).map((row) => (
                   <li key={`${row.site}${row.sourcePage}`}>
                     <Link
                       href={`/donations?site=${encodeURIComponent(row.site)}&page=${encodeURIComponent(row.sourcePage)}`}
-                      className="flex items-center justify-between gap-3 py-2 group"
+                      className="group flex items-center justify-between gap-3 py-2"
                     >
-                      <span className="font-mono text-xs text-slate-700 truncate group-hover:text-[var(--accent)]">
+                      <span className="truncate font-mono text-xs text-ink-soft group-hover:text-brand-700">
                         {row.sourcePage}
                       </span>
-                      <span className="flex items-center gap-3 flex-none">
-                        <span className="text-xs text-slate-500 tabular-nums">
+                      <span className="flex flex-none items-center gap-3">
+                        <span className="text-xs tabular-nums text-ink-muted">
                           {number(row.count)}
                         </span>
-                        <span className="text-sm font-semibold tabular-nums text-slate-900">
+                        <span className="text-sm font-semibold tabular-nums text-ink">
                           {currency(row.total)}
                         </span>
                       </span>
@@ -328,29 +373,39 @@ export default function DashboardPage() {
         </Card>
 
         <Card className="lg:col-span-1">
-          <CardHeader title="Other sites — by page" subtitle="Everything outside the main site" />
+          <CardHeader
+            icon="link"
+            title="Other sites — by page"
+            subtitle="Everything outside the main site"
+          />
           {(() => {
             const rest = data.bySourcePage.filter((r) => r.site !== "hkmv");
             if (rest.length === 0) {
-              return <p className="text-sm text-slate-400">No page attribution recorded yet.</p>;
+              return (
+                <EmptyState
+                  icon="link"
+                  title="No page attribution recorded yet"
+                  message="Nothing has come in from the other sites with a page recorded against it."
+                />
+              );
             }
             return (
-              <ul className="divide-y divide-slate-100">
+              <ul className="divide-y divide-line-soft">
                 {rest.slice(0, 10).map((row) => (
                   <li key={`${row.site}${row.sourcePage}`}>
                     <Link
                       href={`/donations?site=${encodeURIComponent(row.site)}&page=${encodeURIComponent(row.sourcePage)}`}
-                      className="flex items-center justify-between gap-3 py-2 group"
+                      className="group flex items-center justify-between gap-3 py-2"
                     >
                       <span className="min-w-0">
-                        <span className="block font-mono text-xs text-slate-700 truncate group-hover:text-[var(--accent)]">
+                        <span className="block truncate font-mono text-xs text-ink-soft group-hover:text-brand-700">
                           {row.sourcePage}
                         </span>
-                        <span className="block text-[11px] text-slate-400">
+                        <span className="block text-2xs text-ink-faint">
                           {siteLabel(row.site)} · {number(row.count)}
                         </span>
                       </span>
-                      <span className="text-sm font-semibold tabular-nums text-slate-900 flex-none">
+                      <span className="flex-none text-sm font-semibold tabular-nums text-ink">
                         {currency(row.total)}
                       </span>
                     </Link>
@@ -364,23 +419,23 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         {queues.map((q) => (
-          <Link key={q.label} href={q.href} className="block group">
-            <Card className="transition-colors group-hover:border-[var(--accent)]/40">
+          <Link key={q.label} href={q.href} className="block">
+            <Card interactive className="h-full">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">{q.label}</p>
+                  <p className="text-xs font-medium uppercase tracking-wide text-ink-muted">
+                    {q.label}
+                  </p>
                   <p
-                    className={`text-2xl font-semibold mt-2 tabular-nums ${
-                      q.value > 0 ? "text-slate-900" : "text-slate-300"
+                    className={`mt-2 text-2xl font-semibold tabular-nums ${
+                      q.value > 0 ? "text-ink" : "text-ink-faint"
                     }`}
                   >
                     {number(q.value)}
                   </p>
-                  <p className="text-xs text-slate-500 mt-1 truncate">{q.hint}</p>
+                  <p className="mt-1 truncate text-xs text-ink-muted">{q.hint}</p>
                 </div>
-                <span className="text-slate-300 group-hover:text-[var(--accent)] transition-colors" aria-hidden>
-                  →
-                </span>
+                <Icon name="arrowRight" size={16} className="mt-0.5 flex-none text-ink-faint" />
               </div>
             </Card>
           </Link>
@@ -388,94 +443,96 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div>
-          <Card padded={false}>
-            <div className="p-5 pb-0">
-              <CardHeader
-                title="Top donors"
-                subtitle="By total donated"
-                action={
-                  <Link href="/people?sort=lifetime" className="text-xs text-[var(--accent)] hover:underline">
-                    View all
+        <Card padded={false}>
+          <div className="p-5 pb-0">
+            <CardHeader
+              icon="star"
+              title="Top donors"
+              subtitle="By total donated"
+              action={<MoreLink href="/people?sort=lifetime">View all</MoreLink>}
+            />
+          </div>
+          {data.topDonors.length === 0 ? (
+            <EmptyState
+              icon="users"
+              title="No donors yet"
+              message="Import from HKMV or record a donation to get started."
+            />
+          ) : (
+            <ul className="divide-y divide-line-soft">
+              {data.topDonors.map((d, i) => (
+                <li key={d.id}>
+                  <Link
+                    href={`/people/${d.id}`}
+                    className="flex items-center gap-3 px-5 py-3 transition-colors hover:bg-brand-50/60"
+                  >
+                    <span className="w-4 text-xs tabular-nums text-ink-faint">{i + 1}</span>
+                    <Avatar name={d.name} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium text-ink">{d.name}</span>
+                      <span className="block text-xs tabular-nums text-ink-muted">
+                        {number(d.count)} {d.count === 1 ? "donation" : "donations"}
+                      </span>
+                    </span>
+                    <span className="text-sm font-semibold tabular-nums text-ink">
+                      {currencyCompact(d.total)}
+                    </span>
                   </Link>
-                }
-              />
-            </div>
-            {data.topDonors.length === 0 ? (
-              <EmptyState title="No donors yet" message="Import from HKMV or record a donation to get started." />
-            ) : (
-              <ul className="divide-y divide-slate-100">
-                {data.topDonors.map((d, i) => (
-                  <li key={d.id}>
-                    <Link
-                      href={`/people/${d.id}`}
-                      className="flex items-center gap-3 px-5 py-3 hover:bg-slate-50 transition-colors"
-                    >
-                      <span className="w-4 text-xs tabular-nums text-slate-400">{i + 1}</span>
-                      <Avatar name={d.name} />
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-sm font-medium text-slate-900 truncate">{d.name}</span>
-                        <span className="block text-xs text-slate-500 tabular-nums">
-                          {number(d.count)} {d.count === 1 ? "donation" : "donations"}
-                        </span>
-                      </span>
-                      <span className="text-sm font-semibold tabular-nums text-slate-900">
-                        {currencyCompact(d.total)}
-                      </span>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Card>
-        </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
 
+        {/* The header sits above the table rather than wrapping it in a Card:
+            a TableShell already draws a bordered, shadowed surface, and putting
+            one inside a card stacked two of them with a visible double edge. */}
         <div>
-          <Card padded={false}>
-            <div className="p-5 pb-0">
-              <CardHeader
-                title="Recent donations"
-                subtitle="Newest donations, including ones pushed live from the website"
-                action={
-                  <Link href="/donations" className="text-xs text-[var(--accent)] hover:underline">
-                    View all
-                  </Link>
-                }
+          <CardHeader
+            icon="receipt"
+            title="Recent donations"
+            subtitle="Newest donations, including ones pushed live from the website"
+            action={<MoreLink href="/donations">View all</MoreLink>}
+          />
+          {data.recentDonations.length === 0 ? (
+            <Card>
+              <EmptyState
+                icon="rupee"
+                title="No donations yet"
+                message="Donations made on the HKMV site appear here automatically."
               />
-            </div>
-            {data.recentDonations.length === 0 ? (
-              <EmptyState title="No donations yet" message="Donations made on the HKMV site appear here automatically." />
-            ) : (
-              <TableShell>
-                <thead className="bg-slate-50/80">
-                  <tr>
-                    <Th>Donor</Th>
-                    <Th>Purpose</Th>
-                    <Th align="right">Amount</Th>
-                    <Th align="right">When</Th>
+            </Card>
+          ) : (
+            <TableShell>
+              <Thead>
+                <Th>Donor</Th>
+                <Th>Purpose</Th>
+                <Th align="right">Amount</Th>
+                <Th align="right">When</Th>
+              </Thead>
+              <Tbody>
+                {data.recentDonations.map((d) => (
+                  <tr key={d.id}>
+                    <Td>
+                      <Link
+                        href={`/people/${d.personId}`}
+                        className="font-medium text-ink hover:text-brand-700"
+                      >
+                        {d.donorName}
+                      </Link>
+                    </Td>
+                    <Td>{titleCase(d.purpose)}</Td>
+                    <Td align="right" className="font-semibold tabular-nums text-ink">
+                      {currency(d.amount)}
+                    </Td>
+                    <Td align="right" className="whitespace-nowrap text-xs text-ink-muted">
+                      {relativeDate(d.createdAt)}
+                    </Td>
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {data.recentDonations.map((d) => (
-                    <tr key={d.id} className="hover:bg-slate-50">
-                      <Td>
-                        <Link href={`/people/${d.personId}`} className="font-medium text-slate-900 hover:text-[var(--accent)]">
-                          {d.donorName}
-                        </Link>
-                      </Td>
-                      <Td className="text-slate-600">{titleCase(d.purpose)}</Td>
-                      <Td align="right" className="font-semibold tabular-nums">
-                        {currency(d.amount)}
-                      </Td>
-                      <Td align="right" className="text-slate-500 text-xs whitespace-nowrap">
-                        {relativeDate(d.createdAt)}
-                      </Td>
-                    </tr>
-                  ))}
-                </tbody>
-              </TableShell>
-            )}
-          </Card>
+                ))}
+              </Tbody>
+            </TableShell>
+          )}
         </div>
       </div>
     </div>

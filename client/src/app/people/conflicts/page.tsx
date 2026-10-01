@@ -18,16 +18,20 @@ import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { number, relativeDate } from "@/lib/format";
 import {
+  Alert,
   Badge,
+  Button,
+  buttonSecondary,
   Card,
   CardHeader,
   EmptyState,
   PageHeader,
+  SkeletonRows,
   TableShell,
+  Tbody,
   Td,
   Th,
-  buttonPrimary,
-  buttonSecondary,
+  Thead,
 } from "@/components/ui";
 
 interface Conflict {
@@ -102,64 +106,69 @@ export default function ConflictsPage() {
   return (
     <div>
       <PageHeader
+        eyebrow="Donors"
         title="Name mismatches"
         subtitle="Donors the donation sites and DRM spell differently"
         actions={
-          <div className="flex flex-wrap gap-2">
+          <>
+            {/* A next/link anchor in the button's clothes rather than
+                LinkButton: LinkButton is a plain <a> and would reload the whole
+                app to reach a route the client router already has. */}
             <Link href="/people" className={buttonSecondary}>
               All people
             </Link>
-            <button onClick={() => void runSweep(false)} disabled={busy} className={buttonPrimary}>
+            <Button icon="refresh" onClick={() => void runSweep(false)} disabled={busy} loading={busy}>
               {busy ? "Checking…" : "Check both sites"}
-            </button>
-          </div>
+            </Button>
+          </>
         }
       />
 
-      {error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
-      )}
+      {error && <Alert tone="danger">{error}</Alert>}
 
       {/* The dry run. Deliberately a separate step from applying: "347 donors
           will be renamed" is a sentence somebody should read before it
           happens, not after. */}
       {sweep && !sweep.applied && (
-        <Card className="mb-5 border-[var(--accent)]/40 bg-[var(--accent-wash)]">
-          <CardHeader title="What a sweep would change" />
+        <Card tone="brand" className="mb-5">
+          <CardHeader title="What a sweep would change" icon="refresh" />
           <div className="grid gap-4 sm:grid-cols-3">
             <div>
-              <p className="text-2xl font-semibold tabular-nums text-slate-900">{number(sweep.names_to_fix)}</p>
-              <p className="text-xs text-slate-600">names corrected</p>
+              <p className="text-2xl font-semibold tabular-nums text-ink">{number(sweep.names_to_fix)}</p>
+              <p className="text-xs text-ink-soft">names corrected</p>
             </div>
             <div>
-              <p className="text-2xl font-semibold tabular-nums text-slate-900">{number(sweep.addresses_to_fill)}</p>
-              <p className="text-xs text-slate-600">blank addresses filled in</p>
+              <p className="text-2xl font-semibold tabular-nums text-ink">{number(sweep.addresses_to_fill)}</p>
+              <p className="text-xs text-ink-soft">blank addresses filled in</p>
             </div>
             <div>
-              <p className="text-2xl font-semibold tabular-nums text-slate-900">{number(sweep.checked)}</p>
-              <p className="text-xs text-slate-600">donors checked against {sweep.sites_seen.length} site{sweep.sites_seen.length === 1 ? "" : "s"}</p>
+              <p className="text-2xl font-semibold tabular-nums text-ink">{number(sweep.checked)}</p>
+              <p className="text-xs text-ink-soft">donors checked against {sweep.sites_seen.length} site{sweep.sites_seen.length === 1 ? "" : "s"}</p>
             </div>
           </div>
 
           {sweep.edited_here_count > 0 && (
-            <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <Alert tone="warn" className="mt-3">
               {number(sweep.edited_here_count)} of these were typed in DRM by hand and would be replaced by what a
               site says. Look at the list below before applying.
-            </p>
+            </Alert>
           )}
 
           {sweep.examples.length > 0 && (
-            <div className="mt-4 max-h-64 overflow-y-auto scroll-slim rounded-lg border border-[var(--line-soft)] bg-white">
+            <div className="scroll-slim mt-4 max-h-64 overflow-y-auto rounded-card border border-line-soft bg-surface">
+              {/* A plain scrolling table rather than a TableShell: this sits
+                  inside a Card, and two bordered, shadowed surfaces stacked on
+                  each other draw a double edge. */}
               <table className="w-full text-sm">
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-line-soft">
                   {sweep.examples.map((c) => (
                     <tr key={c.id}>
-                      <td className="px-3 py-2 text-slate-500 tabular-nums">{c.phone}</td>
-                      <td className="px-3 py-2 text-slate-500 line-through">{c.from || "—"}</td>
-                      <td className="px-3 py-2 font-medium text-slate-900">{c.to}</td>
-                      <td className="px-3 py-2 text-right text-xs text-slate-400">
+                      <td className="px-3 py-2 tabular-nums text-ink-muted">{c.phone}</td>
+                      <td className="px-3 py-2 text-ink-muted line-through">{c.from || "—"}</td>
+                      <td className="px-3 py-2 font-medium text-ink">{c.to}</td>
+                      <td className="px-3 py-2 text-right text-xs text-ink-faint">
                         {siteName(c.site)}
-                        {c.edited_here && <span className="ml-1 text-amber-700">· edited here</span>}
+                        {c.edited_here && <span className="ml-1 text-warn">· edited here</span>}
                       </td>
                     </tr>
                   ))}
@@ -169,103 +178,97 @@ export default function ConflictsPage() {
           )}
 
           <div className="mt-4 flex flex-wrap gap-2">
-            <button onClick={() => void runSweep(true)} disabled={busy || !sweep.names_to_fix} className={buttonPrimary}>
+            <Button
+              icon="check"
+              onClick={() => void runSweep(true)}
+              disabled={busy || !sweep.names_to_fix}
+              loading={busy}
+            >
               {busy ? "Applying…" : `Apply ${number(sweep.names_to_fix)} correction${sweep.names_to_fix === 1 ? "" : "s"}`}
-            </button>
-            <button onClick={() => setSweep(null)} className={buttonSecondary}>
+            </Button>
+            <Button variant="secondary" onClick={() => setSweep(null)}>
               Not now
-            </button>
+            </Button>
           </div>
         </Card>
       )}
 
       {sweep?.applied && (
-        <div className="mb-5 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+        <Alert tone="good" className="mb-5">
           Done — {number(sweep.names_to_fix)} names corrected and {number(sweep.addresses_to_fill)} addresses
           filled in.
-        </div>
+        </Alert>
       )}
 
-      <Card padded={false}>
-        <div className="px-5 pt-5">
-          <CardHeader
-            title={`${rows.length} still unsettled`}
-            subtitle="Two genuinely different names on one phone number. Often a shared family line — worth a look before choosing."
-          />
-        </div>
+      <CardHeader
+        title={`${rows.length} still unsettled`}
+        subtitle="Two genuinely different names on one phone number. Often a shared family line — worth a look before choosing."
+      />
 
-        <TableShell>
-          <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
+      <TableShell>
+        <Thead>
+          <Th>Phone</Th>
+          <Th>DRM has</Th>
+          <Th>The site has</Th>
+          <Th>Noticed</Th>
+          <Th align="right">Keep</Th>
+        </Thead>
+        {loading ? (
+          <SkeletonRows rows={5} cols={5} />
+        ) : !rows.length ? (
+          <tbody>
             <tr>
-              <Th>Phone</Th>
-              <Th>DRM has</Th>
-              <Th>The site has</Th>
-              <Th>Noticed</Th>
-              <Th align="right">Keep</Th>
+              <td colSpan={5}>
+                <EmptyState
+                  icon="users"
+                  title="Nothing in dispute"
+                  message="No donor has two different names across DRM and the sites. Press “Check both sites” to look again."
+                />
+              </td>
             </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {loading ? (
-              <tr><td colSpan={5} className="px-4 py-8 text-center text-sm text-slate-400">Loading…</td></tr>
-            ) : !rows.length ? (
-              <tr>
-                <td colSpan={5}>
-                  <EmptyState
-                    title="Nothing in dispute"
-                    message="No donor has two different names across DRM and the sites. Press “Check both sites” to look again."
-                  />
-                </td>
-              </tr>
-            ) : (
-              rows.map((c) => (
-                <tr key={c.id} className="hover:bg-slate-50/60">
-                  <Td className="tabular-nums text-slate-600">
-                    <Link href={`/people/${c.id}`} className="hover:text-[var(--accent)]">
-                      {c.phone}
-                    </Link>
-                  </Td>
-                  <Td className="font-medium text-slate-900">
-                    {c.name}
-                    {c.name_edited_at && (
-                      <span className="ml-2 align-middle">
-                        <Badge tone="neutral">typed here</Badge>
-                      </span>
-                    )}
-                  </Td>
-                  <Td className="text-slate-700">
-                    {c.name_alt}
-                    <span className="block text-[11px] text-slate-400">{siteName(c.name_alt_source)}</span>
-                  </Td>
-                  <Td className="text-xs text-slate-500">{relativeDate(c.name_conflict_at)}</Td>
-                  <Td align="right">
-                    <div className="flex justify-end gap-1">
-                      <button
-                        onClick={() => void keep(c.id, "current")}
-                        className="rounded-lg px-2 py-1 text-xs text-slate-600 hover:bg-slate-100"
-                      >
-                        Keep ours
-                      </button>
-                      <button
-                        onClick={() => void keep(c.id, "alt")}
-                        className="rounded-lg bg-[var(--accent)] px-2.5 py-1 text-xs font-medium text-white hover:opacity-90"
-                      >
-                        Use theirs
-                      </button>
-                    </div>
-                  </Td>
-                </tr>
-              ))
-            )}
           </tbody>
-        </TableShell>
+        ) : (
+          <Tbody>
+            {rows.map((c) => (
+              <tr key={c.id}>
+                <Td className="tabular-nums">
+                  <Link href={`/people/${c.id}`} className="hover:text-brand-700">
+                    {c.phone}
+                  </Link>
+                </Td>
+                <Td className="font-medium text-ink">
+                  {c.name}
+                  {c.name_edited_at && (
+                    <span className="ml-2 align-middle">
+                      <Badge tone="neutral">typed here</Badge>
+                    </span>
+                  )}
+                </Td>
+                <Td>
+                  {c.name_alt}
+                  <span className="block text-2xs text-ink-faint">{siteName(c.name_alt_source)}</span>
+                </Td>
+                <Td className="text-xs text-ink-muted">{relativeDate(c.name_conflict_at)}</Td>
+                <Td align="right">
+                  <div className="flex justify-end gap-1">
+                    <Button size="xs" variant="ghost" onClick={() => void keep(c.id, "current")}>
+                      Keep ours
+                    </Button>
+                    <Button size="xs" onClick={() => void keep(c.id, "alt")}>
+                      Use theirs
+                    </Button>
+                  </div>
+                </Td>
+              </tr>
+            ))}
+          </Tbody>
+        )}
+      </TableShell>
 
-        <div className="border-t border-[var(--line-soft)] px-5 py-4">
-          <p className="text-xs text-slate-500">
-            Whichever you keep is sent back to both sites, so the disagreement is settled everywhere rather than
-            coming back on the next sync.
-          </p>
-        </div>
-      </Card>
+      <p className="mt-3 text-xs text-ink-muted">
+        Whichever you keep is sent back to both sites, so the disagreement is settled everywhere rather than
+        coming back on the next sync.
+      </p>
     </div>
   );
 }

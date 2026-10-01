@@ -22,6 +22,13 @@
 // places the call itself either way; see the note at the top of
 // server/src/routes/crm.ts.
 //
+// MOST OF THE PEOPLE READING THIS ARE HOLDING A PHONE
+// Callers work from their own handsets, so every control here is sized for a
+// thumb rather than for a mouse: the dial button and the outcome buttons are
+// the large size, the quick-pick chips are a finger tall, and nothing on the
+// screen needs sideways scrolling at the width of a phone. A row of 12px
+// buttons is fine to click and genuinely hard to tap.
+//
 // THE REMINDER BOX
 // "I'll give on Govardhan Puja evening" is said DURING the call. If capturing
 // it means hanging up, finding the lead again and opening a separate form, it
@@ -32,8 +39,26 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiClient } from "@/lib/api";
-import { currency, dueLabel, number, relativeDate } from "@/lib/format";
-import { AlertPicker, Badge, Card, EmptyState, PageHeader, buttonPrimary, buttonSecondary, inputClass } from "@/components/ui";
+import { currency, dueLabel, istDayPlus, istInputToISO, istInstant, istWeekday, istYear, number, relativeDate } from "@/lib/format";
+import {
+  Alert,
+  AlertPicker,
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  Field,
+  Icon,
+  Input,
+  LinkButton,
+  PageHeader,
+  SegmentedControl,
+  Skeleton,
+  buttonPrimary,
+  buttonSecondary,
+  textareaClass,
+  type ButtonVariant,
+} from "@/components/ui";
 import { ALERT_OPTIONS, DEFAULT_ALERTS, cleanAlerts } from "@/lib/reminders";
 import { SendLink } from "@/components/send-link";
 import { SendQr } from "@/components/send-qr";
@@ -91,12 +116,29 @@ const WHEN_PRESETS: { label: string; days: number }[] = [
 ];
 
 function atTenAm(daysFromNow: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + daysFromNow);
   // 10am rather than the current time of day: a callback booked at 9pm should
-  // not come due at 9pm.
-  d.setHours(10, 0, 0, 0);
-  return d.toISOString();
+  // not come due at 9pm. 10am at the temple, counted off the temple's own
+  // calendar, so a caller on a laptop set to another zone books the same hour
+  // on the same day as everybody else.
+  return istInstant(istDayPlus(daysFromNow), "10:00").toISOString();
+}
+
+/**
+ * A quick-pick chip, on the same classes as the design system's AlertPicker.
+ *
+ * The chips here and the alert offsets in the reminder box are the same
+ * control doing the same job - "one of these, tapped mid-call" - so they are
+ * drawn from one description rather than two that drift. The padding is a
+ * step larger than AlertPicker's own: these are tapped with a thumb while the
+ * caller is holding a phone to their ear, and a 28px target is where mis-taps
+ * start.
+ */
+function chipClass(on: boolean): string {
+  return `inline-flex min-h-10 items-center gap-1 rounded-control border px-3 py-2 text-xs transition-colors ${
+    on
+      ? "border-brand-600 bg-brand-50 font-medium text-brand-800"
+      : "border-line-strong bg-surface text-ink-muted hover:border-brand-400 hover:bg-sunken"
+  }`;
 }
 
 /**
@@ -115,26 +157,36 @@ function atTenAm(daysFromNow: number): string {
 // default for a stage this screen has never heard of.
 const BAD_ENDINGS = ["not_interested", "invalid", "dnc"];
 
-function toneFor(d: Disposition): string {
-  if (BAD_ENDINGS.includes(d.suggests_status ?? "")) {
-    return "border-slate-200 bg-white text-slate-600 hover:bg-slate-50";
-  }
-  if (d.counts_connected) return "border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100";
-  return "border-slate-200 bg-white text-slate-700 hover:bg-slate-50";
+// Not `dangerSoft` for the bad endings: a call that ended with "please don't
+// ring again" is a perfectly good thing to record, and painting the button red
+// would make an honest answer look like a destructive one.
+function variantFor(d: Disposition): ButtonVariant {
+  if (BAD_ENDINGS.includes(d.suggests_status ?? "")) return "secondary";
+  if (d.counts_connected) return "primary";
+  return "secondary";
 }
 
-// Local datetime formatted for <input type="datetime-local">, which refuses an
-// ISO string with a timezone on it.
-function localInput(d: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+// An IST wall-clock moment formatted for <input type="datetime-local">, which
+// refuses an ISO string with a timezone on it. The hour the quick-pick buttons
+// name - "this evening 6pm" - is the hour at the temple, so the value is built
+// from the IST calendar day rather than from the device's clock.
+function istInput(daysFromNow: number, hour: number): string {
+  return `${istDayPlus(daysFromNow)}T${String(hour).padStart(2, "0")}:00`;
 }
 
 // useSearchParams needs a Suspense boundary around it, so the screen is split:
 // this wrapper reads the URL, the component below does the work.
 export default function CallingQueuePage() {
   return (
-    <Suspense fallback={<div className="max-w-4xl"><Card><div className="h-40 animate-pulse rounded bg-slate-100" /></Card></div>}>
+    <Suspense
+      fallback={
+        <div className="max-w-4xl">
+          <Card>
+            <Skeleton className="h-40 w-full" rounded="rounded-card" />
+          </Card>
+        </div>
+      }
+    >
       <CallingQueue />
     </Suspense>
   );
@@ -286,11 +338,15 @@ function CallingQueue() {
           disposition: d.slug,
           note: note.trim() || undefined,
           duration_seconds: duration ? Number(duration) * 60 : undefined,
-          next_follow_up_at: followUp ?? (customDate ? new Date(customDate).toISOString() : undefined),
+          // The picker gives a bare `YYYY-MM-DD`, which `new Date()` reads as
+          // UTC midnight - so the callback was landing at 05:30 on the chosen
+          // morning. 10am IST, the same hour the quick-pick buttons book,
+          // because a callback is a time to ring somebody.
+          next_follow_up_at: followUp ?? (customDate ? istInstant(customDate, "10:00").toISOString() : undefined),
           reminder: remWhen
             ? {
                 occasion: remOccasion.trim() || undefined,
-                due_at: new Date(remWhen).toISOString(),
+                due_at: istInputToISO(remWhen),
                 expected_amount: remAmount ? Number(remAmount) : undefined,
                 lead_times: remAlerts,
                 note: note.trim() || undefined,
@@ -442,6 +498,7 @@ function CallingQueue() {
   return (
     <div className="max-w-4xl">
       <PageHeader
+        eyebrow="Calling"
         title={listName ?? "Calling"}
         subtitle={
           done > 0
@@ -455,20 +512,20 @@ function CallingQueue() {
                 a stale "where you left off" from three weeks ago. */}
             {sessionId && (
               <>
-                <button
+                <Button
+                  variant="secondary"
                   onClick={() => void leave("pause")}
-                  className={buttonSecondary}
                   title="Keep your place. This list will be waiting when you come back, today or tomorrow."
                 >
                   Pause
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="secondary"
                   onClick={() => void leave("end")}
-                  className={buttonSecondary}
                   title="Done with this list for today. Tomorrow you start fresh."
                 >
                   Stop for today
-                </button>
+                </Button>
               </>
             )}
             <Link href="/calling/start" className={buttonSecondary}>
@@ -477,117 +534,112 @@ function CallingQueue() {
             <Link href="/calling/reminders" className={buttonSecondary}>
               Reminders
             </Link>
-            <button onClick={() => void load()} className={buttonSecondary}>
+            <Button variant="secondary" icon="refresh" onClick={() => void load()}>
               Refresh queue
-            </button>
+            </Button>
           </div>
         }
       />
 
-      {error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
-      )}
+      {error && <Alert tone="danger">{error}</Alert>}
 
       {/* ------------------------------------------- a lead has just donated */}
       {conversions.map((c) => (
-        <div
-          key={c.id}
-          className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3"
-        >
-          <p className="text-sm text-emerald-900">
+        <Alert key={c.id} tone="good">
+          <p>
             <span className="font-semibold">{c.name || c.phone}</span> donated
             {c.converted_amount ? <> {currency(Number(c.converted_amount))}</> : null}
-            {c.purpose ? <span className="text-emerald-800"> — {c.purpose}</span> : null}
-            <span className="text-emerald-700">
+            {c.purpose ? <span> — {c.purpose}</span> : null}
+            <span className="opacity-80">
               {" "}
               · {c.converted_via === "auto" ? "arrived on the site" : "recorded by hand"}
             </span>
           </p>
-          <div className="flex gap-2">
-            <Link href={`/leads/${c.id}`} className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white">
+          {/* The buttons sit under the sentence rather than beside it: at the
+              width of a phone a row of actions next to two lines of text has
+              nowhere to go but off the side of the screen. */}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Link href={`/leads/${c.id}`} className={buttonPrimary}>
               Open
             </Link>
-            <button
-              onClick={() => void dismissConversions([c.id])}
-              className="rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-xs text-emerald-800"
-            >
+            <Button variant="secondary" onClick={() => void dismissConversions([c.id])}>
               Got it
-            </button>
+            </Button>
           </div>
-        </div>
+        </Alert>
       ))}
 
       {/* -------------------------------------------- a reminder has come due */}
       {alerts.map((a) => (
-        <div
+        <Alert
           key={a.id + a.due_at}
-          className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3"
+          tone="warn"
+          title={a.occasion ? `${a.lead_name || a.lead_phone} · ${a.occasion}` : a.lead_name || a.lead_phone}
         >
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-amber-900">
-              {a.lead_name || a.lead_phone}
-              {a.occasion ? <span className="font-normal"> · {a.occasion}</span> : null}
-            </p>
-            <p className="text-sm text-amber-800">{a.title}</p>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            <a
-              href={`tel:+91${a.lead_phone}`}
-              className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white"
-            >
+          <p>{a.title}</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <LinkButton href={`tel:+91${a.lead_phone}`} variant="primary" icon="phone" className="tabular-nums">
               Call {a.lead_phone}
-            </a>
-            <button
+            </LinkButton>
+            <Button
+              variant="secondary"
               onClick={() => void apiClient.put(`/api/crm/reminders/${a.id}`, { action: "snooze", minutes: 60 }).then(() => dismissAlert(a.id))}
-              className="rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-xs text-amber-900"
             >
               In an hour
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="secondary"
+              icon="check"
               onClick={() => void apiClient.put(`/api/crm/reminders/${a.id}`, { action: "done" }).then(() => dismissAlert(a.id))}
-              className="rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-xs text-amber-900"
             >
               Done
-            </button>
+            </Button>
           </div>
-        </div>
+        </Alert>
       ))}
 
       {/* Nothing has fired yet, but something is owed today. Quieter than an
           alert, because it is not interrupting - just refusing to let a caller
           finish a run unaware that a promise falls due. */}
       {!alerts.length && dueCount > 0 && (
-        <Link
-          href="/calling/reminders"
-          className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-[var(--line-soft)] bg-white px-4 py-2.5 hover:bg-slate-50"
-        >
-          <span className="text-sm text-slate-600">
-            {dueCount} reminder{dueCount === 1 ? "" : "s"} due today or overdue
-          </span>
-          <span className="text-xs text-[var(--accent)]">See them →</span>
-        </Link>
+        <Alert tone="info">
+          {/* The link fills the banner rather than sitting at the end of the
+              sentence, so the whole strip is the tap target on a phone. */}
+          <Link href="/calling/reminders" className="flex items-center justify-between gap-3">
+            <span>
+              {dueCount} reminder{dueCount === 1 ? "" : "s"} due today or overdue
+            </span>
+            <span className="inline-flex flex-none items-center gap-1 font-medium">
+              See them
+              <Icon name="arrowRight" size={13} />
+            </span>
+          </Link>
+        </Alert>
       )}
 
       {/* Undo sits above the fold, because a misclick is noticed instantly and
           the fix has to be within reach at that moment. */}
       {lastCall && (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--line-soft)] bg-white px-4 py-2.5">
-          <p className="text-sm text-slate-600">
-            Logged <span className="font-medium text-slate-900">{lastCall.label}</span> for{" "}
-            {lastCall.lead.name || lastCall.lead.phone}
-          </p>
-          <button onClick={() => void undoLast()} className="text-sm font-medium text-[var(--accent)] hover:underline">
-            Undo <kbd className="ml-1 text-[10px] text-slate-400">U</kbd>
-          </button>
-        </div>
+        <Alert
+          tone="info"
+          action={
+            <Button variant="secondary" icon="refresh" onClick={() => void undoLast()}>
+              Undo
+              <kbd className="ml-1 text-2xs opacity-60">U</kbd>
+            </Button>
+          }
+        >
+          Logged <span className="font-medium">{lastCall.label}</span> for{" "}
+          {lastCall.lead.name || lastCall.lead.phone}
+        </Alert>
       )}
 
       {loading && !lead && (
         <Card>
           <div className="space-y-3">
-            <div className="h-6 w-48 rounded bg-slate-100 animate-pulse" />
-            <div className="h-4 w-64 rounded bg-slate-100 animate-pulse" />
-            <div className="h-24 rounded bg-slate-100 animate-pulse" />
+            <Skeleton className="h-6 w-48" />
+            <Skeleton className="h-4 w-64" />
+            <Skeleton className="h-24 w-full" rounded="rounded-card" />
           </div>
         </Card>
       )}
@@ -595,6 +647,7 @@ function CallingQueue() {
       {!loading && !lead && (
         <Card padded={false}>
           <EmptyState
+            icon="checkCircle"
             title="Nothing left to call"
             message={
               done > 0
@@ -606,9 +659,9 @@ function CallingQueue() {
             action={
               <div className="flex flex-wrap justify-center gap-2">
                 {sessionId && (
-                  <button onClick={() => void leave("end")} className={buttonPrimary}>
+                  <Button size="lg" onClick={() => void leave("end")}>
                     Finish and pick another list
-                  </button>
+                  </Button>
                 )}
                 <Link href="/leads" className={buttonSecondary}>
                   Go to leads
@@ -626,7 +679,7 @@ function CallingQueue() {
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-xl font-semibold text-slate-900 truncate">
+                  <h2 className="truncate text-xl font-semibold text-ink">
                     {lead.name || "Name not known"}
                   </h2>
                   {lead.status_label && <Badge tone="info">{lead.status_label}</Badge>}
@@ -636,7 +689,7 @@ function CallingQueue() {
                     </Badge>
                   )}
                 </div>
-                <p className="mt-1 text-sm text-slate-500">
+                <p className="mt-1 text-sm text-ink-muted">
                   {[lead.city, lead.email].filter(Boolean).join(" · ") || "No other details"}
                 </p>
                 {/* The preacher who brought this donor in. A caller who can
@@ -644,45 +697,40 @@ function CallingQueue() {
                     making a cold call, which is why this sits with the name
                     rather than buried in the record. */}
                 {lead.preacher_code && (
-                  <p className="mt-1 text-sm text-slate-700">
-                    <span className="text-slate-500">Known to:</span>{" "}
+                  <p className="mt-1 text-sm text-ink-soft">
+                    <span className="text-ink-muted">Known to:</span>{" "}
                     <span className="font-medium">{lead.preacher_name || lead.preacher_code}</span>
                   </p>
                 )}
               </div>
 
-              {/* The number, big. On a phone it dials; at a desk it copies. */}
-              <div className="flex flex-col items-end gap-1.5">
+              {/* The number, big. On a phone it dials; at a desk it copies.
+                  Full width below the name at phone size, because this is the
+                  one control on the screen that must never be missed or
+                  mis-tapped. */}
+              <div className="flex w-full flex-col items-stretch gap-1.5 sm:w-auto sm:items-end">
                 {isTouch ? (
-                  <a
+                  <LinkButton
                     href={`tel:+91${lead.phone}`}
-                    className="inline-flex items-center gap-2 rounded-xl bg-[var(--accent)] px-5 py-3 text-white font-semibold tabular-nums text-lg hover:opacity-90 transition-opacity"
+                    variant="primary"
+                    size="lg"
+                    icon="phone"
+                    className="tabular-nums text-lg"
                   >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-5 h-5">
-                      <path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z" />
-                    </svg>
                     {lead.phone}
-                  </a>
+                  </LinkButton>
                 ) : (
-                  <button
+                  <Button
+                    size="lg"
+                    icon={copied ? "check" : "copy"}
                     onClick={() => void copyNumber()}
                     title="Copy the number so you can dial it on your handset"
-                    className="inline-flex items-center gap-2 rounded-xl bg-[var(--accent)] px-5 py-3 text-white font-semibold tabular-nums text-lg hover:opacity-90 transition-opacity"
+                    className="tabular-nums text-lg"
                   >
-                    {copied ? (
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="w-5 h-5">
-                        <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    ) : (
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="w-5 h-5">
-                        <rect x="9" y="9" width="11" height="11" rx="2" />
-                        <path d="M5 15V5a2 2 0 0 1 2-2h10" strokeLinecap="round" />
-                      </svg>
-                    )}
                     {lead.phone}
-                  </button>
+                  </Button>
                 )}
-                <span className="text-[11px] text-slate-400">
+                <span className="text-2xs text-ink-faint sm:text-right">
                   {isTouch ? "Tap to dial" : copied ? "Copied — dial it on your handset" : "Click to copy · C"}
                 </span>
               </div>
@@ -690,8 +738,8 @@ function CallingQueue() {
 
             {/* ------------------------------- what they have donated before */}
             {history ? (
-              <div className="mt-4 rounded-lg bg-[var(--accent-wash)] px-4 py-3">
-                <p className="text-sm text-slate-800">
+              <div className="mt-4 rounded-card bg-brand-50 px-4 py-3">
+                <p className="text-sm text-ink-soft">
                   <span className="font-semibold">{currency(history.total)}</span> donated across{" "}
                   <span className="font-semibold">{history.count}</span> donation
                   {history.count === 1 ? "" : "s"}
@@ -700,7 +748,7 @@ function CallingQueue() {
                 {lead.person_id && (
                   <Link
                     href={`/people/${lead.person_id}`}
-                    className="text-xs text-[var(--accent)] hover:underline mt-0.5 inline-block"
+                    className="mt-0.5 inline-block text-xs font-medium text-brand-700 hover:underline"
                   >
                     See their full history
                   </Link>
@@ -711,23 +759,23 @@ function CallingQueue() {
               // caller ringing someone who has given three lakhs needs to know
               // that; kept out of every DRM total because it is not money the
               // calling raised.
-              <div className="mt-4 rounded-lg bg-[var(--accent-wash)] px-4 py-3">
-                <p className="text-sm text-slate-800">
+              <div className="mt-4 rounded-card bg-brand-50 px-4 py-3">
+                <p className="text-sm text-ink-soft">
                   <span className="font-semibold">{currency(Number(lead.external_total_donated))}</span> on record in
                   the temple accounts
                   {Number(lead.external_account_count) > 1 && (
-                    <span className="text-slate-600"> across {lead.external_account_count} accounts</span>
+                    <span className="text-ink-muted"> across {lead.external_account_count} accounts</span>
                   )}
-                  {lead.external_last_donation_at && <> · last in {new Date(lead.external_last_donation_at).getFullYear()}</>}
+                  {lead.external_last_donation_at && <> · last in {istYear(lead.external_last_donation_at)}</>}
                 </p>
-                <p className="text-[11px] text-slate-500 mt-0.5">
+                <p className="mt-0.5 text-2xs text-ink-muted">
                   From {lead.external_source || "an uploaded sheet"} — not counted in DRM&apos;s own totals.
                 </p>
               </div>
             ) : (
-              <p className="mt-4 rounded-lg bg-slate-50 px-4 py-3 text-sm text-slate-600">
+              <p className="mt-4 rounded-card bg-sunken px-4 py-3 text-sm text-ink-soft">
                 No donation on record — this is a first conversation.
-                {lead.source_detail && <span className="text-slate-500"> From: {lead.source_detail}</span>}
+                {lead.source_detail && <span className="text-ink-muted"> From: {lead.source_detail}</span>}
               </p>
             )}
 
@@ -735,14 +783,14 @@ function CallingQueue() {
             {(lead.follow_up_note || lead.remarks || lead.next_follow_up_at) && (
               <div className="mt-3 space-y-1 text-sm">
                 {lead.next_follow_up_at && (
-                  <p className="text-slate-700">
-                    <span className="text-slate-500">Promised callback:</span> {dueLabel(lead.next_follow_up_at)}
+                  <p className="text-ink-soft">
+                    <span className="text-ink-muted">Promised callback:</span> {dueLabel(lead.next_follow_up_at)}
                     {lead.follow_up_note && <> — “{lead.follow_up_note}”</>}
                   </p>
                 )}
                 {lead.remarks && (
-                  <p className="text-slate-700">
-                    <span className="text-slate-500">Last note:</span> “{lead.remarks}”
+                  <p className="text-ink-soft">
+                    <span className="text-ink-muted">Last note:</span> “{lead.remarks}”
                   </p>
                 )}
               </div>
@@ -768,14 +816,14 @@ function CallingQueue() {
               expectedAmount={lead.expected_amount}
               compact
             />
-            <p className="mt-2 text-[11px] text-slate-400">
+            <p className="mt-2 text-2xs text-ink-faint">
               Opens WhatsApp on this computer in their chat, with the message ready. Press send there.
             </p>
 
             {/* The QR sits with the link rather than in its own card: from the
                 caller's side "send them something" is one decision, and a
                 donor who asks for a QR has usually just been offered a link. */}
-            <div className="mt-3 border-t border-[var(--line-soft)] pt-3">
+            <div className="mt-3 border-t border-line-soft pt-3">
               <SendQr
                 leadId={lead.id}
                 leadName={lead.name}
@@ -789,18 +837,26 @@ function CallingQueue() {
           <Card>
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-sm font-semibold text-slate-900">How did it go?</p>
-                <p className="text-xs text-slate-500 mt-0.5">
+                <p className="text-sm font-semibold text-ink">How did it go?</p>
+                <p className="mt-0.5 text-xs text-ink-muted">
                   One tap — or the number key beside it — logs the call and brings up the next person.
                 </p>
               </div>
-              <button
-                onClick={() => setShortcutsOn((v) => !v)}
-                title="Turn the keyboard shortcuts off if they get in the way"
-                className="text-[11px] text-slate-400 hover:text-slate-600 whitespace-nowrap"
-              >
-                shortcuts {shortcutsOn ? "on" : "off"}
-              </button>
+              {/* On/off rather than a link that says its own state: "shortcuts
+                  on" as a button left it ambiguous whether the words described
+                  the setting or what pressing it would do. */}
+              <div className="flex flex-none items-center gap-2">
+                <span className="hidden text-2xs text-ink-muted sm:inline">Shortcuts</span>
+                <SegmentedControl
+                  size="sm"
+                  options={[
+                    { value: "on", label: "On" },
+                    { value: "off", label: "Off" },
+                  ]}
+                  value={shortcutsOn ? "on" : "off"}
+                  onChange={(v) => setShortcutsOn(v === "on")}
+                />
+              </div>
             </div>
 
             {/* How much, when the outcome is that they gave.
@@ -809,145 +865,169 @@ function CallingQueue() {
                 expected to give, and the conversion is still recorded - a
                 donation with no figure beats a donation DRM denies happened,
                 which is what used to occur. */}
-            <div className="mt-4">
-              <label className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                If they gave on this call, how much?
-                <input
-                  value={donatedAmount}
-                  onChange={(e) => setDonatedAmount(e.target.value.replace(/\D/g, ""))}
-                  placeholder="₹ optional"
-                  inputMode="numeric"
-                  className={`${inputClass} w-32 text-sm tabular-nums`}
-                />
-                {!!donatedAmount && (
-                  <span className="text-[11px] text-emerald-700">
-                    recorded when you pick an outcome that means they donated
-                  </span>
-                )}
-              </label>
+            <div className="mt-4 flex flex-wrap items-end gap-2">
+              <Field label="If they gave on this call, how much?" htmlFor="donated-amount">
+                {/* The box is narrow, the label is not: sizing the Field
+                    itself would wrap "how much?" onto a third line at phone
+                    width, so the width goes on the input's own box. */}
+                <div className="w-40">
+                  <Input
+                    id="donated-amount"
+                    value={donatedAmount}
+                    onChange={(e) => setDonatedAmount(e.target.value.replace(/\D/g, ""))}
+                    placeholder="₹ optional"
+                    inputMode="numeric"
+                    className="tabular-nums"
+                  />
+                </div>
+              </Field>
+              {!!donatedAmount && (
+                <span className="pb-2.5 text-2xs text-good">
+                  recorded when you pick an outcome that means they donated
+                </span>
+              )}
             </div>
 
             <div className="mt-4">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">Got through</p>
+              <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Got through</p>
+              {/* The large size, deliberately: these are the buttons the whole
+                  screen exists for, and they are pressed with a thumb while
+                  the caller is still holding the phone. */}
               <div className="flex flex-wrap gap-2">
                 {connected.map((d, i) => (
-                  <button
+                  <Button
                     key={d.slug}
+                    size="lg"
+                    variant={variantFor(d)}
                     disabled={saving}
                     onClick={() => void logCall(d)}
-                    className={`rounded-lg border px-4 py-2.5 text-sm font-medium disabled:opacity-50 transition-colors ${toneFor(d)}`}
                   >
                     {d.label}
                     {shortcutsOn && i < 9 && (
-                      <kbd className="ml-2 text-[10px] opacity-50 font-normal">{i + 1}</kbd>
+                      <kbd className="ml-2 text-2xs font-normal opacity-60">{i + 1}</kbd>
                     )}
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
 
             <div className="mt-4">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">
+              <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
                 Didn&apos;t get through
               </p>
               <div className="flex flex-wrap gap-2">
                 {unanswered.map((d, i) => {
                   const n = connected.length + i + 1;
                   return (
-                    <button
+                    <Button
                       key={d.slug}
+                      size="lg"
+                      variant="secondary"
                       disabled={saving}
                       onClick={() => void logCall(d)}
-                      className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
                     >
                       {d.label}
-                      {shortcutsOn && n <= 9 && <kbd className="ml-2 text-[10px] opacity-50 font-normal">{n}</kbd>}
-                    </button>
+                      {shortcutsOn && n <= 9 && <kbd className="ml-2 text-2xs font-normal opacity-60">{n}</kbd>}
+                    </Button>
                   );
                 })}
               </div>
-              <p className="mt-2 text-xs text-slate-500">
+              <p className="mt-2 text-xs text-ink-muted">
                 These come back round automatically — you don&apos;t need to set a date.
               </p>
             </div>
 
             {/* ------------------------------------------ the optional extras */}
-            <div className="mt-5 border-t border-[var(--line-soft)] pt-4 space-y-3">
+            <div className="mt-5 space-y-3 border-t border-line-soft pt-4">
+              {/* The raw element and the shared class string rather than
+                  <Textarea>, because the N shortcut focuses this box through a
+                  ref and the component does not take one. Same styling either
+                  way - textareaClass is what <Textarea> is built from. */}
               <textarea
                 ref={noteRef}
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
                 rows={2}
                 placeholder="What they said (optional) — press N"
-                className={`${inputClass} w-full resize-y`}
+                className={`${textareaClass} resize-y`}
               />
 
               <div>
-                <p className="text-xs text-slate-500 mb-1.5">Call back on:</p>
-                <div className="flex flex-wrap gap-1.5">
+                <p className="mb-1.5 text-xs text-ink-muted">Call back on:</p>
+                <div className="flex flex-wrap items-center gap-1.5">
                   {WHEN_PRESETS.map((p) => {
                     const iso = atTenAm(p.days);
                     const active = followUp === iso;
                     return (
                       <button
                         key={p.label}
+                        type="button"
+                        aria-pressed={active}
                         onClick={() => {
                           setFollowUp(active ? null : iso);
                           setCustomDate("");
                         }}
-                        className={`rounded-lg px-3 py-1.5 text-xs font-medium border transition-colors ${
-                          active
-                            ? "border-[var(--accent)] bg-[var(--accent-wash)] text-[var(--accent)]"
-                            : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                        }`}
+                        className={chipClass(active)}
                       >
+                        {active && <Icon name="check" size={11} />}
                         {p.label}
                       </button>
                     );
                   })}
-                  <input
-                    type="date"
-                    value={customDate}
-                    onChange={(e) => {
-                      setCustomDate(e.target.value);
-                      setFollowUp(null);
-                    }}
-                    className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-slate-600"
-                  />
+                  {/* Boxed rather than given a width class: the shared input
+                      style is w-full, and a second width utility beside it is
+                      a coin-toss over which one CSS applies. */}
+                  <div className="w-44">
+                    <Input
+                      type="date"
+                      value={customDate}
+                      onChange={(e) => {
+                        setCustomDate(e.target.value);
+                        setFollowUp(null);
+                      }}
+                      aria-label="Call back on another date"
+                    />
+                  </div>
                 </div>
               </div>
 
               {/* ------------------------------------------ the reminder box */}
               {remOpen ? (
-                <div className="rounded-lg border border-[var(--accent)]/30 bg-[var(--accent-wash)]/40 p-3">
+                <div className="rounded-card border border-brand-200 bg-brand-50 p-3">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs font-semibold text-slate-800">They named a moment</p>
-                    <button onClick={() => { setRemOpen(false); setRemWhen(""); }} className="text-xs text-slate-500 hover:text-slate-700">
+                    <p className="text-xs font-semibold text-ink-soft">They named a moment</p>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      icon="x"
+                      onClick={() => { setRemOpen(false); setRemWhen(""); }}
+                    >
                       Remove
-                    </button>
+                    </Button>
                   </div>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
+                  <p className="mt-0.5 text-2xs text-ink-muted">
                     A promise the donor made at a moment they chose. Pick when it should reach you.
                   </p>
                   <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                    <input
+                    <Input
                       value={remOccasion}
                       onChange={(e) => setRemOccasion(e.target.value)}
                       placeholder="Occasion — Govardhan Puja"
-                      className={`${inputClass} w-full text-sm`}
+                      aria-label="Occasion"
                     />
-                    <input
+                    <Input
                       type="datetime-local"
                       value={remWhen}
                       onChange={(e) => setRemWhen(e.target.value)}
-                      className={`${inputClass} w-full text-sm`}
+                      aria-label="When to remind you"
                     />
-                    <input
+                    <Input
                       type="number"
                       value={remAmount}
                       onChange={(e) => setRemAmount(e.target.value)}
                       placeholder="₹ they said"
-                      className={`${inputClass} w-full text-sm`}
+                      aria-label="Amount they said"
+                      className="tabular-nums"
                     />
                   </div>
                   <div className="mt-2">
@@ -962,17 +1042,13 @@ function CallingQueue() {
                     {[
                       { label: "This evening 6pm", h: 18, d: 0 },
                       { label: "Tomorrow 10am", h: 10, d: 1 },
-                      { label: "Saturday 10am", h: 10, d: (6 - new Date().getDay() + 7) % 7 || 7 },
+                      { label: "Saturday 10am", h: 10, d: (6 - istWeekday() + 7) % 7 || 7 },
                     ].map((p) => (
                       <button
                         key={p.label}
-                        onClick={() => {
-                          const d = new Date();
-                          d.setDate(d.getDate() + p.d);
-                          d.setHours(p.h, 0, 0, 0);
-                          setRemWhen(localInput(d));
-                        }}
-                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                        type="button"
+                        onClick={() => setRemWhen(istInput(p.d, p.h))}
+                        className={chipClass(remWhen === istInput(p.d, p.h))}
                       >
                         {p.label}
                       </button>
@@ -980,49 +1056,62 @@ function CallingQueue() {
                   </div>
                 </div>
               ) : (
+                /* A plain button rather than <Button>: every button in the
+                   system is whitespace-nowrap so a row of them stays aligned,
+                   and this label is a sentence - at the width of a phone it
+                   has to be allowed to wrap rather than push the card
+                   sideways. */
                 <button
+                  type="button"
                   onClick={() => setRemOpen(true)}
-                  className="text-xs text-[var(--accent)] hover:underline underline-offset-2"
+                  className="inline-flex items-start gap-1.5 text-left text-xs font-medium text-brand-700 underline-offset-2 hover:underline"
                 >
-                  + They said they&apos;ll donate at a particular time — remind me <kbd className="text-[10px] text-slate-400">R</kbd>
+                  <Icon name="bell" size={13} className="mt-0.5" />
+                  <span>
+                    They said they&apos;ll donate at a particular time — remind me
+                    <kbd className="ml-1 text-2xs text-ink-faint">R</kbd>
+                  </span>
                 </button>
               )}
 
               {showMore ? (
-                <div className="flex items-center gap-2">
-                  <label className="text-xs text-slate-500">Roughly how long, in minutes</label>
-                  <input
-                    type="number"
-                    min={0}
-                    value={duration}
-                    onChange={(e) => setDuration(e.target.value)}
-                    className="w-20 rounded-lg border border-slate-200 px-2 py-1 text-sm tabular-nums"
-                  />
-                  <span className="text-xs text-slate-400">Self-reported — nothing is timing the call</span>
+                <div className="flex flex-wrap items-end gap-2">
+                  <Field label="Roughly how long, in minutes" htmlFor="call-minutes">
+                    <div className="w-28">
+                      <Input
+                        id="call-minutes"
+                        type="number"
+                        min={0}
+                        value={duration}
+                        onChange={(e) => setDuration(e.target.value)}
+                        className="tabular-nums"
+                      />
+                    </div>
+                  </Field>
+                  <span className="pb-2.5 text-xs text-ink-faint">Self-reported — nothing is timing the call</span>
                 </div>
               ) : (
-                <button
-                  onClick={() => setShowMore(true)}
-                  className="block text-xs text-slate-500 hover:text-slate-700 underline underline-offset-2"
-                >
+                <Button size="sm" variant="ghost" icon="clock" onClick={() => setShowMore(true)}>
                   Add call length
-                </button>
+                </Button>
               )}
             </div>
           </Card>
 
           {/* -------------------------------------------------------- skip it */}
-          <div className="flex items-center justify-between">
-            <button
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Button
+              variant="secondary"
+              iconRight="arrowRight"
               onClick={() => {
                 setQueue((q) => q.slice(1));
                 reset();
               }}
-              className="text-sm text-slate-500 hover:text-slate-700"
             >
-              Skip for now <kbd className="text-[10px] text-slate-400">S</kbd> →
-            </button>
-            <Link href={`/leads/${lead.id}`} className="text-sm text-[var(--accent)] hover:underline">
+              Skip for now
+              <kbd className="ml-1 text-2xs opacity-60">S</kbd>
+            </Button>
+            <Link href={`/leads/${lead.id}`} className={buttonSecondary}>
               Open full record
             </Link>
           </div>
@@ -1030,12 +1119,12 @@ function CallingQueue() {
           {/* Who is coming up, so the caller can see the run ahead of them. */}
           {queue.length > 1 && (
             <Card>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">Up next</p>
-              <ul className="divide-y divide-slate-100">
+              <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Up next</p>
+              <ul className="divide-y divide-line-soft">
                 {queue.slice(1, 6).map((l) => (
-                  <li key={l.id} className="py-2 flex items-center justify-between gap-3 text-sm">
-                    <span className="truncate text-slate-700">{l.name || l.phone}</span>
-                    <span className="text-xs text-slate-400 whitespace-nowrap">
+                  <li key={l.id} className="flex items-center justify-between gap-3 py-2 text-sm">
+                    <span className="truncate text-ink-soft">{l.name || l.phone}</span>
+                    <span className="whitespace-nowrap text-xs text-ink-faint">
                       {l.next_follow_up_at ? dueLabel(l.next_follow_up_at) : "never called"}
                     </span>
                   </li>

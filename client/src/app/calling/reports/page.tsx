@@ -15,7 +15,24 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiClient } from "@/lib/api";
 import { currency, number, shortDate } from "@/lib/format";
-import { Badge, Card, CardHeader, EmptyState, PageHeader, TableShell, Td, Th, buttonSecondary } from "@/components/ui";
+import {
+  Alert,
+  Badge,
+  Card,
+  CardHeader,
+  EmptyState,
+  Field,
+  PageHeader,
+  SegmentedControl,
+  SkeletonRows,
+  TableShell,
+  Tbody,
+  Td,
+  Th,
+  Thead,
+  Toolbar,
+} from "@/components/ui";
+import { ExportButton } from "@/components/export-button";
 
 const PRESETS = [
   { key: "week", label: "7 days" },
@@ -68,10 +85,10 @@ interface FollowUpRow {
 }
 
 const BY_OPTIONS = [
-  { key: "source", label: "Where they came from" },
-  { key: "source_detail", label: "Which list" },
-  { key: "assigned_to", label: "Which caller" },
-  { key: "status", label: "Stage" },
+  { value: "source", label: "Where they came from" },
+  { value: "source_detail", label: "Which list" },
+  { value: "assigned_to", label: "Which caller" },
+  { value: "status", label: "Stage" },
 ];
 
 // The conversion table groups by a raw column, so a source arrives as its
@@ -103,13 +120,31 @@ export default function CallingReportsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * The period, described once.
+   *
+   * The caller report on screen and the caller-performance download both read
+   * this. A second builder is how a download of "7 days" arrives holding the
+   * month — and a report is the thing that gets forwarded to someone who never
+   * saw which period was selected.
+   */
+  const filterParams = useCallback(() => {
+    return new URLSearchParams({ preset });
+  }, [preset]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      // The conversion report is the one report that takes a grouping as well
+      // as the period, so its query is the shared one with `by` added rather
+      // than a second description of the period.
+      const conversionParams = new URLSearchParams(filterParams());
+      conversionParams.set("by", by);
+
       const [c, k, v, f] = await Promise.all([
-        apiClient.get<{ callers: Caller[] }>(`/api/crm/reports/callers?preset=${preset}`),
-        apiClient.get<CallReport>(`/api/crm/reports/calls?preset=${preset}`),
-        apiClient.get<{ rows: ConversionRow[] }>(`/api/crm/reports/conversion?preset=${preset}&by=${by}`),
+        apiClient.get<{ callers: Caller[] }>(`/api/crm/reports/callers?${filterParams()}`),
+        apiClient.get<CallReport>(`/api/crm/reports/calls?${filterParams()}`),
+        apiClient.get<{ rows: ConversionRow[] }>(`/api/crm/reports/conversion?${conversionParams}`),
         apiClient.get<{ rows: FollowUpRow[] }>(`/api/crm/reports/follow-ups`),
       ]);
       setCallers(c.callers);
@@ -122,7 +157,7 @@ export default function CallingReportsPage() {
     } finally {
       setLoading(false);
     }
-  }, [preset, by]);
+  }, [filterParams, by]);
 
   useEffect(() => {
     void load();
@@ -135,86 +170,96 @@ export default function CallingReportsPage() {
 
   return (
     <div>
-      <PageHeader title="Calling reports" subtitle="Who called, what happened, and what it was worth" />
+      <PageHeader
+        eyebrow="Calling"
+        title="Calling reports"
+        subtitle="Who called, what happened, and what it was worth"
+        actions={
+          <ExportButton
+            path="/api/crm/reports/callers/export"
+            params={filterParams()}
+            filename="caller-performance"
+            hint="Every caller's figures for the period on screen"
+          />
+        }
+      />
 
-      <div className="mb-5 flex flex-wrap gap-1.5">
-        {PRESETS.map((p) => (
-          <button
-            key={p.key}
-            onClick={() => setPreset(p.key)}
-            className={`rounded-lg px-3 py-1.5 text-sm font-medium border transition-colors ${
-              preset === p.key
-                ? "border-[var(--accent)] bg-[var(--accent-wash)] text-[var(--accent)]"
-                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-            }`}
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
+      <Toolbar>
+        <Field label="Period">
+          <SegmentedControl
+            options={PRESETS.map((p) => ({ value: p.key, label: p.label }))}
+            value={preset}
+            onChange={setPreset}
+          />
+        </Field>
+      </Toolbar>
 
-      {error && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}
+      {error && <Alert tone="danger">{error}</Alert>}
 
       {calls && calls.totals.made > 0 && calls.totals.measured === 0 && (
-        <p className="mb-5 rounded-lg bg-slate-50 px-4 py-3 text-xs text-slate-500">
-          <strong className="font-medium text-slate-700">Read these as reported, not measured.</strong> Calls are made
-          from callers&apos; own phones and logged here afterwards, so the counts, the connected split and the call
-          lengths are what callers recorded — a call nobody logs does not appear at all. These become measured figures
-          the day a cloud telephony provider is connected.
-        </p>
+        <Alert tone="info" title="Read these as reported, not measured.">
+          Calls are made from callers&apos; own phones and logged here afterwards, so the counts, the connected split
+          and the call lengths are what callers recorded — a call nobody logs does not appear at all. These become
+          measured figures the day a cloud telephony provider is connected.
+        </Alert>
       )}
 
       <div className="space-y-6">
         {/* ------------------------------------------------------- callers */}
-        <Card padded={false}>
-          <div className="px-5 pt-5">
-            <CardHeader title="Caller activity" subtitle="Conversions are credited to whoever the lead was assigned to when the donation arrived" />
-          </div>
+        <section>
+          <CardHeader
+            title="Caller activity"
+            subtitle="Conversions are credited to whoever the lead was assigned to when the donation arrived"
+          />
           <TableShell>
-            <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
-              <tr>
-                <Th>Caller</Th>
-                <Th align="right">Calls</Th>
-                <Th align="right">Got through</Th>
-                <Th align="right">People</Th>
-                <Th align="right">On the phone</Th>
-                <Th align="right">Days active</Th>
-                <Th align="right">Gave</Th>
-                <Th align="right">Raised</Th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {loading ? (
-                <tr><td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-400">Loading…</td></tr>
-              ) : !callers.length ? (
-                <tr><td colSpan={8}><EmptyState title="No calls in this period" message="Try a wider date range." /></td></tr>
-              ) : (
-                callers.map((c) => (
-                  <tr key={c.id ?? "unassigned"} className="hover:bg-slate-50/60">
-                    <Td className="font-medium text-slate-900">
-                      {c.name}
-                      {c.id === null && <span className="ml-1 text-xs font-normal text-slate-400">(no caller recorded)</span>}
-                    </Td>
-                    <Td align="right" className="tabular-nums">{number(c.calls)}</Td>
-                    <Td align="right" className="tabular-nums">
-                      {number(c.connected)}
-                      {c.calls > 0 && (
-                        <span className="ml-1 text-xs text-slate-400">{Math.round((c.connected / c.calls) * 100)}%</span>
-                      )}
-                    </Td>
-                    <Td align="right" className="tabular-nums">{number(c.leads_touched)}</Td>
-                    <Td align="right" className="tabular-nums text-slate-600">
-                      {c.with_duration ? hhmm(c.total_seconds) : <span className="text-slate-300">—</span>}
-                    </Td>
-                    <Td align="right" className="tabular-nums text-slate-600">{number(c.active_days)}</Td>
-                    <Td align="right" className="tabular-nums">{number(c.conversions)}</Td>
-                    <Td align="right" className="tabular-nums font-medium text-slate-900">{currency(Number(c.raised))}</Td>
+            <Thead>
+              <Th>Caller</Th>
+              <Th align="right">Calls</Th>
+              <Th align="right">Got through</Th>
+              <Th align="right">People</Th>
+              <Th align="right">On the phone</Th>
+              <Th align="right">Days active</Th>
+              <Th align="right">Gave</Th>
+              <Th align="right">Raised</Th>
+            </Thead>
+            {loading ? (
+              <SkeletonRows rows={6} cols={8} />
+            ) : (
+              <Tbody>
+                {!callers.length ? (
+                  <tr>
+                    <td colSpan={8}>
+                      <EmptyState title="No calls in this period" message="Try a wider date range." />
+                    </td>
                   </tr>
-                ))
-              )}
-            </tbody>
+                ) : (
+                  callers.map((c) => (
+                    <tr key={c.id ?? "unassigned"}>
+                      <Td className="font-medium text-ink">
+                        {c.name}
+                        {c.id === null && <span className="ml-1 text-xs font-normal text-ink-faint">(no caller recorded)</span>}
+                      </Td>
+                      <Td align="right" className="tabular-nums">{number(c.calls)}</Td>
+                      <Td align="right" className="tabular-nums">
+                        {number(c.connected)}
+                        {c.calls > 0 && (
+                          <span className="ml-1 text-xs text-ink-faint">{Math.round((c.connected / c.calls) * 100)}%</span>
+                        )}
+                      </Td>
+                      <Td align="right" className="tabular-nums">{number(c.leads_touched)}</Td>
+                      <Td align="right" className="tabular-nums">
+                        {c.with_duration ? hhmm(c.total_seconds) : <span className="text-ink-faint">—</span>}
+                      </Td>
+                      <Td align="right" className="tabular-nums">{number(c.active_days)}</Td>
+                      <Td align="right" className="tabular-nums">{number(c.conversions)}</Td>
+                      <Td align="right" className="font-medium tabular-nums text-ink">{currency(Number(c.raised))}</Td>
+                    </tr>
+                  ))
+                )}
+              </Tbody>
+            )}
           </TableShell>
-        </Card>
+        </section>
 
         {/* --------------------------------------------------------- calls */}
         <div className="grid gap-5 lg:grid-cols-2">
@@ -230,16 +275,16 @@ export default function CallingReportsPage() {
                     <li key={d.disposition}>
                       <div className="flex items-baseline justify-between gap-3 text-sm">
                         <span className="flex items-center gap-1.5 truncate">
-                          <span className="text-slate-700">{d.label}</span>
+                          <span className="text-ink-soft">{d.label}</span>
                           {d.counts_connected && <Badge tone="good">got through</Badge>}
                         </span>
-                        <span className="tabular-nums text-slate-900 whitespace-nowrap">
-                          {number(d.n)} <span className="text-xs text-slate-400">{pct.toFixed(0)}%</span>
+                        <span className="whitespace-nowrap tabular-nums text-ink">
+                          {number(d.n)} <span className="text-xs text-ink-faint">{pct.toFixed(0)}%</span>
                         </span>
                       </div>
-                      <div className="mt-1 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-sunken">
                         <div
-                          className={`h-full rounded-full ${d.counts_connected ? "bg-emerald-500" : "bg-slate-300"}`}
+                          className={`h-full rounded-full ${d.counts_connected ? "bg-good" : "bg-line"}`}
                           style={{ width: `${pct}%` }}
                         />
                       </div>
@@ -253,6 +298,11 @@ export default function CallingReportsPage() {
           <Card>
             <CardHeader
               title="When calls connect"
+              // The hour is the server's, and the server now groups calls by
+              // the hour at the temple rather than by UTC. It used to report
+              // UTC, so the 10am peak every caller could feel was printed here
+              // as "around 4:00" and read as nonsense. Nothing on this screen
+              // shifts the number any further.
               subtitle={
                 peakHour && peakHour.calls >= 8
                   ? `Best so far: around ${peakHour.hour}:00, ${Math.round((peakHour.connected / peakHour.calls) * 100)}% got through`
@@ -275,16 +325,16 @@ export default function CallingReportsPage() {
                   return (
                     <div
                       key={h}
-                      className="flex-1 flex flex-col justify-end items-center gap-0.5"
+                      className="flex flex-1 flex-col items-center justify-end gap-0.5"
                       title={`${h}:00 — ${total} call${total === 1 ? "" : "s"}, ${got} got through`}
                     >
-                      <div className="w-full bg-slate-200 rounded-t" style={{ height: barPx }}>
+                      <div className="w-full rounded-t bg-line" style={{ height: barPx }}>
                         <div
-                          className="w-full bg-emerald-500 rounded-t"
+                          className="w-full rounded-t bg-good"
                           style={{ height: total ? Math.round(barPx * (got / total)) : 0 }}
                         />
                       </div>
-                      {h % 6 === 0 && <span className="text-[9px] text-slate-400">{h}</span>}
+                      {h % 6 === 0 && <span className="text-2xs text-ink-faint">{h}</span>}
                     </div>
                   );
                 })}
@@ -294,104 +344,92 @@ export default function CallingReportsPage() {
         </div>
 
         {/* ---------------------------------------------------- conversion */}
-        <Card padded={false}>
-          <div className="px-5 pt-5">
-            <CardHeader
-              title="What converted"
-              subtitle="Only donations that actually arrived after the lead was created — not a caller ticking a box"
-              action={
-                <div className="flex gap-1">
-                  {BY_OPTIONS.map((o) => (
-                    <button
-                      key={o.key}
-                      onClick={() => setBy(o.key)}
-                      className={`rounded px-2 py-1 text-xs font-medium ${
-                        by === o.key ? "bg-[var(--accent-wash)] text-[var(--accent)]" : "text-slate-500 hover:bg-slate-100"
-                      }`}
-                    >
-                      {o.label}
-                    </button>
-                  ))}
-                </div>
-              }
-            />
-          </div>
+        <section>
+          <CardHeader
+            title="What converted"
+            subtitle="Only donations that actually arrived after the lead was created — not a caller ticking a box"
+            action={
+              <SegmentedControl size="sm" options={BY_OPTIONS} value={by} onChange={setBy} />
+            }
+          />
           <TableShell>
-            <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
-              <tr>
-                <Th>Group</Th>
-                <Th align="right">Leads</Th>
-                <Th align="right">Gave</Th>
-                <Th align="right">Rate</Th>
-                <Th align="right">Raised</Th>
-                <Th align="right">Per lead</Th>
-                <Th align="right">Avg attempts</Th>
-                <Th align="right">Still hoped for</Th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
+            <Thead>
+              <Th>Group</Th>
+              <Th align="right">Leads</Th>
+              <Th align="right">Gave</Th>
+              <Th align="right">Rate</Th>
+              <Th align="right">Raised</Th>
+              <Th align="right">Per lead</Th>
+              <Th align="right">Avg attempts</Th>
+              <Th align="right">Still hoped for</Th>
+            </Thead>
+            <Tbody>
               {!conversion.length ? (
-                <tr><td colSpan={8}><EmptyState title="No leads in this period" message="Try a wider date range." /></td></tr>
+                <tr>
+                  <td colSpan={8}>
+                    <EmptyState title="No leads in this period" message="Try a wider date range." />
+                  </td>
+                </tr>
               ) : (
                 conversion.map((r) => (
-                  <tr key={r.bucket} className="hover:bg-slate-50/60">
-                    <Td className="font-medium text-slate-900">{BUCKET_LABELS[r.bucket] ?? r.bucket}</Td>
+                  <tr key={r.bucket}>
+                    <Td className="font-medium text-ink">{BUCKET_LABELS[r.bucket] ?? r.bucket}</Td>
                     <Td align="right" className="tabular-nums">{number(r.leads)}</Td>
                     <Td align="right" className="tabular-nums">{number(r.conversions)}</Td>
                     <Td align="right" className="tabular-nums">
-                      <span className={r.rate >= 10 ? "text-emerald-700 font-medium" : "text-slate-600"}>{r.rate}%</span>
+                      <span className={r.rate >= 10 ? "font-medium text-good" : ""}>{r.rate}%</span>
                     </Td>
-                    <Td align="right" className="tabular-nums font-medium text-slate-900">{currency(Number(r.raised))}</Td>
-                    <Td align="right" className="tabular-nums text-slate-600">{currency(r.value_per_lead)}</Td>
-                    <Td align="right" className="tabular-nums text-slate-600">{r.avg_attempts}</Td>
-                    <Td align="right" className="tabular-nums text-slate-500">{currency(Number(r.pipeline))}</Td>
+                    <Td align="right" className="font-medium tabular-nums text-ink">{currency(Number(r.raised))}</Td>
+                    <Td align="right" className="tabular-nums">{currency(r.value_per_lead)}</Td>
+                    <Td align="right" className="tabular-nums">{r.avg_attempts}</Td>
+                    <Td align="right" className="tabular-nums text-ink-muted">{currency(Number(r.pipeline))}</Td>
                   </tr>
                 ))
               )}
-            </tbody>
+            </Tbody>
           </TableShell>
-        </Card>
+        </section>
 
         {/* ----------------------------------------------------- follow-ups */}
-        <Card padded={false}>
-          <div className="px-5 pt-5">
-            <CardHeader title="Promises outstanding" subtitle="Current state, not affected by the date filter above" />
-          </div>
+        <section>
+          <CardHeader title="Promises outstanding" subtitle="Current state, not affected by the date filter above" />
           <TableShell>
-            <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
-              <tr>
-                <Th>Caller</Th>
-                <Th align="right">Over a week late</Th>
-                <Th align="right">Late this week</Th>
-                <Th align="right">Due today</Th>
-                <Th align="right">Coming up</Th>
-                <Th align="right">No date set</Th>
-                <Th>Oldest owed</Th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
+            <Thead>
+              <Th>Caller</Th>
+              <Th align="right">Over a week late</Th>
+              <Th align="right">Late this week</Th>
+              <Th align="right">Due today</Th>
+              <Th align="right">Coming up</Th>
+              <Th align="right">No date set</Th>
+              <Th>Oldest owed</Th>
+            </Thead>
+            <Tbody>
               {!followUps.length ? (
-                <tr><td colSpan={7}><EmptyState title="Nothing outstanding" message="No open leads have a callback booked." /></td></tr>
+                <tr>
+                  <td colSpan={7}>
+                    <EmptyState title="Nothing outstanding" message="No open leads have a callback booked." />
+                  </td>
+                </tr>
               ) : (
                 followUps.map((r) => (
-                  <tr key={r.caller} className="hover:bg-slate-50/60">
-                    <Td className="font-medium text-slate-900">{r.caller}</Td>
+                  <tr key={r.caller}>
+                    <Td className="font-medium text-ink">{r.caller}</Td>
                     <Td align="right" className="tabular-nums">
-                      {r.over_a_week > 0 ? <span className="text-red-700 font-medium">{number(r.over_a_week)}</span> : <span className="text-slate-300">0</span>}
+                      {r.over_a_week > 0 ? <span className="font-medium text-danger">{number(r.over_a_week)}</span> : <span className="text-ink-faint">0</span>}
                     </Td>
                     <Td align="right" className="tabular-nums">
-                      {r.this_week > 0 ? <span className="text-amber-700 font-medium">{number(r.this_week)}</span> : <span className="text-slate-300">0</span>}
+                      {r.this_week > 0 ? <span className="font-medium text-warn">{number(r.this_week)}</span> : <span className="text-ink-faint">0</span>}
                     </Td>
                     <Td align="right" className="tabular-nums">{number(r.due_today)}</Td>
-                    <Td align="right" className="tabular-nums text-slate-600">{number(r.upcoming)}</Td>
-                    <Td align="right" className="tabular-nums text-slate-500">{number(r.unscheduled)}</Td>
-                    <Td className="text-sm text-slate-500">{r.oldest_due ? shortDate(r.oldest_due) : "—"}</Td>
+                    <Td align="right" className="tabular-nums">{number(r.upcoming)}</Td>
+                    <Td align="right" className="tabular-nums text-ink-muted">{number(r.unscheduled)}</Td>
+                    <Td className="text-ink-muted">{r.oldest_due ? shortDate(r.oldest_due) : "—"}</Td>
                   </tr>
                 ))
               )}
-            </tbody>
+            </Tbody>
           </TableShell>
-        </Card>
+        </section>
       </div>
     </div>
   );

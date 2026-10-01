@@ -23,7 +23,17 @@ import { useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { currency, number, relativeDate } from "@/lib/format";
-import { Card, EmptyState, PageHeader, buttonPrimary, buttonSecondary } from "@/components/ui";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  PageHeader,
+  Skeleton,
+  buttonPrimary,
+  buttonSecondary,
+} from "@/components/ui";
 
 interface CallingList {
   id: string;
@@ -132,6 +142,7 @@ export default function StartCallingPage() {
   return (
     <div>
       <PageHeader
+        eyebrow="Overview"
         title={user?.name ? `Ready when you are, ${user.name.split(" ")[0]}` : "Start calling"}
         subtitle="Pick a list. You can stop whenever you like and pick up from the same place."
         actions={
@@ -146,22 +157,20 @@ export default function StartCallingPage() {
         }
       />
 
-      {error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
-      )}
+      {error && <Alert tone="danger">{error}</Alert>}
 
       {/* ------------------------------------------------------------ resume */}
       {current && (
-        <Card className="mb-5 border-[var(--accent)]/40 bg-[var(--accent-wash)]">
+        <Card tone="brand" className="mb-5">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="min-w-0">
-              <p className="text-xs font-semibold uppercase tracking-wider text-[var(--accent-ink)]">
+              <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-brand-700">
                 Where you left off
               </p>
-              <p className="mt-1 text-lg font-semibold text-slate-900">
+              <p className="mt-1 text-lg font-semibold text-ink">
                 {current.list_name || "Everything"}
               </p>
-              <p className="mt-0.5 text-sm text-slate-600">
+              <p className="mt-0.5 text-sm text-ink-soft">
                 {number(current.calls_logged)} call{current.calls_logged === 1 ? "" : "s"} logged
                 {current.connected > 0 && ` · ${number(current.connected)} got through`}
                 {" · last "}
@@ -169,14 +178,25 @@ export default function StartCallingPage() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button
+              {/* The one thing this screen exists to offer, at the size that
+                  says so — a caller coming back from lunch should not have to
+                  hunt for it among four same-sized buttons. */}
+              <Button
+                size="lg"
+                icon="phoneOutgoing"
                 onClick={() => void start(current.list_id)}
                 disabled={starting !== null}
-                className={buttonPrimary}
+                // Spins only for the run it actually started: `start` keys the
+                // flag by list id, with "all" standing in for the global queue,
+                // so matching on that is what stops every button on the screen
+                // spinning when one of them is pressed.
+                loading={starting === (current.list_id ?? "all")}
               >
                 Continue
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="secondary"
+                size="lg"
                 onClick={async () => {
                   try {
                     await apiClient.post(`/api/crm/sessions/${current.id}/end`, {});
@@ -185,10 +205,9 @@ export default function StartCallingPage() {
                     setError(e instanceof Error ? e.message : "Could not finish that");
                   }
                 }}
-                className={buttonSecondary}
               >
                 Finish it
-              </button>
+              </Button>
             </div>
           </div>
         </Card>
@@ -198,9 +217,9 @@ export default function StartCallingPage() {
         <div className="grid gap-3 sm:grid-cols-2">
           {[0, 1, 2, 3].map((i) => (
             <Card key={i}>
-              <div className="h-4 w-2/5 rounded bg-slate-100" />
-              <div className="mt-2 h-3 w-3/5 rounded bg-slate-50" />
-              <div className="mt-4 h-1.5 w-full rounded-full bg-slate-100" />
+              <Skeleton className="h-4 w-2/5" />
+              <Skeleton className="mt-2 h-3 w-3/5" />
+              <Skeleton rounded="rounded-pill" className="mt-4 h-1.5 w-full" />
             </Card>
           ))}
         </div>
@@ -208,7 +227,7 @@ export default function StartCallingPage() {
         <>
           {assigned.length > 0 && (
             <section className="mb-6">
-              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+              <h2 className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
                 Given to you
               </h2>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -220,13 +239,14 @@ export default function StartCallingPage() {
           )}
 
           <section className="mb-6">
-            <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+            <h2 className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
               {assigned.length ? "Other lists" : "Lists"}
             </h2>
 
             {!others.length && !assigned.length ? (
               <Card>
                 <EmptyState
+                  icon="list"
                   title="No lists yet"
                   message="A list is made every time you apply an uploaded sheet. You can also build one by hand from a tag, a preacher or a city."
                   action={
@@ -250,24 +270,26 @@ export default function StartCallingPage() {
               still the right answer on a quiet day when the follow-ups matter
               more than any one sheet. */}
           <section>
-            <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+            <h2 className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
               Or call everyone
             </h2>
             <Card className="flex flex-wrap items-center justify-between gap-4">
               <div>
-                <p className="font-medium text-slate-900">Everything that is due</p>
-                <p className="mt-0.5 text-sm text-slate-600">
+                <p className="font-medium text-ink">Everything that is due</p>
+                <p className="mt-0.5 text-sm text-ink-soft">
                   Every lead of yours across all lists, most overdue first.
                   {everything !== null && ` ${number(everything)} ready now.`}
                 </p>
               </div>
-              <button
+              <Button
+                variant="secondary"
+                size="lg"
                 onClick={() => void start(null)}
                 disabled={starting !== null}
-                className={buttonSecondary}
+                loading={starting === "all"}
               >
                 {starting === "all" ? "Starting…" : "Start"}
-              </button>
+              </Button>
             </Card>
           </section>
         </>
@@ -296,52 +318,46 @@ function ListCard({
     <Card className={done ? "opacity-70" : undefined}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="font-medium text-slate-900 truncate">{list.name}</p>
-          {detail && <p className="mt-0.5 text-xs text-slate-500 truncate">{detail}</p>}
+          <p className="truncate font-medium text-ink">{list.name}</p>
+          {detail && <p className="mt-0.5 truncate text-xs text-ink-muted">{detail}</p>}
         </div>
-        {list.session_id && (
-          <span className="flex-none rounded-full bg-[var(--accent-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--accent-ink)]">
-            In progress
-          </span>
-        )}
+        {list.session_id && <Badge tone="brand" dot>In progress</Badge>}
       </div>
 
       {list.assignment_note && (
-        <p className="mt-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900">{list.assignment_note}</p>
+        <Alert tone="warn" className="mt-2 mb-0">
+          {list.assignment_note}
+        </Alert>
       )}
 
       <div className="mt-3">
         <div className="flex items-baseline justify-between text-sm">
-          <span className="font-semibold text-slate-900 tabular-nums">
+          <span className="font-semibold tabular-nums text-ink">
             {done ? "All done" : `${number(list.to_call)} to call`}
           </span>
-          <span className="text-xs text-slate-500 tabular-nums">
+          <span className="text-xs tabular-nums text-ink-muted">
             {number(list.called)} of {number(list.total)} reached
           </span>
         </div>
-        <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+        <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-pill bg-sunken">
           <div
-            className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-500"
+            className="h-full rounded-pill bg-brand-600 transition-[width] duration-500"
             style={{ width: `${pct}%` }}
           />
         </div>
       </div>
 
       <div className="mt-3 flex items-center justify-between gap-2">
-        <span className="text-xs text-slate-500">
+        <span className="text-xs text-ink-muted">
           {list.converted > 0 && `${number(list.converted)} donated`}
         </span>
         <div className="flex gap-2">
-          <Link href={`/leads?list=${list.id}`} className="rounded-lg px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-50">
+          <Link href={`/leads?list=${list.id}`} className={buttonSecondary}>
             See them
           </Link>
-          <button
-            onClick={onStart}
-            disabled={starting !== null || done}
-            className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40"
-          >
+          <Button onClick={onStart} disabled={starting !== null || done} loading={starting === list.id}>
             {starting === list.id ? "Starting…" : list.session_id ? "Continue" : "Start"}
-          </button>
+          </Button>
         </div>
       </div>
     </Card>

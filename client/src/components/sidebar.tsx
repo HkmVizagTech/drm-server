@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { useCallingAlerts } from "./calling-alerts";
+import { Icon, type IconName } from "./icons";
 
 // Grouped so the nav reads as "what am I looking at" vs "what do I need to do"
 // rather than one undifferentiated list of nine links.
@@ -12,42 +13,46 @@ import { useCallingAlerts } from "./calling-alerts";
 // `roles` on a group or an item names who may see it; absent means everyone.
 // This hides what a person cannot use — the server refuses it either way, and
 // a nav full of links that answer 403 is its own kind of broken.
-type NavItem = { href: string; label: string; icon: string; roles?: string[] };
+//
+// ICONS
+// Named, not drawn. These used to be raw SVG path strings stored on each item,
+// which is why the set had drifted to three different stroke weights: a path
+// carries no weight of its own, so every renderer chose one. A name resolves
+// to a glyph in components/icons.tsx that is drawn like every other icon in
+// the product.
+export type NavItem = { href: string; label: string; icon: IconName; roles?: string[] };
+export type NavGroup = { heading: string; items: NavItem[]; roles?: string[] };
+
 const CALLING_AND_UP = ["admin", "caller"];
 
-const navGroups: { heading: string; items: NavItem[]; roles?: string[] }[] = [
+export const navGroups: NavGroup[] = [
   {
     heading: "Overview",
     items: [
       // A caller's first stop is the shift, not the money. Listed above the
       // dashboard for everyone, because on a calling day it is what the admin
       // wants too.
-      {
-        href: "/calling/start",
-        label: "Start calling",
-        icon: "M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z",
-        roles: CALLING_AND_UP,
-      },
-      { href: "/dashboard", label: "Dashboard", icon: "M3 12h4l3 8 4-16 3 8h4", roles: ["admin", "accountant", "volunteer_coordinator"] },
+      { href: "/calling/start", label: "Start calling", icon: "phoneOutgoing", roles: CALLING_AND_UP },
+      { href: "/dashboard", label: "Dashboard", icon: "home", roles: ["admin", "accountant", "volunteer_coordinator"] },
     ],
   },
   {
     heading: "Donors",
     items: [
-      { href: "/people", label: "People", icon: "M16 19v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6m13 12v-2a4 4 0 0 0-3-3.9" },
-      { href: "/people/conflicts", label: "Name mismatches", icon: "M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z", roles: ["admin"] },
-      { href: "/donations", label: "Donations", icon: "M12 2v20M17 6.5C17 4.6 14.8 3.5 12 3.5S7 4.6 7 6.5 9.2 10 12 11s5 2.1 5 4-2.2 3.5-5 3.5-5-1.6-5-3.5" },
+      { href: "/people", label: "People", icon: "users" },
+      { href: "/people/conflicts", label: "Name mismatches", icon: "alert", roles: ["admin"] },
+      { href: "/donations", label: "Donations", icon: "rupee" },
       // Where the money came from, page by page - the drill-down behind the
       // dashboard's three bucket tiles.
-      { href: "/pages", label: "Donation pages", icon: "M4 4h16v6H4zM4 14h7v6H4zM15 14h5v6h-5z", roles: ["admin", "accountant"] },
-      { href: "/subscriptions", label: "Recurring", icon: "M21 12a9 9 0 1 1-3-6.7M21 4v5h-5", roles: ["admin", "accountant"] },
+      { href: "/pages", label: "Donation pages", icon: "sheet", roles: ["admin", "accountant"] },
+      { href: "/subscriptions", label: "Recurring", icon: "refresh", roles: ["admin", "accountant"] },
     ],
   },
   {
     heading: "Fulfilment",
     roles: ["admin", "accountant", "volunteer_coordinator"],
     items: [
-      { href: "/prasadam", label: "Prasadam", icon: "M3 9h18M5 9V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v2M5 9v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9" },
+      { href: "/prasadam", label: "Prasadam", icon: "box" },
       // Seva Bookings and Events were nav entries with nothing behind them -
       // a link that opens an empty screen teaches people the app is broken.
       // The server routes stay, so the day either is actually built the link
@@ -67,39 +72,62 @@ const navGroups: { heading: string; items: NavItem[]; roles?: string[] }[] = [
       // figures to anyone who typed the URL. The endpoint now scopes itself by
       // role, so a caller opening this sees their own work and the link can be
       // theirs honestly.
-      { href: "/calling", label: "Overview", icon: "M3 3v18h18M7 15l3-4 3 3 5-7" },
+      { href: "/calling", label: "Overview", icon: "chart" },
       // Lists are the unit of work now, so they sit at the top of the group.
-      { href: "/calling/lists", label: "Lists", icon: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" },
-      { href: "/leads", label: "Leads", icon: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8M20 8v6M23 11h-6" },
-      { href: "/follow-ups", label: "Follow-ups", icon: "M12 8v4l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" },
+      { href: "/calling/lists", label: "Lists", icon: "list" },
+      { href: "/leads", label: "Leads", icon: "userPlus" },
+      { href: "/follow-ups", label: "Follow-ups", icon: "clock" },
       // Separate from follow-ups on purpose: a follow-up is the caller's own
       // working note, a reminder is a promise the donor made at a moment they
       // chose. One list for both is how the real promises get lost.
-      { href: "/calling/reminders", label: "Reminders", icon: "M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0" },
+      { href: "/calling/reminders", label: "Reminders", icon: "bell" },
       // A caller's own presets, set up before a shift rather than mid-call.
-      { href: "/calling/links", label: "My links", icon: "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" },
+      { href: "/calling/links", label: "My links", icon: "link" },
       // Donations started on the sites and never finished. High in the group
       // on purpose: it is the warmest list a caller can work, and a list
       // nobody finds is a list nobody rings.
-      { href: "/calling/pending", label: "Nearly gave", icon: "M12 8v4l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM3 3l18 18" },
-      { href: "/calling/payments", label: "QR payments", icon: "M3 11h8V3H3v8zm2-6h4v4H5V5zM3 21h8v-8H3v8zm2-6h4v4H5v-4zM13 3v8h8V3h-8zm6 6h-4V5h4v4zM13 13h2v2h-2zM17 13h2v2h-2zM15 15h2v2h-2zM13 17h2v2h-2zM17 17h2v2h-2zM19 15h2v2h-2zM19 19h2v2h-2z" },
-      { href: "/calling/uploads", label: "Uploaded sheets", icon: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" },
+      { href: "/calling/pending", label: "Nearly gave", icon: "inbox" },
+      { href: "/calling/payments", label: "QR payments", icon: "qr" },
+      { href: "/calling/uploads", label: "Uploaded sheets", icon: "upload" },
     ],
   },
   {
     heading: "Insight",
     roles: ["admin", "accountant"],
-    items: [{ href: "/reports", label: "Reports", icon: "M3 3v18h18M7 15l3-4 3 3 5-7" }],
+    items: [{ href: "/reports", label: "Reports", icon: "trendUp" }],
   },
   {
     heading: "Setup",
     roles: ["admin"],
     items: [
-      { href: "/team", label: "Team", icon: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8M23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8" },
-      { href: "/calling/settings", label: "Calling setup", icon: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" },
+      { href: "/team", label: "Team", icon: "shield" },
+      { href: "/calling/settings", label: "Calling setup", icon: "settings" },
     ],
   },
 ];
+
+/**
+ * Which nav entry a URL belongs to.
+ *
+ * Exported because the top bar builds its breadcrumb from it. Deriving the
+ * trail from the same list the sidebar renders is the only way the two can
+ * never disagree about which section a page is in.
+ *
+ * Longest match wins: /calling and /calling/lists are both prefixes of
+ * /calling/lists, and without that rule every calling screen would claim to be
+ * "Overview".
+ */
+export function navLocation(pathname: string): { group: string; item: NavItem } | null {
+  let best: { group: string; item: NavItem } | null = null;
+  for (const group of navGroups) {
+    for (const item of group.items) {
+      if (pathname === item.href || pathname.startsWith(`${item.href}/`)) {
+        if (!best || item.href.length > best.item.href.length) best = { group: group.heading, item };
+      }
+    }
+  }
+  return best;
+}
 
 export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const pathname = usePathname();
@@ -119,32 +147,55 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
     .map((g) => ({ ...g, items: g.items.filter((i) => may(i.roles)) }))
     .filter((g) => g.items.length > 0);
 
+  // ONE ITEM IS ACTIVE, NEVER TWO.
+  //
+  // The old test was `pathname === href || pathname.startsWith(href + "/")`
+  // applied to each item independently - and /calling/pending starts with
+  // /calling/, so opening "Nearly gave" lit up the Calling group's "Overview"
+  // as well. Nine of the fourteen links in this nav sit under /calling, so the
+  // nav was telling a caller they were in two places at once on most of the
+  // screens they use. navLocation resolves it by longest match, which is the
+  // same rule the breadcrumb uses - so the sidebar and the trail at the top of
+  // the page can never name different sections.
+  const activeHref = navLocation(pathname)?.item.href ?? null;
+
   return (
     // h-full, not h-screen: on a phone this renders inside a drawer that is
     // already the height of the viewport, and h-screen there would overflow
     // behind the browser chrome.
-    <aside className="w-60 flex-none h-full bg-[var(--sidebar)] border-r border-[var(--line-soft)] flex flex-col">
-      <div className="px-4 py-4 border-b border-[var(--line-soft)]">
-        <div className="flex items-center gap-2">
-          <span className="w-8 h-8 rounded-lg bg-[var(--accent)] text-white grid place-items-center text-sm font-bold flex-none">
+    <aside className="flex h-full w-64 flex-none flex-col border-r border-line-soft bg-sidebar">
+      <div className="border-b border-line-soft px-4 py-4">
+        <Link
+          href="/dashboard"
+          onClick={onNavigate}
+          className="flex items-center gap-2.5 rounded-control outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+        >
+          {/* A ring and an inner highlight rather than a flat square. At 36px a
+              plain filled rectangle reads as a placeholder; this reads as a
+              mark. */}
+          <span className="grid h-9 w-9 flex-none place-items-center rounded-[11px] bg-gradient-to-b from-brand-500 to-brand-700 text-base font-bold text-white shadow-button ring-1 ring-brand-800/40">
             H
           </span>
-          <div className="min-w-0">
-            <h1 className="text-sm font-semibold leading-tight truncate text-slate-900">HKM Vizag</h1>
-            <p className="text-[11px] text-slate-500 leading-tight truncate">Donor Relationship Manager</p>
-          </div>
-        </div>
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-semibold leading-tight text-ink">
+              HKM Vizag
+            </span>
+            <span className="block truncate text-2xs leading-tight text-ink-muted">
+              Donor Relationship Manager
+            </span>
+          </span>
+        </Link>
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5">
+      <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-4">
         {groups.map((group) => (
           <div key={group.heading}>
-            <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+            <p className="mb-1.5 px-3 text-2xs font-semibold uppercase tracking-[0.1em] text-ink-faint">
               {group.heading}
             </p>
             <div className="space-y-0.5">
               {group.items.map((item) => {
-                const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+                const active = item.href === activeHref;
                 return (
                   <Link
                     key={item.href}
@@ -153,28 +204,30 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
                     aria-current={active ? "page" : undefined}
                     /* Active state is a soft green fill with dark green ink -
                        #A8DF8E can't carry white text (1.5:1) but reads at 5.9:1
-                       against #1e5128. */
-                    className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
+                       against #1e5128. The rail on the left is what makes the
+                       current screen findable at a glance in a group of nine;
+                       a fill alone was too quiet against the pale green
+                       sidebar. */
+                    className={`group relative flex items-center gap-2.5 rounded-control py-2 pl-3 pr-2 text-sm transition-colors ${
                       active
-                        ? "bg-[var(--accent-soft)] text-[var(--accent-ink)] font-semibold"
-                        : "text-slate-600 hover:bg-white/70 hover:text-slate-900"
+                        ? "bg-brand-300/70 font-semibold text-brand-800"
+                        : "text-ink-soft hover:bg-white/75 hover:text-ink"
                     }`}
                   >
-                    <svg
-                      viewBox="0 0 24 24"
-                      className="w-4 h-4 flex-none"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth={1.8}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden
-                    >
-                      <path d={item.icon} />
-                    </svg>
+                    {active && (
+                      <span
+                        className="absolute inset-y-1.5 left-0 w-1 rounded-r-full bg-brand-700"
+                        aria-hidden
+                      />
+                    )}
+                    <Icon
+                      name={item.icon}
+                      size={16}
+                      className={active ? "text-brand-700" : "text-ink-muted group-hover:text-ink-soft"}
+                    />
                     <span className="truncate">{item.label}</span>
                     {item.href === "/calling/reminders" && dueCount > 0 && (
-                      <span className="ml-auto min-w-[1.25rem] px-1.5 h-5 rounded-full bg-red-600 text-white text-[10px] font-semibold grid place-items-center tabular-nums flex-none">
+                      <span className="ml-auto grid h-5 min-w-5 flex-none place-items-center rounded-full bg-danger px-1.5 text-2xs font-semibold tabular-nums text-white shadow-flat">
                         {dueCount > 99 ? "99+" : dueCount}
                       </span>
                     )}
@@ -186,15 +239,15 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
         ))}
       </nav>
 
-      <div className="p-3 border-t border-[var(--line-soft)]">
+      <div className="border-t border-line-soft p-3">
         {user && (
-          <div className="flex items-center gap-2.5 px-2 py-2 mb-1">
-            <span className="w-7 h-7 rounded-full bg-[var(--accent-soft)] text-[var(--accent-ink)] grid place-items-center text-xs font-semibold flex-none">
+          <div className="mb-1 flex items-center gap-2.5 rounded-control px-2 py-2">
+            <span className="grid h-8 w-8 flex-none place-items-center rounded-full bg-brand-300 text-xs font-semibold text-brand-800 ring-1 ring-inset ring-brand-500/30">
               {user.name?.[0]?.toUpperCase() ?? "?"}
             </span>
             <div className="min-w-0">
-              <p className="text-sm font-medium truncate leading-tight text-slate-900">{user.name}</p>
-              <p className="text-[11px] text-slate-500 capitalize leading-tight">
+              <p className="truncate text-sm font-medium leading-tight text-ink">{user.name}</p>
+              <p className="truncate text-2xs capitalize leading-tight text-ink-muted">
                 {user.role?.replace(/_/g, " ")}
               </p>
             </div>
@@ -202,8 +255,9 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
         )}
         <button
           onClick={logout}
-          className="w-full px-3 py-2 text-sm rounded-lg text-slate-600 hover:bg-white/70 hover:text-slate-900 transition-colors text-left"
+          className="flex w-full items-center gap-2.5 rounded-control px-3 py-2 text-left text-sm text-ink-muted transition-colors hover:bg-white/75 hover:text-danger"
         >
+          <Icon name="logout" size={16} />
           Sign out
         </button>
       </div>

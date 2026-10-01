@@ -1,11 +1,64 @@
 "use client";
 
-// Shared UI primitives for the admin. Every screen composes from these so
-// spacing, radii, borders and empty/loading states stay consistent instead of
-// each page inventing its own card and table styling.
+// Shared UI primitives for the admin.
+//
+// WHAT CHANGED AND WHY IT MATTERS
+//
+// This file used to export a Button as two strings:
+//
+//   export const buttonPrimary = "inline-flex items-center gap-1.5 bg-…"
+//
+// A string cannot have a loading state, cannot own its disabled behaviour,
+// cannot carry an icon, and cannot be given a variant it does not already
+// have. So whenever a screen needed a small button, or a destructive one, or
+// one with a spinner, the author wrote their own class string - and an audit
+// counted fourteen distinct hand-rolled button styles, five paddings, three
+// different hover treatments and four different disabled opacities across
+// twenty-six pages. Buttons were, in the words of the person who uses this
+// every day, "basic and hard to find".
+//
+// They are components now. The two strings are still exported, and still
+// work, but they are generated from the same source as the component - so the
+// ninety-odd places that reference them picked up the new look without being
+// touched, and the next person who needs a variant finds one instead of
+// inventing it.
+//
+// The same reasoning applies to everything added here: Tabs (three
+// incompatible implementations existed), Alert (eighteen copies of one error
+// banner), Spinner (none existed at all, so every page invented a loading
+// treatment), Checkbox, Field, Toolbar, SegmentedControl, DropdownMenu and
+// ExportButton. If a thing appears on more than one screen it belongs in this
+// file, because the alternative is not "a bit of duplication" - it is drift.
 
-import { Children, Fragment, isValidElement, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Children,
+  Fragment,
+  isValidElement,
+  ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { currency, number, percentChange } from "@/lib/format";
+import { Icon, Spinner, type IconName } from "./icons";
+
+export { Icon, Spinner };
+export type { IconName };
+
+/* ------------------------------------------------------------------ tokens */
+
+/**
+ * The focus treatment, in one place.
+ *
+ * Every interactive thing in the product gets the same ring. Written as a
+ * constant rather than a global rule because a ring needs an offset colour to
+ * sit against, and that differs between a white card and a green sidebar.
+ */
+const FOCUS =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55 focus-visible:ring-offset-2 focus-visible:ring-offset-surface";
 
 /* ---------------------------------------------------------------- surfaces */
 
@@ -14,6 +67,9 @@ export function Card({
   className = "",
   padded = true,
   id,
+  /** Lifts the card and shows a pointer, for a card that is itself a link. */
+  interactive = false,
+  tone,
 }: {
   children: ReactNode;
   className?: string;
@@ -21,11 +77,25 @@ export function Card({
   // Lets a card be an anchor target, so a link like /pages#donate scrolls
   // straight to the section instead of dumping you at the top of the screen.
   id?: string;
+  interactive?: boolean;
+  tone?: "default" | "brand" | "warn" | "danger";
 }) {
+  const tones = {
+    default: "bg-surface border-line-soft",
+    brand: "bg-brand-50 border-brand-200",
+    warn: "bg-warn-wash border-amber-200",
+    danger: "bg-danger-wash border-red-200",
+  } as const;
   return (
     <div
       id={id}
-      className={`bg-[var(--surface)] rounded-xl border border-[var(--line-soft)] shadow-sm ${padded ? "p-5" : ""} ${className}`}
+      className={`rounded-card border shadow-card ${tones[tone ?? "default"]} ${
+        padded ? "p-5" : ""
+      } ${
+        interactive
+          ? "transition-[box-shadow,border-color,transform] duration-150 hover:-translate-y-px hover:border-brand-300 hover:shadow-raised"
+          : ""
+      } ${className}`}
     >
       {children}
     </div>
@@ -36,39 +106,322 @@ export function CardHeader({
   title,
   subtitle,
   action,
+  icon,
 }: {
   title: string;
   subtitle?: string;
   action?: ReactNode;
+  icon?: IconName;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 mb-4">
-      <div>
-        <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
-        {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
+    <div className="mb-4 flex items-start justify-between gap-4">
+      <div className="flex min-w-0 items-start gap-2.5">
+        {icon && (
+          <span className="mt-0.5 grid h-7 w-7 flex-none place-items-center rounded-control bg-brand-50 text-brand-700">
+            <Icon name={icon} size={15} />
+          </span>
+        )}
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-ink">{title}</h2>
+          {subtitle && <p className="mt-0.5 text-xs text-ink-muted">{subtitle}</p>}
+        </div>
       </div>
       {action}
     </div>
   );
 }
 
+/**
+ * The top of a page.
+ *
+ * The eyebrow is new and does real work: the desktop shell has no breadcrumb
+ * trail, so on a product with nine calling screens there was nothing on the
+ * page itself saying which section you were in. One grey line costs nothing
+ * and answers it.
+ */
 export function PageHeader({
   title,
   subtitle,
   actions,
+  eyebrow,
 }: {
   title: string;
   subtitle?: string;
   actions?: ReactNode;
+  eyebrow?: string;
 }) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-slate-900">{title}</h1>
-        {subtitle && <p className="text-sm text-slate-500 mt-1">{subtitle}</p>}
+    <div className="mb-6 flex flex-wrap items-start justify-between gap-4 border-b border-line-soft pb-5">
+      <div className="min-w-0">
+        {eyebrow && (
+          <p className="mb-1 text-2xs font-semibold uppercase tracking-[0.08em] text-brand-600">
+            {eyebrow}
+          </p>
+        )}
+        <h1 className="text-2xl font-semibold tracking-tight text-ink">{title}</h1>
+        {subtitle && <p className="mt-1.5 max-w-2xl text-sm text-ink-muted">{subtitle}</p>}
       </div>
-      {actions && <div className="flex flex-wrap gap-2">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </div>
+  );
+}
+
+/**
+ * The row of filters above a list.
+ *
+ * Four different filter layouts existed - a bare flex-wrap, a Card wrapping a
+ * six-column grid, a labelled four-column grid, and a labelled flex-end row -
+ * so the same act looked different on every screen and a filter was genuinely
+ * hard to spot. This is the one shape: a sunken bar that reads as a control
+ * strip rather than as more content.
+ */
+export function Toolbar({
+  children,
+  className = "",
+  onClear,
+  activeCount = 0,
+}: {
+  children: ReactNode;
+  className?: string;
+  /** Shown only when something is actually filtered, so it is never noise. */
+  onClear?: () => void;
+  activeCount?: number;
+}) {
+  return (
+    <div
+      className={`mb-4 rounded-card border border-line-soft bg-surface p-3 shadow-flat ${className}`}
+    >
+      <div className="flex flex-wrap items-end gap-2.5">{children}</div>
+      {onClear && activeCount > 0 && (
+        <div className="mt-2.5 flex items-center gap-2 border-t border-line-soft pt-2.5">
+          <span className="text-xs text-ink-muted">
+            {activeCount} filter{activeCount === 1 ? "" : "s"} applied
+          </span>
+          <Button size="xs" variant="ghost" icon="x" onClick={onClear}>
+            Clear all
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A labelled control inside a Toolbar or a form. */
+export function Field({
+  label,
+  children,
+  hint,
+  error,
+  required,
+  className = "",
+  htmlFor,
+}: {
+  label: string;
+  children: ReactNode;
+  hint?: string;
+  error?: string;
+  required?: boolean;
+  className?: string;
+  htmlFor?: string;
+}) {
+  return (
+    <div className={`min-w-0 ${className}`}>
+      <label
+        htmlFor={htmlFor}
+        className="mb-1 block text-xs font-medium text-ink-soft"
+      >
+        {label}
+        {required && <span className="ml-0.5 text-danger">*</span>}
+      </label>
+      {children}
+      {error ? (
+        <p className="mt-1 flex items-center gap-1 text-xs text-danger">
+          <Icon name="alert" size={12} />
+          {error}
+        </p>
+      ) : (
+        hint && <p className="mt-1 text-xs text-ink-faint">{hint}</p>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ button */
+
+export type ButtonVariant =
+  | "primary"
+  | "secondary"
+  | "ghost"
+  | "danger"
+  | "dangerSoft"
+  | "whatsapp";
+export type ButtonSize = "xs" | "sm" | "md" | "lg";
+
+const SIZES: Record<ButtonSize, string> = {
+  xs: "h-7 gap-1 px-2 text-xs rounded-md",
+  sm: "h-8 gap-1.5 px-2.5 text-xs rounded-control",
+  md: "h-9.5 gap-1.5 px-3.5 text-sm rounded-control",
+  lg: "h-11 gap-2 px-5 text-base rounded-control",
+};
+
+// Every variant carries a border, even where the border matches the fill. It
+// keeps the metrics identical between a filled and an outlined button, so a
+// row of mixed buttons lines up instead of being a pixel out.
+const VARIANTS: Record<ButtonVariant, string> = {
+  primary:
+    "border border-brand-700 bg-brand-600 text-white shadow-button hover:bg-brand-700 hover:border-brand-800 active:bg-brand-800 active:shadow-none",
+  secondary:
+    "border border-line-strong bg-surface text-ink-soft shadow-flat hover:bg-sunken hover:border-brand-400 hover:text-ink active:bg-brand-50 active:shadow-none",
+  ghost:
+    "border border-transparent bg-transparent text-ink-muted hover:bg-brand-50 hover:text-brand-800 active:bg-brand-100",
+  danger:
+    "border border-red-700 bg-danger text-white shadow-button hover:bg-red-700 active:bg-red-800 active:shadow-none",
+  dangerSoft:
+    "border border-red-200 bg-surface text-danger shadow-flat hover:bg-danger-wash hover:border-red-300 active:bg-red-100",
+  // WhatsApp's own green, because a button that opens WhatsApp is recognised
+  // by that colour and nothing else. Two different hover treatments for it
+  // existed in two files; this is the one.
+  whatsapp:
+    "border border-[#1da851] bg-[#25D366] text-white shadow-button hover:bg-[#1da851] active:bg-[#17803d] active:shadow-none",
+};
+
+const BUTTON_BASE =
+  "inline-flex select-none items-center justify-center whitespace-nowrap font-medium transition-[background-color,border-color,color,box-shadow,transform] duration-150 active:translate-y-px disabled:pointer-events-none disabled:opacity-45 disabled:shadow-none";
+
+export function buttonClass(
+  variant: ButtonVariant = "primary",
+  size: ButtonSize = "md",
+  extra = ""
+): string {
+  return `${BUTTON_BASE} ${SIZES[size]} ${VARIANTS[variant]} ${FOCUS} ${extra}`;
+}
+
+/**
+ * KEPT, AND NOW GENERATED.
+ *
+ * Around ninety call sites use these two strings. Regenerating them from the
+ * same source as the component means every one of those picked up the new
+ * styling without being edited, and they cannot drift from `<Button>` later.
+ * New code should use the component - it gets the loading state and the icon
+ * handling, which a class string cannot give.
+ */
+export const buttonPrimary = buttonClass("primary", "md");
+export const buttonSecondary = buttonClass("secondary", "md");
+export const buttonGhost = buttonClass("ghost", "md");
+export const buttonDanger = buttonClass("dangerSoft", "md");
+
+export interface ButtonProps
+  extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "className"> {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  icon?: IconName;
+  iconRight?: IconName;
+  /**
+   * Shows a spinner and blocks the click. The label stays put rather than
+   * being replaced - a button that changes width mid-save moves the thing
+   * beside it, and on a form that is how somebody double-submits.
+   */
+  loading?: boolean;
+  block?: boolean;
+  className?: string;
+  children?: ReactNode;
+}
+
+export function Button({
+  variant = "primary",
+  size = "md",
+  icon,
+  iconRight,
+  loading = false,
+  block = false,
+  className = "",
+  disabled,
+  children,
+  type = "button",
+  ...rest
+}: ButtonProps) {
+  const iconSize = size === "lg" ? 18 : size === "xs" ? 13 : 15;
+  return (
+    <button
+      type={type}
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
+      className={buttonClass(variant, size, `${block ? "w-full" : ""} ${className}`)}
+      {...rest}
+    >
+      {loading ? (
+        <Spinner size={iconSize} />
+      ) : (
+        icon && <Icon name={icon} size={iconSize} />
+      )}
+      {children}
+      {iconRight && !loading && <Icon name={iconRight} size={iconSize} />}
+    </button>
+  );
+}
+
+/**
+ * A button that is really a link.
+ *
+ * Separate component rather than an `as` prop: an anchor and a button take
+ * different attributes, and conflating them produces a control that is
+ * neither keyboard-correct nor type-safe.
+ */
+export function LinkButton({
+  variant = "secondary",
+  size = "md",
+  icon,
+  iconRight,
+  className = "",
+  children,
+  ...rest
+}: Omit<React.AnchorHTMLAttributes<HTMLAnchorElement>, "className"> & {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  icon?: IconName;
+  iconRight?: IconName;
+  className?: string;
+}) {
+  const iconSize = size === "lg" ? 18 : size === "xs" ? 13 : 15;
+  return (
+    <a className={buttonClass(variant, size, className)} {...rest}>
+      {icon && <Icon name={icon} size={iconSize} />}
+      {children}
+      {iconRight && <Icon name={iconRight} size={iconSize} />}
+    </a>
+  );
+}
+
+/** A square button carrying only an icon. The label is required, not optional. */
+export function IconButton({
+  name,
+  label,
+  variant = "ghost",
+  size = "md",
+  className = "",
+  loading = false,
+  ...rest
+}: Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "className"> & {
+  name: IconName;
+  /** Announced to a screen reader and shown as the tooltip. Never skip it. */
+  label: string;
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  className?: string;
+  loading?: boolean;
+}) {
+  const box = { xs: "h-7 w-7", sm: "h-8 w-8", md: "h-9.5 w-9.5", lg: "h-11 w-11" }[size];
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      disabled={rest.disabled || loading}
+      className={`${BUTTON_BASE} ${box} rounded-control ${VARIANTS[variant]} ${FOCUS} ${className}`}
+      {...rest}
+    >
+      {loading ? <Spinner size={15} /> : <Icon name={name} size={size === "lg" ? 18 : 15} />}
+    </button>
   );
 }
 
@@ -83,41 +436,66 @@ export function StatTile({
   sub,
   delta,
   accent = "default",
+  icon,
+  loading = false,
 }: {
   label: string;
   value: string | number;
   sub?: string;
   delta?: { current: number; previous: number; label?: string };
-  accent?: "default" | "brand" | "good" | "warn";
+  accent?: "default" | "brand" | "good" | "warn" | "danger";
+  icon?: IconName;
+  loading?: boolean;
 }) {
   const accents: Record<string, string> = {
-    default: "text-slate-900",
-    brand: "text-[var(--accent)]",
-    good: "text-emerald-700",
-    warn: "text-amber-700",
+    default: "text-ink",
+    brand: "text-brand-700",
+    good: "text-good",
+    warn: "text-warn",
+    danger: "text-danger",
+  };
+  const chips: Record<string, string> = {
+    default: "bg-sunken text-ink-muted",
+    brand: "bg-brand-100 text-brand-700",
+    good: "bg-good-wash text-good",
+    warn: "bg-warn-wash text-warn",
+    danger: "bg-danger-wash text-danger",
   };
 
   const pct = delta ? percentChange(delta.current, delta.previous) : null;
 
   return (
     <Card className="min-w-0">
-      <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">{label}</p>
-      <p className={`text-2xl font-semibold mt-2 tabular-nums truncate ${accents[accent]}`}>{value}</p>
-      <div className="mt-1.5 flex items-center gap-2 min-h-[1.25rem]">
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-xs font-medium uppercase tracking-wide text-ink-muted">{label}</p>
+        {icon && (
+          <span className={`grid h-7 w-7 flex-none place-items-center rounded-control ${chips[accent]}`}>
+            <Icon name={icon} size={15} />
+          </span>
+        )}
+      </div>
+      {loading ? (
+        <div className="mt-2.5 h-7 w-24 rounded shimmer" />
+      ) : (
+        <p className={`mt-2 truncate text-2xl font-semibold tabular-nums ${accents[accent]}`}>
+          {value}
+        </p>
+      )}
+      <div className="mt-1.5 flex min-h-[1.25rem] items-center gap-2">
         {pct !== null && (
           <span
             className={`inline-flex items-center gap-0.5 text-xs font-medium ${
-              pct >= 0 ? "text-emerald-700" : "text-red-700"
+              pct >= 0 ? "text-good" : "text-danger"
             }`}
           >
             {/* arrow + sign, so direction never relies on color alone */}
-            <span aria-hidden>{pct >= 0 ? "▲" : "▼"}</span>
+            <Icon name={pct >= 0 ? "arrowUp" : "arrowDown"} size={12} />
             {pct >= 0 ? "+" : ""}
             {pct.toFixed(0)}%
-            {delta?.label && <span className="text-slate-400 font-normal ml-1">{delta.label}</span>}
+            {delta?.label && <span className="ml-1 font-normal text-ink-faint">{delta.label}</span>}
           </span>
         )}
-        {sub && <span className="text-xs text-slate-500 truncate">{sub}</span>}
+        {sub && <span className="truncate text-xs text-ink-muted">{sub}</span>}
       </div>
     </Card>
   );
@@ -128,19 +506,40 @@ export function StatTile({
 type BadgeTone = "neutral" | "good" | "warn" | "info" | "danger" | "brand";
 
 const BADGE_TONES: Record<BadgeTone, string> = {
-  neutral: "bg-slate-100 text-slate-700 ring-slate-200",
-  good: "bg-emerald-50 text-emerald-800 ring-emerald-200",
-  warn: "bg-amber-50 text-amber-800 ring-amber-200",
-  info: "bg-sky-50 text-sky-800 ring-sky-200",
-  danger: "bg-red-50 text-red-800 ring-red-200",
-  brand: "bg-[var(--accent-wash)] text-[var(--accent)] ring-[var(--accent)]/25",
+  neutral: "bg-sunken text-ink-soft ring-line-soft",
+  good: "bg-good-wash text-good ring-emerald-200",
+  warn: "bg-warn-wash text-warn ring-amber-200",
+  info: "bg-info-wash text-info ring-sky-200",
+  danger: "bg-danger-wash text-danger ring-red-200",
+  brand: "bg-brand-100 text-brand-800 ring-brand-300",
 };
 
-export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: BadgeTone }) {
+export function Badge({
+  children,
+  tone = "neutral",
+  icon,
+  /** A filled dot before the label, for a status that reads as a state. */
+  dot = false,
+}: {
+  children: ReactNode;
+  tone?: BadgeTone;
+  icon?: IconName;
+  dot?: boolean;
+}) {
+  const dots: Record<BadgeTone, string> = {
+    neutral: "bg-ink-faint",
+    good: "bg-good",
+    warn: "bg-warn",
+    info: "bg-info",
+    danger: "bg-danger",
+    brand: "bg-brand-600",
+  };
   return (
     <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ring-1 ring-inset whitespace-nowrap ${BADGE_TONES[tone]}`}
+      className={`inline-flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${BADGE_TONES[tone]}`}
     >
+      {dot && <span className={`h-1.5 w-1.5 flex-none rounded-full ${dots[tone]}`} aria-hidden />}
+      {icon && <Icon name={icon} size={12} />}
       {children}
     </span>
   );
@@ -154,20 +553,29 @@ export function StatusBadge({ status }: { status: string }) {
     completed: "good",
     delivered: "good",
     confirmed: "good",
+    converted: "good",
+    paid: "good",
+    captured: "good",
     paused: "warn",
     pending: "warn",
+    created: "warn",
+    attempted: "warn",
     packed: "info",
     shipped: "info",
     cancelled: "neutral",
     returned: "danger",
     failed: "danger",
   };
-  return <Badge tone={map[status] ?? "neutral"}>{status.replace(/_/g, " ")}</Badge>;
+  return (
+    <Badge tone={map[status] ?? "neutral"} dot>
+      {status.replace(/_/g, " ")}
+    </Badge>
+  );
 }
 
 /* ------------------------------------------------------------------ avatar */
 
-export function Avatar({ name }: { name: string }) {
+export function Avatar({ name, size = "md" }: { name: string; size?: "sm" | "md" | "lg" }) {
   // Deterministic tint from the name so the same donor keeps the same chip
   // colour across screens. Decorative only - never the sole carrier of meaning.
   const tints = [
@@ -189,9 +597,15 @@ export function Avatar({ name }: { name: string }) {
     .join("")
     .toUpperCase();
 
+  const box = {
+    sm: "w-6 h-6 text-2xs",
+    md: "w-8 h-8 text-xs",
+    lg: "w-10 h-10 text-sm",
+  }[size];
+
   return (
     <span
-      className={`flex-none w-8 h-8 rounded-full grid place-items-center text-xs font-semibold ${tint}`}
+      className={`grid flex-none place-items-center rounded-full font-semibold ring-1 ring-inset ring-black/5 ${box} ${tint}`}
       aria-hidden
     >
       {letters || "?"}
@@ -201,13 +615,56 @@ export function Avatar({ name }: { name: string }) {
 
 /* ------------------------------------------------------------------ tables */
 
-export function TableShell({ children }: { children: ReactNode }) {
+export function TableShell({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
   return (
-    <div className="bg-[var(--surface)] rounded-xl border border-[var(--line-soft)] shadow-sm overflow-hidden">
+    <div
+      className={`overflow-hidden rounded-card border border-line-soft bg-surface shadow-card ${className}`}
+    >
       <div className="overflow-x-auto">
         <table className="w-full text-sm">{children}</table>
       </div>
     </div>
+  );
+}
+
+/**
+ * The header row.
+ *
+ * New, and the reason is counted: twenty-four <thead> elements across the app
+ * carried three different treatments - `bg-slate-50/80 border-b`,
+ * `bg-slate-50/80` with no border, and a legacy `bg-gray-50 text-gray-600`.
+ * Having a component means a table cannot be built with the wrong one.
+ */
+export function Thead({ children }: { children: ReactNode }) {
+  return (
+    <thead className="border-b border-line-soft bg-sunken">
+      <tr>{children}</tr>
+    </thead>
+  );
+}
+
+/** The body, with the row dividers and hover applied once. */
+export function Tbody({
+  children,
+  hoverable = true,
+}: {
+  children: ReactNode;
+  hoverable?: boolean;
+}) {
+  return (
+    <tbody
+      className={`divide-y divide-line-soft ${
+        hoverable ? "[&>tr]:transition-colors [&>tr:hover]:bg-brand-50/60" : ""
+      }`}
+    >
+      {children}
+    </tbody>
   );
 }
 
@@ -224,16 +681,32 @@ export function Th({
   children,
   align = "left",
   className = "",
+  /** Turns the header into a sort control. */
+  sort,
 }: {
   children: ReactNode;
   align?: "left" | "right" | "center";
   className?: string;
+  sort?: { active: boolean; direction?: "asc" | "desc"; onSort: () => void };
 }) {
+  const base = `px-4 py-2.5 text-2xs font-semibold uppercase tracking-[0.06em] text-ink-muted ${ALIGN[align]} ${className}`;
+  if (!sort) return <th className={base}>{children}</th>;
   return (
-    <th
-      className={`px-4 py-3 font-medium text-xs uppercase tracking-wide text-slate-500 ${ALIGN[align]} ${className}`}
-    >
-      {children}
+    <th className={base} aria-sort={sort.active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>
+      <button
+        type="button"
+        onClick={sort.onSort}
+        className={`inline-flex items-center gap-1 rounded transition-colors hover:text-brand-700 ${
+          sort.active ? "text-brand-700" : ""
+        } ${FOCUS}`}
+      >
+        {children}
+        <Icon
+          name={sort.active && sort.direction === "asc" ? "chevronUp" : "chevronDown"}
+          size={12}
+          className={sort.active ? "opacity-100" : "opacity-35"}
+        />
+      </button>
     </th>
   );
 }
@@ -242,46 +715,76 @@ export function Td({
   children,
   align = "left",
   className = "",
+  colSpan,
 }: {
   children: ReactNode;
   align?: "left" | "right" | "center";
   className?: string;
+  colSpan?: number;
 }) {
-  return <td className={`px-4 py-3 ${ALIGN[align]} ${className}`}>{children}</td>;
+  return (
+    <td colSpan={colSpan} className={`px-4 py-3 text-ink-soft ${ALIGN[align]} ${className}`}>
+      {children}
+    </td>
+  );
 }
 
 export function EmptyState({
   title,
   message,
   action,
+  icon = "inbox",
 }: {
   title: string;
   message: string;
   action?: ReactNode;
+  icon?: IconName;
 }) {
   return (
-    <div className="py-16 px-6 text-center">
-      <p className="text-sm font-medium text-slate-900">{title}</p>
-      <p className="text-sm text-slate-500 mt-1 max-w-md mx-auto">{message}</p>
-      {action && <div className="mt-4">{action}</div>}
+    <div className="px-6 py-14 text-center">
+      {/* An empty table with nothing but two lines of grey text reads as a
+          page that failed to load. A mark gives it a centre and says "this is
+          a state, not a breakage". */}
+      <span className="mx-auto mb-3 grid h-11 w-11 place-items-center rounded-full bg-brand-50 text-brand-500 ring-1 ring-inset ring-brand-100">
+        <Icon name={icon} size={20} />
+      </span>
+      <p className="text-sm font-semibold text-ink">{title}</p>
+      <p className="mx-auto mt-1 max-w-md text-sm text-ink-muted">{message}</p>
+      {action && <div className="mt-4 flex justify-center">{action}</div>}
     </div>
   );
 }
 
 export function SkeletonRows({ rows = 5, cols = 5 }: { rows?: number; cols?: number }) {
   return (
-    <tbody className="divide-y divide-slate-100">
+    <tbody className="divide-y divide-line-soft">
       {Array.from({ length: rows }).map((_, r) => (
         <tr key={r}>
           {Array.from({ length: cols }).map((_, c) => (
-            <td key={c} className="px-4 py-3">
-              <div className="h-3 rounded bg-slate-100 animate-pulse" style={{ width: c === 0 ? "60%" : "40%" }} />
+            <td key={c} className="px-4 py-3.5">
+              <div className="h-3 rounded shimmer" style={{ width: c === 0 ? "62%" : "40%" }} />
             </td>
           ))}
         </tr>
       ))}
     </tbody>
   );
+}
+
+/**
+ * A loading block for anything that is not a table.
+ *
+ * Ten files each wrote their own `animate-pulse` div because the only shared
+ * skeleton was table-shaped. This is the other shape.
+ */
+export function Skeleton({
+  className = "",
+  rounded = "rounded-control",
+}: {
+  className?: string;
+  rounded?: string;
+}) {
+  return <div className={`shimmer ${rounded} ${className}`} aria-hidden />;
 }
 
 /* -------------------------------------------------------------- pagination */
@@ -312,32 +815,38 @@ export function Pagination({
   // A compact window around the current page - a 4,000-record list has 160
   // pages and rendering every number is unusable.
   const pages: (number | "gap")[] = [];
-  const push = (p: number) => { if (!pages.includes(p)) pages.push(p); };
+  const push = (p: number) => {
+    if (!pages.includes(p)) pages.push(p);
+  };
   push(1);
   if (page - 2 > 2) pages.push("gap");
   for (let p = Math.max(2, page - 1); p <= Math.min(totalPages - 1, page + 1); p++) push(p);
   if (page + 2 < totalPages - 1) pages.push("gap");
   if (totalPages > 1) push(totalPages);
 
+  const pageButton =
+    "min-w-8 h-8 px-2 text-xs rounded-control border tabular-nums transition-colors";
+
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-t border-[var(--line-soft)] bg-[var(--page)]/60">
-      <p className="text-xs text-slate-600 tabular-nums">
-        Showing <span className="font-medium text-slate-900">{number(first)}</span>–
-        <span className="font-medium text-slate-900">{number(last)}</span> of{" "}
-        <span className="font-medium text-slate-900">{number(total)}</span> {unit}
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line-soft bg-sunken px-4 py-2.5">
+      <p className="text-xs tabular-nums text-ink-muted">
+        Showing <span className="font-semibold text-ink">{number(first)}</span>–
+        <span className="font-semibold text-ink">{number(last)}</span> of{" "}
+        <span className="font-semibold text-ink">{number(total)}</span> {unit}
       </p>
 
       <div className="flex items-center gap-1">
-        <button
+        <IconButton
+          name="chevronLeft"
+          label="Previous page"
+          size="sm"
+          variant="secondary"
           onClick={() => onPage(page - 1)}
           disabled={page <= 1}
-          className="px-2.5 py-1.5 text-xs rounded-md border border-[var(--line-strong)] bg-white text-slate-700 hover:bg-[var(--page)] disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          Previous
-        </button>
+        />
         {pages.map((p, i) =>
           p === "gap" ? (
-            <span key={`gap-${i}`} className="px-1 text-xs text-slate-400">
+            <span key={`gap-${i}`} className="px-1 text-xs text-ink-faint">
               …
             </span>
           ) : (
@@ -345,23 +854,24 @@ export function Pagination({
               key={p}
               onClick={() => onPage(p)}
               aria-current={p === page ? "page" : undefined}
-              className={`min-w-[2rem] px-2 py-1.5 text-xs rounded-md border tabular-nums ${
+              className={`${pageButton} ${FOCUS} ${
                 p === page
-                  ? "border-[var(--accent)] bg-[var(--accent)] text-white font-medium"
-                  : "border-[var(--line-strong)] bg-white text-slate-700 hover:bg-[var(--page)]"
+                  ? "border-brand-700 bg-brand-600 font-semibold text-white shadow-button"
+                  : "border-line-strong bg-surface text-ink-soft hover:border-brand-400 hover:bg-brand-50"
               }`}
             >
               {p}
             </button>
           )
         )}
-        <button
+        <IconButton
+          name="chevronRight"
+          label="Next page"
+          size="sm"
+          variant="secondary"
           onClick={() => onPage(page + 1)}
           disabled={page >= totalPages}
-          className="px-2.5 py-1.5 text-xs rounded-md border border-[var(--line-strong)] bg-white text-slate-700 hover:bg-[var(--page)] disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          Next
-        </button>
+        />
       </div>
     </div>
   );
@@ -370,16 +880,356 @@ export function Pagination({
 /* ------------------------------------------------------------------ inputs */
 
 export const inputClass =
-  "px-3 py-2 text-sm border border-[var(--line-strong)] rounded-lg bg-white text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/30 focus:border-[var(--accent)]";
+  "w-full h-9.5 px-3 text-sm border border-line-strong rounded-control bg-surface text-ink shadow-flat placeholder:text-ink-faint transition-[border-color,box-shadow] hover:border-brand-400 focus:outline-none focus:border-brand-600 focus:ring-2 focus:ring-accent/25 disabled:bg-sunken disabled:text-ink-faint";
 
-export const buttonPrimary =
-  "inline-flex items-center gap-1.5 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors";
+export const textareaClass =
+  "w-full px-3 py-2 text-sm border border-line-strong rounded-control bg-surface text-ink shadow-flat placeholder:text-ink-faint transition-[border-color,box-shadow] hover:border-brand-400 focus:outline-none focus:border-brand-600 focus:ring-2 focus:ring-accent/25";
 
-export const buttonSecondary =
-  "inline-flex items-center gap-1.5 border border-[var(--line-strong)] bg-white hover:bg-[var(--page)] text-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors";
+export function Input({
+  className = "",
+  invalid = false,
+  ...rest
+}: React.InputHTMLAttributes<HTMLInputElement> & { invalid?: boolean }) {
+  return (
+    <input
+      className={`${inputClass} ${invalid ? "border-danger focus:border-danger focus:ring-red-200" : ""} ${className}`}
+      aria-invalid={invalid || undefined}
+      {...rest}
+    />
+  );
+}
 
-export function MoneyCell({ value }: { value: number | string }) {
-  return <span className="font-semibold tabular-nums text-slate-900">{currency(value)}</span>;
+export function Textarea({
+  className = "",
+  rows = 3,
+  ...rest
+}: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return <textarea rows={rows} className={`${textareaClass} ${className}`} {...rest} />;
+}
+
+/**
+ * A search box with its icon inside it.
+ *
+ * The plain input was indistinguishable from every other field in the filter
+ * row, so on screens with five controls the search box had to be found by
+ * reading the placeholder. The magnifier and the clear button make it the one
+ * obvious thing in the row, which is what it should be.
+ */
+export function SearchInput({
+  value,
+  onChange,
+  placeholder = "Search…",
+  className = "",
+  ...rest
+}: Omit<React.InputHTMLAttributes<HTMLInputElement>, "onChange" | "value"> & {
+  value: string;
+  onChange: (v: string) => void;
+  className?: string;
+}) {
+  return (
+    <div className={`relative ${className}`}>
+      <Icon
+        name="search"
+        size={15}
+        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-ink-faint"
+      />
+      <input
+        type="search"
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        className={`${inputClass} pl-9 ${value ? "pr-9" : ""} [&::-webkit-search-cancel-button]:appearance-none`}
+        {...rest}
+      />
+      {value && (
+        <button
+          type="button"
+          aria-label="Clear search"
+          onClick={() => onChange("")}
+          className={`absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-ink-faint transition-colors hover:bg-sunken hover:text-ink-soft ${FOCUS}`}
+        >
+          <Icon name="x" size={13} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A checkbox that can actually be seen.
+ *
+ * Table-row checkboxes were `<input type="checkbox" className="rounded
+ * border-slate-300" />` - the browser default, at browser default size, in a
+ * green product. A real control with the accent fill makes a selected row
+ * obvious, which matters most on the bulk-assign screens where getting the
+ * selection wrong changes somebody else's work.
+ */
+export function Checkbox({
+  checked,
+  onChange,
+  label,
+  indeterminate = false,
+  disabled = false,
+  className = "",
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label?: ReactNode;
+  indeterminate?: boolean;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = indeterminate && !checked;
+  }, [indeterminate, checked]);
+
+  return (
+    <label
+      className={`inline-flex cursor-pointer items-center gap-2 ${
+        disabled ? "cursor-not-allowed opacity-50" : ""
+      } ${className}`}
+    >
+      <span className="relative grid h-4 w-4 flex-none place-items-center">
+        <input
+          ref={ref}
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.checked)}
+          className="peer absolute inset-0 h-full w-full cursor-inherit appearance-none rounded-[5px] border border-line-strong bg-surface transition-colors checked:border-brand-700 checked:bg-brand-600 indeterminate:border-brand-700 indeterminate:bg-brand-600 hover:border-brand-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 focus-visible:ring-offset-1 disabled:bg-sunken"
+        />
+        <Icon
+          name={indeterminate && !checked ? "menu" : "check"}
+          size={11}
+          className="pointer-events-none relative text-white opacity-0 peer-checked:opacity-100 peer-indeterminate:opacity-100"
+        />
+      </span>
+      {label && <span className="text-sm text-ink-soft">{label}</span>}
+    </label>
+  );
+}
+
+export function MoneyCell({ value, tone }: { value: number | string; tone?: "default" | "muted" }) {
+  return (
+    <span
+      className={`font-semibold tabular-nums ${tone === "muted" ? "text-ink-muted" : "text-ink"}`}
+    >
+      {currency(value)}
+    </span>
+  );
+}
+
+/* -------------------------------------------------------------------- tabs */
+
+export interface TabItem {
+  key: string;
+  label: string;
+  count?: number;
+  icon?: IconName;
+}
+
+/**
+ * Tabs.
+ *
+ * Three incompatible implementations existed - underline tabs on the settings
+ * screen, pill tabs on prasadam, and a third set of pills on subscriptions
+ * with different sizes and greys. Same control, three looks, so moving between
+ * screens meant re-learning where to click.
+ */
+export function Tabs({
+  items,
+  value,
+  onChange,
+  variant = "underline",
+  className = "",
+}: {
+  items: TabItem[];
+  value: string;
+  onChange: (key: string) => void;
+  variant?: "underline" | "pill";
+  className?: string;
+}) {
+  if (variant === "pill") {
+    return (
+      <div
+        role="tablist"
+        className={`inline-flex flex-wrap gap-1 rounded-control bg-sunken p-1 ring-1 ring-inset ring-line-soft ${className}`}
+      >
+        {items.map((t) => {
+          const on = t.key === value;
+          return (
+            <button
+              key={t.key}
+              role="tab"
+              aria-selected={on}
+              onClick={() => onChange(t.key)}
+              className={`inline-flex items-center gap-1.5 rounded-[7px] px-3 py-1.5 text-xs font-medium transition-all ${FOCUS} ${
+                on
+                  ? "bg-surface text-brand-800 shadow-flat"
+                  : "text-ink-muted hover:bg-surface/60 hover:text-ink-soft"
+              }`}
+            >
+              {t.icon && <Icon name={t.icon} size={13} />}
+              {t.label}
+              {t.count !== undefined && (
+                <span
+                  className={`rounded-pill px-1.5 text-2xs tabular-nums ${
+                    on ? "bg-brand-100 text-brand-800" : "bg-line-soft text-ink-muted"
+                  }`}
+                >
+                  {t.count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <div role="tablist" className={`flex gap-1 overflow-x-auto border-b border-line-soft ${className}`}>
+      {items.map((t) => {
+        const on = t.key === value;
+        return (
+          <button
+            key={t.key}
+            role="tab"
+            aria-selected={on}
+            onClick={() => onChange(t.key)}
+            className={`-mb-px inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm transition-colors ${FOCUS} ${
+              on
+                ? "border-brand-600 font-semibold text-brand-800"
+                : "border-transparent text-ink-muted hover:border-line-strong hover:text-ink-soft"
+            }`}
+          >
+            {t.icon && <Icon name={t.icon} size={14} />}
+            {t.label}
+            {t.count !== undefined && (
+              <span
+                className={`rounded-pill px-1.5 py-0.5 text-2xs tabular-nums ${
+                  on ? "bg-brand-100 text-brand-800" : "bg-sunken text-ink-muted"
+                }`}
+              >
+                {t.count}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * A two-or-three-way switch.
+ *
+ * Replaces the pattern `mineOnly ? buttonPrimary : buttonSecondary`, which
+ * used a primary button to mean "on". A primary button means "this is the
+ * action to take", so using it as a state made two different things look
+ * identical on the same screen.
+ */
+export function SegmentedControl<T extends string>({
+  options,
+  value,
+  onChange,
+  size = "md",
+  className = "",
+}: {
+  options: { value: T; label: string; icon?: IconName }[];
+  value: T;
+  onChange: (v: T) => void;
+  size?: "sm" | "md";
+  className?: string;
+}) {
+  const pad = size === "sm" ? "px-2.5 py-1 text-xs" : "px-3 py-1.5 text-sm";
+  return (
+    <div
+      className={`inline-flex rounded-control bg-sunken p-0.5 ring-1 ring-inset ring-line-soft ${className}`}
+    >
+      {options.map((o) => {
+        const on = o.value === value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            aria-pressed={on}
+            onClick={() => onChange(o.value)}
+            className={`inline-flex items-center gap-1.5 rounded-[7px] font-medium transition-all ${pad} ${FOCUS} ${
+              on
+                ? "bg-surface text-brand-800 shadow-flat"
+                : "text-ink-muted hover:text-ink-soft"
+            }`}
+          >
+            {o.icon && <Icon name={o.icon} size={13} />}
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ alerts */
+
+export type AlertTone = "info" | "good" | "warn" | "danger";
+
+/**
+ * A message about what just happened, or what is about to.
+ *
+ * The exact string
+ *   "mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
+ * appeared eighteen times in this codebase, with four looser variants beside
+ * it. Every one of those was somebody needing to tell the user something and
+ * finding no component for it.
+ */
+export function Alert({
+  tone = "info",
+  title,
+  children,
+  onDismiss,
+  action,
+  className = "",
+}: {
+  tone?: AlertTone;
+  title?: string;
+  children?: ReactNode;
+  onDismiss?: () => void;
+  action?: ReactNode;
+  className?: string;
+}) {
+  const tones: Record<AlertTone, { box: string; icon: IconName; mark: string }> = {
+    info: { box: "border-sky-200 bg-info-wash text-sky-900", icon: "info", mark: "text-info" },
+    good: { box: "border-emerald-200 bg-good-wash text-emerald-900", icon: "checkCircle", mark: "text-good" },
+    warn: { box: "border-amber-200 bg-warn-wash text-amber-900", icon: "alert", mark: "text-warn" },
+    danger: { box: "border-red-200 bg-danger-wash text-red-900", icon: "xCircle", mark: "text-danger" },
+  };
+  const t = tones[tone];
+
+  return (
+    <div
+      role={tone === "danger" ? "alert" : "status"}
+      className={`mb-4 flex items-start gap-2.5 rounded-card border px-3.5 py-3 text-sm shadow-flat ${t.box} ${className}`}
+    >
+      <Icon name={t.icon} size={16} className={`mt-0.5 ${t.mark}`} />
+      <div className="min-w-0 flex-1">
+        {title && <p className="font-semibold">{title}</p>}
+        {children && <div className={title ? "mt-0.5 opacity-90" : ""}>{children}</div>}
+      </div>
+      {action}
+      {onDismiss && (
+        <button
+          type="button"
+          aria-label="Dismiss"
+          onClick={onDismiss}
+          className={`-mr-1 -mt-0.5 grid h-6 w-6 flex-none place-items-center rounded-md opacity-60 transition-opacity hover:opacity-100 ${FOCUS}`}
+        >
+          <Icon name="x" size={13} />
+        </button>
+      )}
+    </div>
+  );
 }
 
 /* ----------------------------------------------------------------- select */
@@ -555,23 +1405,18 @@ export function Select({
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
         onKeyDown={onKeyDown}
-        className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-left rounded-lg border bg-white transition-colors
-          ${disabled ? "opacity-50 cursor-not-allowed" : "hover:border-[var(--accent)]/50 cursor-pointer"}
-          ${open ? "border-[var(--accent)] ring-2 ring-[var(--accent)]/25" : "border-[var(--line-strong)]"}`}
+        className={`flex h-9.5 w-full items-center justify-between gap-2 rounded-control border bg-surface px-3 text-left text-sm shadow-flat transition-[border-color,box-shadow]
+          ${disabled ? "cursor-not-allowed bg-sunken opacity-60" : "cursor-pointer hover:border-brand-400"}
+          ${open ? "border-brand-600 ring-2 ring-accent/25" : "border-line-strong"}`}
       >
-        <span className={`truncate ${selected ? "text-slate-900" : "text-slate-400"}`}>
+        <span className={`truncate ${selected ? "text-ink" : "text-ink-faint"}`}>
           {selected?.label ?? placeholder}
         </span>
-        <svg
-          viewBox="0 0 20 20"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.6"
-          aria-hidden
-          className={`w-4 h-4 flex-none text-slate-400 transition-transform ${open ? "rotate-180" : ""}`}
-        >
-          <path d="M6 8l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <Icon
+          name="chevronDown"
+          size={15}
+          className={`text-ink-muted transition-transform ${open ? "rotate-180" : ""}`}
+        />
       </button>
 
       {open && (
@@ -580,9 +1425,9 @@ export function Select({
           role="listbox"
           aria-label={ariaLabel}
           tabIndex={-1}
-          className="absolute z-50 mt-1 w-full max-h-64 overflow-y-auto rounded-lg border border-[var(--line-strong)] bg-white py-1 shadow-lg"
+          className="fade-rise absolute z-50 mt-1 max-h-64 w-full overflow-y-auto rounded-control border border-line-strong bg-surface py-1 shadow-float"
         >
-          {!opts.length && <li className="px-3 py-2 text-sm text-slate-400">Nothing to choose from</li>}
+          {!opts.length && <li className="px-3 py-2 text-sm text-ink-faint">Nothing to choose from</li>}
           {opts.map((o, i) => {
             const isSelected = o.value === value;
             // A heading whenever the group changes. Rendered as a sibling
@@ -594,7 +1439,7 @@ export function Select({
               {heading && (
                 <li
                   role="presentation"
-                  className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
+                  className="px-3 pt-2 pb-1 text-2xs font-semibold uppercase tracking-wider text-ink-faint"
                 >
                   {heading}
                 </li>
@@ -605,20 +1450,16 @@ export function Select({
                 aria-disabled={o.disabled || undefined}
                 onPointerEnter={() => !o.disabled && setActive(i)}
                 onClick={() => commit(i)}
-                className={`px-3 py-2 text-sm flex items-start justify-between gap-3
-                  ${o.disabled ? "text-slate-300 cursor-not-allowed" : "cursor-pointer"}
-                  ${!o.disabled && i === active ? "bg-[var(--accent-wash)]" : ""}
-                  ${isSelected ? "text-[var(--accent-ink)] font-medium" : o.disabled ? "" : "text-slate-700"}`}
+                className={`mx-1 flex items-start justify-between gap-3 rounded-md px-2 py-2 text-sm
+                  ${o.disabled ? "cursor-not-allowed text-ink-faint/60" : "cursor-pointer"}
+                  ${!o.disabled && i === active ? "bg-brand-50" : ""}
+                  ${isSelected ? "font-medium text-brand-800" : o.disabled ? "" : "text-ink-soft"}`}
               >
                 <span className="min-w-0">
                   <span className="block truncate">{o.label}</span>
-                  {o.hint && <span className="block text-[11px] text-slate-400 truncate">{o.hint}</span>}
+                  {o.hint && <span className="block truncate text-xs text-ink-faint">{o.hint}</span>}
                 </span>
-                {isSelected && (
-                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 flex-none mt-0.5">
-                    <path d="M5 10l3.5 3.5L15 7" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                )}
+                {isSelected && <Icon name="check" size={14} className="mt-0.5 text-brand-600" />}
               </li>
               </Fragment>
             );
@@ -629,59 +1470,212 @@ export function Select({
   );
 }
 
+/* --------------------------------------------------------------- dropdown */
+
+/**
+ * A menu hanging off a button.
+ *
+ * Added for the download control, which needs to offer CSV or Excel from one
+ * button rather than putting two buttons in every page header. Closes on
+ * Escape, on a click outside, and after a choice.
+ */
+export function DropdownMenu({
+  trigger,
+  items,
+  align = "right",
+  className = "",
+}: {
+  trigger: (props: { open: boolean; toggle: () => void }) => ReactNode;
+  items: {
+    label: string;
+    icon?: IconName;
+    onSelect: () => void;
+    hint?: string;
+    disabled?: boolean;
+    tone?: "default" | "danger";
+  }[];
+  align?: "left" | "right";
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const toggle = useCallback(() => setOpen((v) => !v), []);
+
+  return (
+    <div ref={rootRef} className={`relative ${className}`}>
+      {trigger({ open, toggle })}
+      {open && (
+        <div
+          role="menu"
+          className={`fade-rise absolute z-50 mt-1 min-w-52 overflow-hidden rounded-control border border-line-strong bg-surface py-1 shadow-float ${
+            align === "right" ? "right-0" : "left-0"
+          }`}
+        >
+          {items.map((item) => (
+            <button
+              key={item.label}
+              role="menuitem"
+              disabled={item.disabled}
+              onClick={() => {
+                setOpen(false);
+                item.onSelect();
+              }}
+              className={`flex w-full items-start gap-2.5 px-3 py-2 text-left text-sm transition-colors disabled:opacity-40 ${
+                item.tone === "danger"
+                  ? "text-danger hover:bg-danger-wash"
+                  : "text-ink-soft hover:bg-brand-50 hover:text-brand-800"
+              }`}
+            >
+              {item.icon && <Icon name={item.icon} size={15} className="mt-0.5" />}
+              <span className="min-w-0">
+                <span className="block">{item.label}</span>
+                {item.hint && <span className="block text-xs text-ink-faint">{item.hint}</span>}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ dialog */
 
 /**
  * A dialog.
  *
  * Lived privately inside the leads screen until three screens wanted one and
- * the choice was to copy it twice more or move it here. Deliberately plain:
- * no focus trap or portal, because every use is a short form inside the admin
- * shell and the browser's own behaviour is adequate for that.
+ * the choice was to copy it twice more or move it here. Seven hand-rolled
+ * overlays with four different backdrops still existed beside it; this is now
+ * the only one.
  *
  * Escape closes it, and the backdrop does not — a mis-click while filling in a
  * list of assignees should not throw the form away.
+ *
+ * Focus is moved into the dialog on open and returned to whatever opened it on
+ * close, and Tab is kept inside while it is open. That was missing before, and
+ * without it a keyboard user tabs straight out of an open dialog into the page
+ * behind, which they cannot see.
  */
 export function Modal({
   title,
   children,
   onClose,
   wide = false,
+  footer,
+  tone,
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
   wide?: boolean;
+  /** A sticky action row, so the buttons do not scroll away on a long form. */
+  footer?: ReactNode;
+  tone?: "default" | "danger";
 }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const returnTo = useRef<HTMLElement | null>(null);
+  const labelId = useId();
+
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    returnTo.current = document.activeElement as HTMLElement | null;
+    const panel = panelRef.current;
+    // The first real control, not the close button: on a form dialog the
+    // person is here to type, and landing on "×" makes Enter dismiss it.
+    const focusable = panel?.querySelectorAll<HTMLElement>(
+      'input:not([type="hidden"]), textarea, select, button, [href], [tabindex]:not([tabindex="-1"])'
+    );
+    const first = Array.from(focusable ?? []).find((el) => !el.hasAttribute("data-dialog-close"));
+    (first ?? panel)?.focus();
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab" || !panel) return;
+      const items = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'input:not([type="hidden"]):not(:disabled), textarea:not(:disabled), select:not(:disabled), button:not(:disabled), [href], [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => el.offsetParent !== null);
+      if (!items.length) return;
+      const firstEl = items[0];
+      const lastEl = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === firstEl) {
+        e.preventDefault();
+        lastEl.focus();
+      } else if (!e.shiftKey && document.activeElement === lastEl) {
+        e.preventDefault();
+        firstEl.focus();
+      }
+    };
+
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+      returnTo.current?.focus?.();
+    };
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-900/40 p-4 overflow-y-auto">
+    <div className="backdrop-in fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/45 p-4 backdrop-blur-[2px]">
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
-        aria-label={title}
-        className={`mt-12 w-full ${wide ? "max-w-3xl" : "max-w-2xl"} rounded-xl bg-white shadow-xl`}
+        aria-labelledby={labelId}
+        tabIndex={-1}
+        className={`dialog-in mt-12 mb-12 w-full ${
+          wide ? "max-w-3xl" : "max-w-2xl"
+        } overflow-hidden rounded-panel bg-surface shadow-dialog outline-none`}
       >
-        <div className="flex items-center justify-between border-b border-[var(--line-soft)] px-5 py-3.5">
-          <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
+        <div className="flex items-center justify-between gap-4 border-b border-line-soft px-5 py-3.5">
+          <h2
+            id={labelId}
+            className={`text-sm font-semibold ${tone === "danger" ? "text-danger" : "text-ink"}`}
+          >
+            {title}
+          </h2>
           <button
+            data-dialog-close
             onClick={onClose}
             aria-label="Close"
-            className="text-slate-400 hover:text-slate-600 text-xl leading-none"
+            className={`grid h-7 w-7 place-items-center rounded-md text-ink-muted transition-colors hover:bg-sunken hover:text-ink ${FOCUS}`}
           >
-            ×
+            <Icon name="x" size={15} />
           </button>
         </div>
         <div className="p-5">{children}</div>
+        {footer && (
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line-soft bg-sunken px-5 py-3">
+            {footer}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
+/* ------------------------------------------------------------------ toggle */
 
 /**
  * An on/off switch.
@@ -695,29 +1689,35 @@ export function Toggle({
   on,
   onChange,
   label,
+  disabled = false,
 }: {
   on: boolean;
   onChange: (v: boolean) => void;
   label?: string;
+  disabled?: boolean;
 }) {
   return (
     <button
       role="switch"
+      type="button"
       aria-checked={on}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!on)}
-      className={`inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-        on ? "bg-[var(--accent)]" : "bg-slate-200"
+      className={`inline-flex h-5.5 w-10 flex-none items-center rounded-full p-0.5 transition-colors disabled:opacity-50 ${FOCUS} ${
+        on ? "bg-brand-600" : "bg-line"
       }`}
     >
       <span
-        className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
-          on ? "translate-x-4.5" : "translate-x-1"
+        className={`inline-block h-4.5 w-4.5 rounded-full bg-white shadow-flat transition-transform ${
+          on ? "translate-x-4.5" : "translate-x-0"
         }`}
       />
     </button>
   );
 }
+
+/* ----------------------------------------------------------- alert picker */
 
 /**
  * Choosing when to be warned about a reminder.
@@ -759,18 +1759,24 @@ export function AlertPicker({
                     : [...value, o.minutes].sort((a, b) => b - a)
                 )
               }
-              className={`rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+              className={`inline-flex items-center gap-1 rounded-control border px-2.5 py-1.5 text-xs transition-colors ${FOCUS} ${
                 on
-                  ? "border-[var(--accent)] bg-[var(--accent-wash)] font-medium text-[var(--accent)]"
-                  : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                  ? "border-brand-600 bg-brand-50 font-medium text-brand-800"
+                  : "border-line-strong bg-surface text-ink-muted hover:border-brand-400 hover:bg-sunken"
               }`}
             >
+              {on && <Icon name="check" size={11} />}
               {o.label}
             </button>
           );
         })}
       </div>
-      {!value.length && <p className="mt-1 text-[11px] text-amber-700">{emptyWarning}</p>}
+      {!value.length && (
+        <p className="mt-1.5 flex items-center gap-1 text-xs text-warn">
+          <Icon name="alert" size={12} />
+          {emptyWarning}
+        </p>
+      )}
     </div>
   );
 }

@@ -11,7 +11,8 @@
     "test:qr": "tsx scripts/test-qr-webhook.ts",
     "test:scope": "tsx scripts/test-dashboard-scope.ts",
     "test:promises": "tsx scripts/test-promises.ts",
-    "test:access": "tsx scripts/test-role-access.ts"
+    "test:access": "tsx scripts/test-role-access.ts",
+    "test:time": "tsx scripts/test-time-and-exports.ts"
   },
   "keywords": [],
   "author": "",

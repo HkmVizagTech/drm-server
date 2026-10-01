@@ -14,16 +14,32 @@ import {
 import { upsertDonorSnapshot } from '../services/hkmvSync';
 import { canonPage, canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 import { displayPurposeSql } from '../utils/donationLabel';
+import {
+  describeFilters,
+  sendExport,
+  EXPORT_ROW_CAP,
+  type ExportFormat,
+} from '../utils/export';
 
 const router = Router();
 router.use(authenticate);
 
-// List donations with filters
-router.get('/', async (req, res) => {
-  const { purpose, source, from_date, to_date, receipt_generated, search, source_site, source_page, campaign, group } = req.query;
-  const page = Math.max(1, Number(req.query.page) || 1);
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
-  const offset = (page - 1) * limit;
+interface DonationFilters {
+  where: string;
+  values: unknown[];
+  /** The next free placeholder number, for LIMIT/OFFSET on top of the filters. */
+  next: number;
+}
+
+// The WHERE for the donations list, built once.
+//
+// Shared with the export below rather than written out twice. The office sends
+// these files to auditors and to the trustees, so a file whose date range is
+// not the one the person picked on screen is not merely wrong, it is wrong in
+// somebody else's hands - and that is exactly what happens to a second copy of
+// this code the next time a filter is added to only one of them.
+function buildDonationFilters(q: Record<string, unknown>): DonationFilters {
+  const { purpose, source, from_date, to_date, receipt_generated, search, source_site, source_page, campaign, group } = q;
 
   const conditions: string[] = [];
   const values: unknown[] = [];
@@ -40,8 +56,20 @@ router.get('/', async (req, res) => {
     idx++;
   }
   if (source) { conditions.push(`d.source = $${idx}`); values.push(source); idx++; }
-  if (from_date) { conditions.push(`d.created_at >= $${idx}`); values.push(from_date); idx++; }
-  if (to_date) { conditions.push(`d.created_at <= $${idx}`); values.push(to_date); idx++; }
+  // THE END DATE IS INCLUSIVE, and until this was fixed it was not.
+  //
+  // `created_at <= '2026-10-01'` casts that string to midnight, so picking
+  // 1 October as the end date excluded every donation made on 1 October -
+  // the whole day the user had just asked for. On a one-day range (from and
+  // to the same date) the screen came back empty, which reads as "no
+  // donations that day" rather than as a bug, so it was believed.
+  //
+  // Every other range filter in this codebase adds the day. This one is now
+  // the same shape as the rest. Both boundaries resolve in IST because the
+  // database session does (db/pool.ts), so "1 October" means midnight to
+  // midnight in India, not 05:30 to 05:30.
+  if (from_date) { conditions.push(`d.created_at >= $${idx}::date`); values.push(from_date); idx++; }
+  if (to_date) { conditions.push(`d.created_at < ($${idx}::date + INTERVAL '1 day')`); values.push(to_date); idx++; }
   if (receipt_generated !== undefined && receipt_generated !== '') {
     conditions.push(`d.receipt_generated = $${idx}`);
     values.push(receipt_generated === 'true');
@@ -72,24 +100,41 @@ router.get('/', async (req, res) => {
   }
   if (campaign)    { conditions.push(`d.campaign = $${idx}`);    values.push(campaign);    idx++; }
 
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  return {
+    where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
+    values,
+    next: idx,
+  };
+}
+
+// display_purpose alongside the raw purpose, never instead of it: the table
+// shows the readable label while the filters, the exports and anything
+// reconciled against the source site keep the value that site sent.
+const DONATION_SELECT = `d.*, p.name as donor_name, p.phone as donor_phone,
+              ${displayPurposeSql('d.purpose', 'd.source_page')} AS display_purpose`;
+
+const DONATION_FROM = `FROM donations d JOIN people p ON d.person_id = p.id`;
+
+// List donations with filters
+router.get('/', async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+  const offset = (page - 1) * limit;
+
+  const { where, values, next: idx } = buildDonationFilters(req.query as Record<string, unknown>);
 
   // The filtered total is returned alongside the page so the UI can show
   // "showing 1-25 of 4,004" and render real pagination instead of silently
   // truncating at the page limit.
   const [data, count, sum] = await Promise.all([
     pool.query(
-      // display_purpose alongside the raw purpose, never instead of it: the
-      // table shows the readable label while the filters, the CSV and anything
-      // reconciled against the source site keep the value that site sent.
-      `SELECT d.*, p.name as donor_name, p.phone as donor_phone,
-              ${displayPurposeSql('d.purpose', 'd.source_page')} AS display_purpose
-       FROM donations d JOIN people p ON d.person_id = p.id
+      `SELECT ${DONATION_SELECT}
+       ${DONATION_FROM}
        ${where} ORDER BY d.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
       [...values, limit, offset]
     ),
-    pool.query(`SELECT COUNT(*) FROM donations d JOIN people p ON d.person_id = p.id ${where}`, values),
-    pool.query(`SELECT COALESCE(SUM(d.amount), 0) AS total FROM donations d JOIN people p ON d.person_id = p.id ${where}`, values),
+    pool.query(`SELECT COUNT(*) ${DONATION_FROM} ${where}`, values),
+    pool.query(`SELECT COALESCE(SUM(d.amount), 0) AS total ${DONATION_FROM} ${where}`, values),
   ]);
 
   const total = Number(count.rows[0].count);
@@ -153,6 +198,75 @@ router.get('/sources', async (_req, res) => {
     })),
   });
 });
+
+/**
+ * The donations on screen, as a file.
+ *
+ * Runs buildDonationFilters - the same builder GET / runs - so the rows in the
+ * file are the rows that were on the screen when the button was pressed. This
+ * is the export the office reconciles a bank statement against, and a window
+ * that is a day out either end is a discrepancy somebody then spends an
+ * afternoon hunting for in the bank's figures rather than in ours.
+ */
+async function exportDonationsFile(
+  req: import('express').Request,
+  res: import('express').Response,
+  format: ExportFormat
+) {
+  try {
+    const f = buildDonationFilters(req.query as Record<string, unknown>);
+    const rows = await pool.query(
+      `SELECT ${DONATION_SELECT}
+       ${DONATION_FROM}
+       ${f.where} ORDER BY d.created_at DESC LIMIT ${EXPORT_ROW_CAP + 1}`,
+      f.values
+    );
+    const truncated = rows.rows.length > EXPORT_ROW_CAP;
+
+    await sendExport(res, format, {
+      name: 'donations',
+      truncated,
+      rows: truncated ? rows.rows.slice(0, EXPORT_ROW_CAP) : rows.rows,
+      filterSummary: describeFilters(req.query as Record<string, unknown>, {
+        search: 'Search',
+        purpose: 'Purpose',
+        receipt_generated: 'Receipt issued',
+        from_date: 'From',
+        to_date: 'To',
+        source_site: 'Site',
+        source_page: 'Page',
+        group: 'Page group',
+      }),
+      columns: [
+        { header: 'Receipt no', value: (r) => r.receipt_number },
+        { header: 'Date', value: (r) => r.created_at, kind: 'datetime' },
+        { header: 'Donor name', value: (r) => r.donor_name },
+        { header: 'Phone', value: (r) => r.donor_phone, kind: 'phone' },
+        { header: 'Amount', value: (r) => r.amount, kind: 'money' },
+        { header: 'Purpose', value: (r) => r.display_purpose },
+        { header: 'Payment mode', value: (r) => r.payment_mode },
+        { header: 'Source site', value: (r) => r.source_site },
+        { header: 'Source page', value: (r) => r.source_page },
+        { header: 'Receipt issued', value: (r) => (r.receipt_generated ? 'Yes' : 'No') },
+        { header: 'Receipt issued at', value: (r) => r.receipt_issued_at, kind: 'datetime' },
+      ],
+    });
+  } catch (err) {
+    console.error('donations.export error:', err);
+    res.status(500).json({ error: 'Could not build that export' });
+  }
+}
+
+// Guarded even though the router is only readOnlyFor('caller'): a caller may
+// read the donations screen to answer "did my donor's money arrive", but the
+// whole giving history of the temple as one spreadsheet is a finance document,
+// and it leaves DRM's access control behind as soon as it is downloaded.
+router.get('/export.csv', authorize('admin', 'accountant'), (req, res) =>
+  exportDonationsFile(req, res, 'csv')
+);
+router.get('/export.xlsx', authorize('admin', 'accountant'), (req, res) =>
+  exportDonationsFile(req, res, 'xlsx')
+);
 
 // Summary stats
 router.get('/summary', async (_req, res) => {

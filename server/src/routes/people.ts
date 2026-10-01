@@ -6,6 +6,12 @@ import { upsertDonorSnapshot, upsertTransactionBatch } from '../services/hkmvSyn
 import { groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 import { normalizeAddress, addressValues, type Address } from '../utils/address';
 import { pushProfileToSites } from '../services/profileSync';
+import {
+  describeFilters,
+  sendExport,
+  EXPORT_ROW_CAP,
+  type ExportFormat,
+} from '../utils/export';
 
 const router = Router();
 router.use(authenticate);
@@ -21,18 +27,22 @@ const PEOPLE_SORTS: Record<string, string> = {
   last_gift: 'last_donation_at DESC NULLS LAST',
 };
 
-// List people with filters, giving aggregates and pagination.
-//
-// The aggregates are the answer to "one phone number, many donations": people
-// are keyed by phone, so every donation that donor ever made rolls up to the single
-// person row - this endpoint surfaces how many and how much, so the list can
-// show it without N+1 follow-up requests.
-router.get('/', async (req, res) => {
-  const { role, search, sort = 'recent', site, group } = req.query;
-  const page = Math.max(1, Number(req.query.page) || 1);
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
-  const offset = (page - 1) * limit;
+interface PeopleFilters {
+  where: string;
+  values: unknown[];
+  /** The next free placeholder number, for LIMIT/OFFSET on top of the filters. */
+  next: number;
+  orderBy: string;
+}
 
+// The WHERE and the ORDER BY for the people list, built once.
+//
+// Shared with the export below rather than written out twice. An export that
+// re-derives its own filters drifts away from the screen the moment somebody
+// adds the next one, and the person who downloaded the file has no way of
+// knowing that the rows in it are not the rows they were looking at.
+function buildPeopleFilters(q: Record<string, unknown>): PeopleFilters {
+  const { role, search, sort = 'recent', site, group } = q;
   const conditions: string[] = [];
   const values: unknown[] = [];
   let idx = 1;
@@ -67,17 +77,21 @@ router.get('/', async (req, res) => {
     );
   }
 
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  const orderBy = PEOPLE_SORTS[String(sort)] || PEOPLE_SORTS.recent;
+  return {
+    where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
+    values,
+    next: idx,
+    orderBy: PEOPLE_SORTS[String(sort)] || PEOPLE_SORTS.recent,
+  };
+}
 
-  const [data, count] = await Promise.all([
-    pool.query(
-      `SELECT p.*,
+const PEOPLE_SELECT = `p.*,
               COALESCE(g.donation_count, 0)  AS donation_count,
               COALESCE(g.lifetime_total, 0)  AS lifetime_total,
               g.last_donation_at,
-              COALESCE(s.active_subscriptions, 0) AS active_subscriptions
-       FROM people p
+              COALESCE(s.active_subscriptions, 0) AS active_subscriptions`;
+
+const PEOPLE_FROM = `FROM people p
        LEFT JOIN LATERAL (
          SELECT COUNT(*) AS donation_count,
                 SUM(amount) AS lifetime_total,
@@ -87,19 +101,50 @@ router.get('/', async (req, res) => {
        LEFT JOIN LATERAL (
          SELECT COUNT(*) AS active_subscriptions
          FROM subscriptions WHERE person_id = p.id AND status = 'active'
-       ) s ON TRUE
-       ${where}
-       ORDER BY ${orderBy}
-       LIMIT $${idx} OFFSET $${idx + 1}`,
-      [...values, limit, offset]
+       ) s ON TRUE`;
+
+// List people with filters, giving aggregates and pagination.
+//
+// The aggregates are the answer to "one phone number, many donations": people
+// are keyed by phone, so every donation that donor ever made rolls up to the single
+// person row - this endpoint surfaces how many and how much, so the list can
+// show it without N+1 follow-up requests.
+router.get('/', async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+  const offset = (page - 1) * limit;
+
+  const f = buildPeopleFilters(req.query as Record<string, unknown>);
+
+  const [data, count] = await Promise.all([
+    pool.query(
+      `SELECT ${PEOPLE_SELECT}
+       ${PEOPLE_FROM}
+       ${f.where}
+       ORDER BY ${f.orderBy}
+       LIMIT $${f.next} OFFSET $${f.next + 1}`,
+      [...f.values, limit, offset]
     ),
-    pool.query(`SELECT COUNT(*) FROM people p ${where}`, values),
+    pool.query(`SELECT COUNT(*) FROM people p ${f.where}`, f.values),
   ]);
 
   const total = Number(count.rows[0].count);
 
   res.json({
-    people: data.rows.map((r) => ({
+    people: data.rows.map(({ pan: _pan, ...r }) => ({
+      // PAN IS NOT IN THE LIST RESPONSE, and that is the point of destructuring
+      // it out here rather than just leaving it off the screen.
+      //
+      // The query selects p.*, so every column on `people` was on the wire -
+      // including the tax identifier - for anyone who could reach this
+      // endpoint, which includes callers. Nothing rendered it, so it was
+      // invisible in the product and perfectly visible in the network tab, and
+      // a caller could page the list and harvest the lot.
+      //
+      // A PAN has exactly one job in DRM: putting a number on an 80G receipt
+      // for one donor. That is a single-person act, so the single-person
+      // endpoints still return it to whoever may see that person. A page of
+      // twenty-five of them is a bulk disclosure with no use case behind it.
       ...r,
       donation_count: Number(r.donation_count),
       lifetime_total: Number(r.lifetime_total),
@@ -123,6 +168,81 @@ router.get('/import-sites', async (_req, res) => {
     unconfigured: SITE_KEYS.filter((k) => !isSiteConfigured(k)),
   });
 });
+
+/**
+ * The people on screen, as a file.
+ *
+ * NO PAN COLUMN, deliberately. A tax identifier is the one field here that is
+ * worth stealing on its own, and a spreadsheet of several thousand of them
+ * leaves DRM's access control behind the moment it is downloaded - it then
+ * lives in a Downloads folder and whatever WhatsApp group it gets forwarded to.
+ * The single-person screen still shows it to whoever may see that person.
+ */
+async function exportPeopleFile(
+  req: import('express').Request,
+  res: import('express').Response,
+  format: ExportFormat
+) {
+  try {
+    const f = buildPeopleFilters(req.query as Record<string, unknown>);
+    const rows = await pool.query(
+      `SELECT ${PEOPLE_SELECT}
+       ${PEOPLE_FROM}
+       ${f.where}
+       ORDER BY ${f.orderBy}
+       LIMIT ${EXPORT_ROW_CAP + 1}`,
+      f.values
+    );
+    const truncated = rows.rows.length > EXPORT_ROW_CAP;
+
+    await sendExport(res, format, {
+      name: 'people',
+      truncated,
+      rows: truncated ? rows.rows.slice(0, EXPORT_ROW_CAP) : rows.rows,
+      filterSummary: describeFilters(req.query as Record<string, unknown>, {
+        search: 'Search',
+        role: 'Role',
+        site: 'Site',
+        group: 'Page group',
+        sort: 'Sorted by',
+      }),
+      columns: [
+        { header: 'Name', value: (r) => r.name },
+        { header: 'Phone', value: (r) => r.phone, kind: 'phone' },
+        { header: 'Email', value: (r) => r.email },
+        // The structured city where DRM has one, and the free-text line it was
+        // imported with where it does not - a donor entered before the address
+        // was split into parts has only the latter.
+        { header: 'City/Address', value: (r) => r.address_city || r.address },
+        { header: 'Roles', value: (r) => r.roles },
+        { header: 'Total donated', value: (r) => r.lifetime_total, kind: 'money' },
+        { header: 'Donations', value: (r) => r.donation_count, kind: 'number' },
+        { header: 'Last donation', value: (r) => r.last_donation_at, kind: 'datetime' },
+        { header: 'Added', value: (r) => r.created_at, kind: 'datetime' },
+      ],
+    });
+  } catch (err) {
+    console.error('people.export error:', err);
+    res.status(500).json({ error: 'Could not build that export' });
+  }
+}
+
+// Registered BEFORE '/:id', for the same reason '/import-sites' is: Express
+// matches in order, and "export.csv" is a perfectly good person id as far as
+// the route pattern is concerned.
+//
+// WHY THESE TWO ARE GUARDED WHEN THE SCREEN IS NOT
+// The router is mounted readOnlyFor('caller'), so a caller may read People -
+// they need to look a donor up mid-call. Downloading the whole donor base is a
+// different act from looking one person up, and it is the act that takes the
+// temple's donor list out of DRM entirely. So the file is for admins and
+// accountants, and the screen stays open to everyone who needs it.
+router.get('/export.csv', authorize('admin', 'accountant'), (req, res) =>
+  exportPeopleFile(req, res, 'csv')
+);
+router.get('/export.xlsx', authorize('admin', 'accountant'), (req, res) =>
+  exportPeopleFile(req, res, 'xlsx')
+);
 
 // Get person by id (with donation history)
 router.get('/:id', async (req, res) => {

@@ -26,7 +26,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiClient } from "@/lib/api";
-import { Select, buttonSecondary, inputClass } from "@/components/ui";
+import { Alert, Button, Card, Checkbox, Field, Input, Select, Textarea } from "@/components/ui";
 
 export interface SavedLink {
   id: string;
@@ -127,24 +127,14 @@ export function SendLink({
     }
   }
 
-  const waIcon = (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden className="w-4 h-4">
-      <path d="M17.5 14.4c-.3-.2-1.7-.9-2-1-.3-.1-.5-.1-.7.1-.2.3-.7 1-.9 1.2-.2.2-.3.2-.6.1-.3-.2-1.2-.5-2.3-1.4-.9-.8-1.4-1.7-1.6-2-.2-.3 0-.5.1-.6l.5-.5c.1-.2.2-.3.3-.5 0-.2 0-.4 0-.5 0-.2-.7-1.6-.9-2.2-.2-.6-.5-.5-.7-.5h-.6c-.2 0-.5.1-.8.4-.3.3-1 1-1 2.5s1.1 2.9 1.2 3.1c.1.2 2.1 3.2 5 4.5.7.3 1.3.5 1.7.6.7.2 1.4.2 1.9.1.6-.1 1.7-.7 2-1.4.2-.7.2-1.2.2-1.4-.1-.1-.3-.2-.6-.3z" />
-      <path d="M12 2a10 10 0 0 0-8.6 15L2 22l5.2-1.4A10 10 0 1 0 12 2zm0 18.2c-1.6 0-3.1-.4-4.4-1.2l-.3-.2-3.1.8.8-3-.2-.3A8.2 8.2 0 1 1 12 20.2z" />
-    </svg>
-  );
-
-  return (
-    <div className={compact ? "" : "rounded-lg border border-[var(--line-soft)] bg-white p-3"}>
+  const body = (
+    <>
       {!compact && (
-        <div className="flex items-center justify-between gap-2 mb-2">
-          <p className="text-sm font-semibold text-slate-900">Send them a link</p>
-          <button
-            onClick={() => setAdding((v) => !v)}
-            className="text-xs text-[var(--accent)] hover:underline"
-          >
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <p className="text-sm font-semibold text-ink">Send them a link</p>
+          <Button size="xs" variant="ghost" onClick={() => setAdding((v) => !v)}>
             {adding ? "Cancel" : "Save a new link"}
-          </button>
+          </Button>
         </div>
       )}
 
@@ -178,31 +168,39 @@ export function SendLink({
                     : undefined,
               }))}
             />
-            <button
+            {/* The one agreed WhatsApp green, from the shared variant. Two
+                different hover treatments for it used to live in this file and
+                send-qr.tsx; a caller who sends links and QRs all day saw the
+                same button behave two ways. */}
+            <Button
+              variant="whatsapp"
+              icon="message"
               onClick={() => void send()}
-              disabled={!link || busy}
+              disabled={!link}
+              // Button blocks its own click while loading, so the guard inside
+              // send() is no longer the only thing standing between an
+              // impatient double-click and two WhatsApp windows.
+              loading={busy}
               // The calling screen's W shortcut clicks this button rather than
               // duplicating the send logic, so the two can never drift apart.
               data-send-whatsapp
               title="Opens WhatsApp on this computer, in this donor's chat"
-              className="inline-flex items-center gap-2 rounded-lg bg-[#25D366] px-4 py-2 text-sm font-semibold text-white hover:brightness-95 disabled:opacity-50 transition"
             >
-              {waIcon}
-              {busy ? "Opening…" : "WhatsApp"}
-            </button>
+              WhatsApp
+            </Button>
           </div>
 
           {compact && (
             <div className="mt-1.5 flex items-center gap-3">
               <button
                 onClick={() => setAdding(true)}
-                className="text-[11px] text-slate-400 hover:text-[var(--accent)] underline underline-offset-2"
+                className="text-2xs text-ink-faint underline underline-offset-2 hover:text-brand-700"
               >
                 Save a new link
               </button>
               <a
                 href="/calling/links"
-                className="text-[11px] text-slate-400 hover:text-[var(--accent)] underline underline-offset-2"
+                className="text-2xs text-ink-faint underline underline-offset-2 hover:text-brand-700"
               >
                 My links
               </a>
@@ -210,20 +208,24 @@ export function SendLink({
           )}
 
           {sentLabel && (
-            <p className="mt-2 text-xs text-emerald-700">
+            <Alert tone="good" className="mt-2">
               WhatsApp opened with the {sentLabel} link. Press send there — DRM can&apos;t do that part for you.
-            </p>
+            </Alert>
           )}
-          {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
+          {error && (
+            <Alert tone="danger" className="mt-2">
+              {error}
+            </Alert>
+          )}
 
           {link && (
             <div className="mt-2">
               {editing ? (
-                <textarea
+                <Textarea
                   value={message || preview}
                   onChange={(e) => setMessage(e.target.value)}
                   rows={4}
-                  className={`${inputClass} w-full text-xs resize-y`}
+                  className="resize-y text-xs"
                 />
               ) : (
                 <button
@@ -232,19 +234,27 @@ export function SendLink({
                     setEditing(true);
                   }}
                   title="Click to edit before sending"
-                  className="w-full text-left rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600 whitespace-pre-line hover:bg-slate-100 transition-colors"
+                  className="w-full whitespace-pre-line rounded-control bg-sunken px-3 py-2 text-left text-xs text-ink-soft transition-colors hover:bg-brand-50"
                 >
                   {preview}
                 </button>
               )}
-              <p className="mt-1 text-[11px] text-slate-400">
+              <p className="mt-1 text-2xs text-ink-faint">
                 {editing ? "Edit, then press WhatsApp." : "Click the message to change it for this donor."}
               </p>
             </div>
           )}
         </>
       )}
-    </div>
+    </>
+  );
+
+  // Compact mode is dropped inside a row on the calling screen, which draws its
+  // own surface - a second bordered card inside it would show a double edge.
+  return compact ? body : (
+    <Card padded={false} className="p-3">
+      {body}
+    </Card>
   );
 }
 
@@ -280,42 +290,48 @@ function NewLinkForm({ onDone }: { onDone: (createdId?: string) => void }) {
     }
   }
 
+  // Real labels rather than placeholder-only fields: a placeholder disappears
+  // the moment someone types, so a caller who tabs back to check which box
+  // wanted the URL has nothing left to read.
   return (
     <div className="space-y-2">
-      <input
-        value={label}
-        onChange={(e) => setLabel(e.target.value)}
-        placeholder="What to call it — Govardhan Puja 2026"
-        className={`${inputClass} w-full text-sm`}
-      />
-      <input
-        value={url}
-        onChange={(e) => setUrl(e.target.value)}
-        placeholder="https://harekrishnavizag.org/… (paste the full link, UTM and all)"
-        className={`${inputClass} w-full text-sm`}
-      />
-      <input
-        value={seva}
-        onChange={(e) => setSeva(e.target.value)}
-        placeholder="Seva name as a donor would say it (optional)"
-        className={`${inputClass} w-full text-sm`}
-      />
-      <label className="flex items-center gap-2 text-xs text-slate-600">
-        <input type="checkbox" checked={shared} onChange={(e) => setShared(e.target.checked)} className="rounded border-slate-300" />
-        Everyone can send this one
-      </label>
-      {error && <p className="text-xs text-red-700">{error}</p>}
+      <Field label="What to call it" htmlFor="new-link-label" required>
+        <Input
+          id="new-link-label"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="Govardhan Puja 2026"
+        />
+      </Field>
+      <Field label="The link" htmlFor="new-link-url" hint="Paste the full link, UTM and all." required>
+        <Input
+          id="new-link-url"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://harekrishnavizag.org/…"
+        />
+      </Field>
+      <Field label="Seva name" htmlFor="new-link-seva" hint="As a donor would say it. Optional.">
+        <Input
+          id="new-link-seva"
+          value={seva}
+          onChange={(e) => setSeva(e.target.value)}
+          placeholder="Annadan"
+        />
+      </Field>
+      <Checkbox checked={shared} onChange={setShared} label="Everyone can send this one" />
+      {error && <Alert tone="danger">{error}</Alert>}
       <div className="flex gap-2">
-        <button onClick={() => void save()} disabled={busy || !label.trim() || !url.trim()} className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">
-          {busy ? "Saving…" : "Save link"}
-        </button>
-        <button onClick={() => onDone()} className={buttonSecondary}>
+        <Button size="sm" onClick={() => void save()} disabled={!label.trim() || !url.trim()} loading={busy}>
+          Save link
+        </Button>
+        <Button size="sm" variant="secondary" onClick={() => onDone()}>
           Cancel
-        </button>
+        </Button>
       </div>
-      <p className="text-[11px] text-slate-400">
-        Tip: the link can contain <code className="text-slate-500">{"{lead}"}</code> or{" "}
-        <code className="text-slate-500">{"{caller}"}</code> — DRM fills them in, so a donation that came from a call
+      <p className="text-2xs text-ink-faint">
+        Tip: the link can contain <code className="text-ink-muted">{"{lead}"}</code> or{" "}
+        <code className="text-ink-muted">{"{caller}"}</code> — DRM fills them in, so a donation that came from a call
         can be told apart from one that arrived on its own.
       </p>
     </div>

@@ -27,18 +27,22 @@ import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency, number, relativeDate, shortDate } from "@/lib/format";
 import {
+  Alert,
   Badge,
+  Button,
   Card,
   CardHeader,
   EmptyState,
+  Field,
+  Icon,
   PageHeader,
   Select,
   TableShell,
+  Tbody,
   Td,
   Th,
-  buttonPrimary,
+  Thead,
   buttonSecondary,
-  inputClass,
 } from "@/components/ui";
 import { downloadFromApi, SPREADSHEET_ACCEPT, toBase64 } from "@/lib/spreadsheet";
 
@@ -186,16 +190,20 @@ export default function UploadsPage() {
   return (
     <div>
       <PageHeader
+        eyebrow="Calling"
         title="Uploaded sheets"
         subtitle="Excel or CSV from the office — every one kept, so a fresh export never costs you the calls already made"
         actions={
+          // A next/link anchor wearing the button class rather than LinkButton:
+          // LinkButton is a plain <a>, which would drop out of the client
+          // router.
           <Link href="/leads" className={buttonSecondary}>
             All leads
           </Link>
         }
       />
 
-      {error && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}
+      {error && <Alert tone="danger">{error}</Alert>}
 
       {/* ------------------------------------------------------------ upload */}
       <Card className="mb-5">
@@ -219,14 +227,14 @@ export default function UploadsPage() {
             const f = e.dataTransfer.files?.[0];
             if (f) void handleFile(f);
           }}
-          className={`rounded-xl border-2 border-dashed px-6 py-10 text-center cursor-pointer transition-colors ${
-            dragging ? "border-[var(--accent)] bg-[var(--accent-wash)]" : "border-slate-300 hover:border-slate-400 hover:bg-slate-50"
+          className={`cursor-pointer rounded-card border-2 border-dashed px-6 py-10 text-center transition-colors ${
+            dragging ? "border-brand-600 bg-brand-50" : "border-line-strong hover:border-brand-400 hover:bg-sunken"
           }`}
         >
-          <p className="text-sm font-medium text-slate-900">
+          <p className="text-sm font-medium text-ink">
             {busy ? "Reading the file…" : "Drop an Excel file or CSV here, or click to choose one"}
           </p>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1 text-xs text-ink-muted">
             Every tab of a workbook is read separately; a CSV is read as one. Columns are matched by their
             headings — Donor Number, Mobile Number, Enrolled By, Total Amount Donated and the rest are all
             recognised as they are written.
@@ -237,20 +245,19 @@ export default function UploadsPage() {
       {/* ------------------------------------------------- what it would do */}
       {drafts.length > 0 && (
         <div className="mb-6 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-slate-900">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <p className="text-sm font-semibold text-ink">
               Read {drafts.length} sheet{drafts.length === 1 ? "" : "s"} — nothing has been saved yet
             </p>
-            <label className="flex items-center gap-2 text-xs text-slate-500">
-              Assign what gets added to
+            <Field label="Assign what gets added to" className="w-56">
               <Select
                 value={assignTo}
                 onChange={setAssignTo}
-                className="min-w-[10rem]"
+                ariaLabel="Assign what gets added to"
                 placeholder="Nobody yet"
                 options={[{ value: "", label: "Nobody yet" }, ...users.map((u) => ({ value: u.id, label: u.name }))]}
               />
-            </label>
+            </Field>
           </div>
 
           {drafts.map((b) => (
@@ -261,15 +268,12 @@ export default function UploadsPage() {
               />
 
               {b.error ? (
-                <div className="rounded-lg bg-red-50 px-4 py-3">
-                  <p className="text-sm font-medium text-red-900">{b.error}</p>
-                  <p className="text-xs text-red-800 mt-0.5">
-                    Without a phone column there is nobody to ring. Headings found: {(b.headers ?? []).join(", ")}
-                  </p>
-                </div>
+                <Alert tone="danger" title={b.error}>
+                  Without a phone column there is nobody to ring. Headings found: {(b.headers ?? []).join(", ")}
+                </Alert>
               ) : (
                 <>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                     <Tally label="Will be added" value={b.counts?.new ?? 0} tone="good" />
                     <Tally label="Already leads" value={b.counts?.updated ?? 0} />
                     <Tally label="Same number twice" value={b.counts?.duplicate_in_file ?? 0} />
@@ -280,7 +284,7 @@ export default function UploadsPage() {
                     />
                   </div>
 
-                  <div className="mt-3 space-y-1.5 text-xs text-slate-600">
+                  <div className="mt-3 space-y-1.5 text-xs text-ink-soft">
                     {(b.counts?.already_donors ?? 0) > 0 && (
                       <p>
                         {number(b.counts!.already_donors)} of the new rows are people DRM already knows as donors — they
@@ -298,7 +302,7 @@ export default function UploadsPage() {
                       </p>
                     )}
                     {(b.unreachable_amount ?? 0) > 0 && (
-                      <p className="text-amber-700">
+                      <p className="text-warn">
                         {currency(b.unreachable_amount!)} of giving sits on rows with no usable phone number. Worth
                         fixing in the source sheet — nobody can ring those donors.
                       </p>
@@ -322,13 +326,17 @@ export default function UploadsPage() {
                       shown rather than assumed. */}
                   {b.mapping && (
                     <div className="mt-4">
-                      <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
+                      <p className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-ink-muted">
                         Columns read
                       </p>
                       <div className="flex flex-wrap gap-1.5">
                         {Object.entries(b.mapping).map(([field, idx]) => (
-                          <span key={field} className="rounded-md bg-slate-100 px-2 py-1 text-[11px] text-slate-700">
-                            <span className="text-slate-500">{b.headers?.[idx] ?? `col ${idx + 1}`}</span> →{" "}
+                          <span
+                            key={field}
+                            className="inline-flex items-center gap-1 rounded-md bg-sunken px-2 py-1 text-xs text-ink-soft"
+                          >
+                            <span className="text-ink-muted">{b.headers?.[idx] ?? `col ${idx + 1}`}</span>
+                            <Icon name="arrowRight" size={12} className="text-ink-faint" />
                             {FIELD_LABELS[field] ?? field}
                           </span>
                         ))}
@@ -336,7 +344,10 @@ export default function UploadsPage() {
                           .map((h, i) => ({ h, i }))
                           .filter(({ h, i }) => h && !Object.values(b.mapping!).includes(i))
                           .map(({ h }) => (
-                            <span key={h} className="rounded-md border border-dashed border-slate-200 px-2 py-1 text-[11px] text-slate-400">
+                            <span
+                              key={h}
+                              className="rounded-md border border-dashed border-line-strong px-2 py-1 text-xs text-ink-faint"
+                            >
                               {h} — kept, not used
                             </span>
                           ))}
@@ -345,14 +356,14 @@ export default function UploadsPage() {
                   )}
 
                   {b.samples?.new?.length ? (
-                    <ul className="mt-4 divide-y divide-slate-100 text-xs">
+                    <ul className="mt-4 divide-y divide-line-soft text-xs">
                       {b.samples.new.slice(0, 4).map((r) => (
-                        <li key={r.row_number} className="py-1.5 flex justify-between gap-3">
-                          <span className="truncate text-slate-700">
+                        <li key={r.row_number} className="flex justify-between gap-3 py-1.5">
+                          <span className="truncate text-ink-soft">
                             {r.name || r.phone}{" "}
-                            {r.preacher_code && <span className="text-slate-400">· {r.preacher_code}</span>}
+                            {r.preacher_code && <span className="text-ink-faint">· {r.preacher_code}</span>}
                           </span>
-                          <span className="tabular-nums text-slate-500 whitespace-nowrap">
+                          <span className="whitespace-nowrap tabular-nums text-ink-muted">
                             {r.amount_total ? currency(r.amount_total) : r.donor_code}
                           </span>
                         </li>
@@ -361,12 +372,16 @@ export default function UploadsPage() {
                   ) : null}
 
                   <div className="mt-5 flex flex-wrap justify-end gap-2">
-                    <button onClick={() => void discard(b)} className={buttonSecondary}>
+                    <Button variant="secondary" onClick={() => void discard(b)}>
                       Discard
-                    </button>
-                    <button onClick={() => void apply(b)} disabled={busy || !(b.counts?.new || b.counts?.updated)} className={buttonPrimary}>
-                      {busy ? "Applying…" : `Add ${number(b.counts?.new ?? 0)} and update ${number(b.counts?.updated ?? 0)}`}
-                    </button>
+                    </Button>
+                    <Button
+                      onClick={() => void apply(b)}
+                      disabled={!(b.counts?.new || b.counts?.updated)}
+                      loading={busy}
+                    >
+                      {`Add ${number(b.counts?.new ?? 0)} and update ${number(b.counts?.updated ?? 0)}`}
+                    </Button>
                   </div>
                 </>
               )}
@@ -376,91 +391,89 @@ export default function UploadsPage() {
       )}
 
       {/* ---------------------------------------------------------- history */}
-      <Card padded={false}>
-        <div className="px-5 pt-5">
-          <CardHeader
-            title="Every sheet ever uploaded"
-            subtitle="Kept row by row. A fresher export adds and updates — it never removes anyone, and never touches a call that has been made."
-          />
-        </div>
-        <TableShell>
-          <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
+      <CardHeader
+        title="Every sheet ever uploaded"
+        subtitle="Kept row by row. A fresher export adds and updates — it never removes anyone, and never touches a call that has been made."
+      />
+      <TableShell>
+        <Thead>
+          <Th>Sheet</Th>
+          <Th align="right">Rows</Th>
+          <Th align="right">Added</Th>
+          <Th align="right">Updated</Th>
+          <Th>Uploaded</Th>
+          <Th align="center">State</Th>
+          <Th align="right">File</Th>
+        </Thead>
+        <Tbody>
+          {!history.length ? (
             <tr>
-              <Th>Sheet</Th>
-              <Th align="right">Rows</Th>
-              <Th align="right">Added</Th>
-              <Th align="right">Updated</Th>
-              <Th>Uploaded</Th>
-              <Th align="center">State</Th>
-              <Th align="right">File</Th>
+              <td colSpan={7}>
+                <EmptyState title="Nothing uploaded yet" message="Drop an Excel file or CSV above to get started." />
+              </td>
             </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {!history.length ? (
-              <tr>
-                <td colSpan={7}>
-                  <EmptyState title="Nothing uploaded yet" message="Drop an Excel file or CSV above to get started." />
-                </td>
+          ) : (
+            history.map((b) => (
+              <tr key={b.id}>
+                <Td>
+                  <span className="font-medium text-ink">{b.sheet_name ?? "Sheet"}</span>
+                  <div className="max-w-xs truncate text-xs text-ink-muted" title={b.filename}>
+                    {b.filename}
+                  </div>
+                </Td>
+                <Td align="right" className="tabular-nums">{number(b.rows_total)}</Td>
+                <Td align="right" className="tabular-nums">{b.leads_added ? number(b.leads_added) : <span className="text-ink-faint">—</span>}</Td>
+                <Td align="right" className="tabular-nums">{b.leads_updated ? number(b.leads_updated) : <span className="text-ink-faint">—</span>}</Td>
+                <Td className="text-xs text-ink-muted">
+                  {shortDate(b.created_at)} · {relativeDate(b.created_at)}
+                  {b.uploaded_by_name && <div className="text-ink-faint">{b.uploaded_by_name}</div>}
+                </Td>
+                <Td align="center">
+                  {b.status === "applied" ? (
+                    <Badge tone="good">applied</Badge>
+                  ) : (
+                    <Badge tone="warn">read, not applied</Badge>
+                  )}
+                </Td>
+                <Td align="right">
+                  {/* The workbook itself, not a reconstruction of it. Only
+                      offered where one was actually kept — uploads from
+                      before file storage was set up have their rows and
+                      nothing else, and saying so beats a button that 404s.
+                      This is one stored file, not the list on screen, so it
+                      stays a plain button rather than an ExportButton. */}
+                  {b.file_key ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon="download"
+                      onClick={() =>
+                        void downloadFromApi(
+                          `/api/crm/import/batches/${b.id}/file`,
+                          b.filename
+                        ).catch((e) => setError(e instanceof Error ? e.message : "Could not fetch that file"))
+                      }
+                    >
+                      Download
+                    </Button>
+                  ) : (
+                    <span className="text-xs text-ink-faint">not kept</span>
+                  )}
+                </Td>
               </tr>
-            ) : (
-              history.map((b) => (
-                <tr key={b.id} className="hover:bg-slate-50/60">
-                  <Td>
-                    <span className="font-medium text-slate-900">{b.sheet_name ?? "Sheet"}</span>
-                    <div className="text-[11px] text-slate-500 truncate max-w-xs" title={b.filename}>
-                      {b.filename}
-                    </div>
-                  </Td>
-                  <Td align="right" className="tabular-nums text-slate-600">{number(b.rows_total)}</Td>
-                  <Td align="right" className="tabular-nums">{b.leads_added ? number(b.leads_added) : <span className="text-slate-300">—</span>}</Td>
-                  <Td align="right" className="tabular-nums text-slate-600">{b.leads_updated ? number(b.leads_updated) : <span className="text-slate-300">—</span>}</Td>
-                  <Td className="text-xs text-slate-500">
-                    {shortDate(b.created_at)} · {relativeDate(b.created_at)}
-                    {b.uploaded_by_name && <div className="text-slate-400">{b.uploaded_by_name}</div>}
-                  </Td>
-                  <Td align="center">
-                    {b.status === "applied" ? (
-                      <Badge tone="good">applied</Badge>
-                    ) : (
-                      <Badge tone="warn">read, not applied</Badge>
-                    )}
-                  </Td>
-                  <Td align="right">
-                    {/* The workbook itself, not a reconstruction of it. Only
-                        offered where one was actually kept — uploads from
-                        before file storage was set up have their rows and
-                        nothing else, and saying so beats a button that 404s. */}
-                    {b.file_key ? (
-                      <button
-                        onClick={() =>
-                          void downloadFromApi(
-                            `/api/crm/import/batches/${b.id}/file`,
-                            b.filename
-                          ).catch((e) => setError(e instanceof Error ? e.message : "Could not fetch that file"))
-                        }
-                        className="rounded-lg px-2 py-1 text-xs text-slate-600 hover:bg-slate-100"
-                      >
-                        Download
-                      </button>
-                    ) : (
-                      <span className="text-xs text-slate-300">not kept</span>
-                    )}
-                  </Td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </TableShell>
-      </Card>
+            ))
+          )}
+        </Tbody>
+      </TableShell>
     </div>
   );
 }
 
 function Tally({ label, value, tone = "neutral" }: { label: string; value: number; tone?: "neutral" | "good" | "warn" }) {
-  const tones = { neutral: "text-slate-900", good: "text-emerald-700", warn: "text-amber-700" };
+  const tones = { neutral: "text-ink", good: "text-good", warn: "text-warn" };
   return (
-    <div className="rounded-lg border border-[var(--line-soft)] px-3 py-2">
-      <p className="text-[11px] uppercase tracking-wide text-slate-500">{label}</p>
+    <div className="rounded-card border border-line-soft px-3 py-2">
+      <p className="text-2xs uppercase tracking-wide text-ink-muted">{label}</p>
       <p className={`text-lg font-semibold tabular-nums ${tones[tone]}`}>{number(value)}</p>
     </div>
   );

@@ -16,19 +16,26 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { currency, dueLabel, number, shortDate } from "@/lib/format";
+import { currency, dueLabel, istDayPlus, istInputToISO, istInstant, number, shortDate } from "@/lib/format";
 import {
+  Alert,
+  AlertPicker,
   Badge,
+  Button,
   Card,
   CardHeader,
   EmptyState,
+  Field,
+  Input,
+  LinkButton,
   Modal,
   PageHeader,
+  SearchInput,
+  SegmentedControl,
   Select,
-  buttonPrimary,
-  buttonSecondary,
-  inputClass,
-  AlertPicker,
+  Skeleton,
+  Textarea,
+  Toolbar,
 } from "@/components/ui";
 import { ALERT_OPTIONS, DEFAULT_ALERTS } from "@/lib/reminders";
 
@@ -80,11 +87,10 @@ const BUCKETS: Bucket[] = [
   },
 ];
 
+// 10am on the n-th day from now at the temple, counted off the IST calendar so
+// that the day a caller picks is the day the office will see.
 function inDays(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + n);
-  d.setHours(10, 0, 0, 0);
-  return d.toISOString();
+  return istInstant(istDayPlus(n), "10:00").toISOString();
 }
 
 interface Batch {
@@ -183,28 +189,45 @@ export default function FollowUpsPage() {
   }
 
   const overdueCount = data.overdue?.length ?? 0;
+  const activeFilters = [batch, preacher, who, search.trim(), mineOnly].filter(Boolean).length;
+  const clearFilters = () => {
+    setBatch("");
+    setPreacher("");
+    setWho("");
+    setSearch("");
+    setMineOnly(false);
+  };
 
   return (
     <div>
       <PageHeader
+        eyebrow="Calling"
         title="Follow-ups"
         subtitle="Calls the temple said it would make"
         actions={
-          <div className="flex gap-2">
-            <button
-              onClick={() => setMineOnly((v) => !v)}
-              className={mineOnly ? buttonPrimary : buttonSecondary}
-              disabled={!me}
-            >
-              {mineOnly ? "Showing just mine" : "Just mine"}
-            </button>
-            <button onClick={() => setAdding(true)} className={buttonSecondary}>
+          <>
+            {/* Who the board is for, as a switch rather than a primary button.
+                It used to be `mineOnly ? buttonPrimary : buttonSecondary`, so
+                when it was on it looked exactly like "Start calling" beside it —
+                two different things, one appearance. Greyed out rather than
+                hidden when nobody is signed in, because there is then no id to
+                filter on and a control that silently does nothing is worse. */}
+            <SegmentedControl
+              options={[
+                { value: "everyone", label: "Everyone" },
+                { value: "mine", label: "Just mine" },
+              ]}
+              value={mineOnly ? "mine" : "everyone"}
+              onChange={(v) => setMineOnly(v === "mine")}
+              className={me ? "" : "pointer-events-none opacity-45"}
+            />
+            <Button variant="secondary" icon="bell" onClick={() => setAdding(true)}>
               Someone promised to give
-            </button>
-            <Link href="/calling/queue" className={buttonPrimary}>
+            </Button>
+            <LinkButton href="/calling/queue" variant="primary" icon="phoneOutgoing">
               Start calling
-            </Link>
-          </div>
+            </LinkButton>
+          </>
         }
       />
 
@@ -213,13 +236,12 @@ export default function FollowUpsPage() {
           people — "the Janmashtami file", "last year's general donations" —
           and a board of four hundred callbacks is only workable one sheet at
           a time. */}
-      <div className="mb-5 flex flex-wrap items-end gap-2">
-        <label className="min-w-[13rem] flex-1 text-xs text-slate-500">
-          Sheet
+      <Toolbar onClear={clearFilters} activeCount={activeFilters}>
+        <Field label="Sheet" className="min-w-[13rem] flex-1">
           <Select
             value={batch}
             onChange={setBatch}
-            className="mt-1 w-full"
+            ariaLabel="Sheet"
             options={[
               { value: "", label: "Every sheet" },
               { value: "none", label: "Not from a sheet" },
@@ -230,15 +252,14 @@ export default function FollowUpsPage() {
               })),
             ]}
           />
-        </label>
+        </Field>
 
         {!!config?.preachers.length && (
-          <label className="min-w-[10rem] flex-1 text-xs text-slate-500">
-            Preacher
+          <Field label="Preacher" className="min-w-[10rem] flex-1">
             <Select
               value={preacher}
               onChange={setPreacher}
-              className="mt-1 w-full"
+              ariaLabel="Preacher"
               options={[
                 { value: "", label: "Anyone's" },
                 { value: "none", label: "No preacher" },
@@ -248,61 +269,41 @@ export default function FollowUpsPage() {
                 })),
               ]}
             />
-          </label>
+          </Field>
         )}
 
-        <label className="min-w-[10rem] flex-1 text-xs text-slate-500">
-          Caller
+        <Field label="Caller" className="min-w-[10rem] flex-1">
           <Select
             value={mineOnly ? (me ?? "") : who}
             onChange={(v) => {
               setMineOnly(false);
               setWho(v);
             }}
-            className="mt-1 w-full"
+            ariaLabel="Caller"
             options={[
               { value: "", label: "Everyone" },
               { value: "unassigned", label: "Unassigned" },
               ...(config?.users ?? []).map((u) => ({ value: u.id, label: u.name })),
             ]}
           />
-        </label>
+        </Field>
 
-        <label className="min-w-[10rem] flex-1 text-xs text-slate-500">
-          Find
-          <input
+        <Field label="Find" htmlFor="follow-ups-search" className="min-w-[10rem] flex-1">
+          <SearchInput
+            id="follow-ups-search"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={setSearch}
             placeholder="Name, number or town"
-            className={`${inputClass} mt-1 w-full`}
           />
-        </label>
+        </Field>
+      </Toolbar>
 
-        {(batch || preacher || who || search || mineOnly) && (
-          <button
-            onClick={() => {
-              setBatch("");
-              setPreacher("");
-              setWho("");
-              setSearch("");
-              setMineOnly(false);
-            }}
-            className="rounded-lg px-3 py-2 text-xs text-slate-500 hover:bg-slate-100"
-          >
-            Clear
-          </button>
-        )}
-      </div>
-
-      {error && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}
+      {error && <Alert tone="danger">{error}</Alert>}
 
       {!loading && overdueCount === 0 && (
-        <Card className="mb-5 border-emerald-200 bg-emerald-50/60">
-          <p className="text-sm font-medium text-emerald-900">
-            Nothing is overdue{extra ? " in what you are looking at" : ""}.
-          </p>
-          <p className="text-xs text-emerald-800 mt-0.5">Every callback that was promised has either happened or is still in the future.</p>
-        </Card>
+        <Alert tone="good" title={`Nothing is overdue${extra ? " in what you are looking at" : ""}.`}>
+          Every callback that was promised has either happened or is still in the future.
+        </Alert>
       )}
 
       <div className="space-y-6">
@@ -318,33 +319,36 @@ export default function FollowUpsPage() {
               </div>
 
               {loading ? (
-                <div className="px-5 pb-5 space-y-2">
+                <div className="space-y-2 px-5 pb-5">
                   {[0, 1, 2].map((i) => (
-                    <div key={i} className="h-12 rounded-lg bg-slate-100 animate-pulse" />
+                    <Skeleton key={i} className="h-12 w-full" />
                   ))}
                 </div>
               ) : !rows.length ? (
                 <div className="px-5 pb-5">
-                  <p className="text-sm text-slate-500">Nothing here.</p>
+                  <p className="text-sm text-ink-muted">Nothing here.</p>
                 </div>
               ) : (
-                <ul className="divide-y divide-slate-100 border-t border-[var(--line-soft)]">
+                <ul className="divide-y divide-line-soft border-t border-line-soft">
                   {rows.map((l) => (
-                    <li key={l.id} className="px-5 py-3 flex flex-wrap items-center gap-x-4 gap-y-2 hover:bg-slate-50/60">
+                    <li
+                      key={l.id}
+                      className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3 transition-colors hover:bg-brand-50/60"
+                    >
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <Link href={`/leads/${l.id}`} className="font-medium text-slate-900 hover:text-[var(--accent)] truncate">
+                          <Link href={`/leads/${l.id}`} className="truncate font-medium text-ink hover:text-brand-700">
                             {l.name || l.phone}
                           </Link>
                           {l.status_label && <Badge tone="info">{l.status_label}</Badge>}
                           {l.donation_count ? (
-                            <span className="block text-xs text-slate-500 mb-1">
+                            <span className="text-xs text-ink-muted">
                               given {currency(Number(l.total_donated ?? 0))}
                             </span>
                           ) : null}
                         </div>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          <span className={b.tone === "danger" ? "text-amber-700 font-medium" : ""}>
+                        <p className="mt-0.5 text-xs text-ink-muted">
+                          <span className={b.tone === "danger" ? "font-medium text-warn" : ""}>
                             {l.next_follow_up_at
                               ? `${shortDate(l.next_follow_up_at)} · ${dueLabel(l.next_follow_up_at)}`
                               : ""}
@@ -356,31 +360,23 @@ export default function FollowUpsPage() {
                       </div>
 
                       <div className="flex items-center gap-1.5">
-                        <a
-                          href={`tel:+91${l.phone}`}
-                          className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
-                        >
+                        <LinkButton href={`tel:+91${l.phone}`} variant="primary" size="xs" icon="phone">
                           Call
-                        </a>
-                        <button
-                          onClick={() => void push(l.id, 1)}
-                          className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
-                        >
+                        </LinkButton>
+                        <Button variant="secondary" size="xs" onClick={() => void push(l.id, 1)}>
                           Tomorrow
-                        </button>
-                        <button
-                          onClick={() => void push(l.id, 7)}
-                          className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
-                        >
+                        </Button>
+                        <Button variant="secondary" size="xs" onClick={() => void push(l.id, 7)}>
                           Next week
-                        </button>
-                        <button
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="xs"
                           onClick={() => void drop(l.id)}
                           title="Remove the callback without changing the lead"
-                          className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-500 hover:bg-slate-50"
                         >
                           Drop
-                        </button>
+                        </Button>
                       </div>
                     </li>
                   ))}
@@ -401,9 +397,9 @@ export default function FollowUpsPage() {
                 : "Follow-ups appear here as callers book them during calls, and you can add one yourself when a donor rings the temple."
             }
             action={
-              <Link href="/calling/queue" className={buttonPrimary}>
+              <LinkButton href="/calling/queue" variant="primary" icon="phoneOutgoing">
                 Start calling
-              </Link>
+              </LinkButton>
             }
           />
         </Card>
@@ -454,12 +450,7 @@ function PromiseDialog({
   const [assignee, setAssignee] = useState("");
   // Default to a sensible hour rather than midnight: "the 12th" means the 12th
   // during the day, and a reminder timed at 00:00 fires the night before.
-  const [when, setWhen] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 7);
-    d.setHours(10, 0, 0, 0);
-    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  });
+  const [when, setWhen] = useState(() => `${istDayPlus(7)}T10:00`);
   const [alerts, setAlerts] = useState<number[]>(DEFAULT_ALERTS);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -467,128 +458,127 @@ function PromiseDialog({
   const ready = phone.replace(/\D/g, "").length >= 10 && !!when;
 
   return (
-    <Modal title="Someone promised to give" onClose={onClose}>
-      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+    <Modal
+      title="Someone promised to give"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            loading={busy}
+            disabled={!ready}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                await apiClient.post("/api/crm/promises", {
+                  phone,
+                  name: name.trim() || undefined,
+                  // datetime-local has no zone on it, so the hour is read as IST
+                  // explicitly rather than in the browser's own - which is the
+                  // temple's zone only as long as nobody opens this abroad.
+                  due_at: istInputToISO(when),
+                  expected_amount: amount ? Number(amount) : undefined,
+                  occasion: occasion.trim() || undefined,
+                  note: note.trim() || undefined,
+                  assigned_to: assignee || undefined,
+                  lead_times: alerts,
+                });
+                await onDone();
+              } catch (e) {
+                setError(e instanceof Error ? e.message : "Could not record that");
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? "Saving…" : "Record it"}
+          </Button>
+        </>
+      }
+    >
+      {error && <Alert tone="danger">{error}</Alert>}
 
-      <p className="mb-4 text-sm text-slate-600">
+      <p className="mb-4 text-sm text-ink-soft">
         For a donor who rang the temple and named a date. DRM finds them by number — or adds them if they are new —
         books the callback, and alerts you before the day arrives.
       </p>
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="text-xs text-slate-500">
-          Their number <span className="text-red-600">*</span>
-          <input
+        <Field label="Their number" htmlFor="promise-phone" required>
+          <Input
+            id="promise-phone"
             value={phone}
             onChange={(e) => setPhone(e.target.value.replace(/[^\d+\s-]/g, ""))}
             placeholder="98480 12345"
             inputMode="tel"
-            className={`${inputClass} mt-1 w-full tabular-nums`}
+            className="tabular-nums"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Their name
-          <input
+        </Field>
+        <Field label="Their name" htmlFor="promise-name">
+          <Input
+            id="promise-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Left blank if you did not catch it"
-            className={`${inputClass} mt-1 w-full`}
           />
-        </label>
+        </Field>
 
-        <label className="text-xs text-slate-500">
-          When they said they would give <span className="text-red-600">*</span>
-          <input
+        <Field label="When they said they would give" htmlFor="promise-when" required>
+          <Input
+            id="promise-when"
             type="datetime-local"
             value={when}
             onChange={(e) => setWhen(e.target.value)}
-            className={`${inputClass} mt-1 w-full`}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          How much they said
-          <input
+        </Field>
+        <Field label="How much they said" htmlFor="promise-amount">
+          <Input
+            id="promise-amount"
             value={amount}
             onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
             placeholder="Optional"
             inputMode="numeric"
-            className={`${inputClass} mt-1 w-full tabular-nums`}
+            className="tabular-nums"
           />
-        </label>
+        </Field>
 
-        <label className="text-xs text-slate-500">
-          The occasion they named
-          <input
+        <Field label="The occasion they named" htmlFor="promise-occasion">
+          <Input
+            id="promise-occasion"
             value={occasion}
             onChange={(e) => setOccasion(e.target.value)}
             placeholder="e.g. Govardhan Puja, after salary day"
-            className={`${inputClass} mt-1 w-full`}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Who should ring them
+        </Field>
+        <Field label="Who should ring them">
           <Select
             value={assignee}
             onChange={setAssignee}
-            className="mt-1 w-full"
+            ariaLabel="Who should ring them"
             options={[{ value: "", label: "Me" }, ...users.map((u) => ({ value: u.id, label: u.name }))]}
           />
-        </label>
+        </Field>
 
-        <label className="text-xs text-slate-500 sm:col-span-2">
-          What they said, in their words
-          <textarea
+        <Field label="What they said, in their words" htmlFor="promise-note" className="sm:col-span-2">
+          <Textarea
+            id="promise-note"
             value={note}
             onChange={(e) => setNote(e.target.value)}
             rows={2}
             placeholder="Read back on the call — worth the extra few seconds now."
-            className={`${inputClass} mt-1 w-full`}
           />
-        </label>
+        </Field>
 
         {/* The alerts. More than one, because a promise made weeks out needs
             warning long before the morning it falls due — which is the whole
             reason this is a reminder and not just a date on a board. */}
-        <div className="text-xs text-slate-500 sm:col-span-2">
-          Warn me
+        <Field label="Warn me" className="sm:col-span-2">
           <div className="mt-1.5">
             <AlertPicker value={alerts} onChange={setAlerts} options={ALERT_OPTIONS} />
           </div>
-        </div>
-      </div>
-
-      <div className="mt-5 flex justify-end gap-2">
-        <button onClick={onClose} className={buttonSecondary}>
-          Cancel
-        </button>
-        <button
-          disabled={busy || !ready}
-          onClick={async () => {
-            setBusy(true);
-            setError(null);
-            try {
-              await apiClient.post("/api/crm/promises", {
-                phone,
-                name: name.trim() || undefined,
-                // datetime-local has no zone, so it is read in the browser's
-                // own — which is the temple's, and is what the caller meant.
-                due_at: new Date(when).toISOString(),
-                expected_amount: amount ? Number(amount) : undefined,
-                occasion: occasion.trim() || undefined,
-                note: note.trim() || undefined,
-                assigned_to: assignee || undefined,
-                lead_times: alerts,
-              });
-              await onDone();
-            } catch (e) {
-              setError(e instanceof Error ? e.message : "Could not record that");
-              setBusy(false);
-            }
-          }}
-          className={buttonPrimary}
-        >
-          {busy ? "Saving…" : "Record it"}
-        </button>
+        </Field>
       </div>
     </Modal>
   );

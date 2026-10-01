@@ -17,19 +17,25 @@ import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency, number, relativeDate } from "@/lib/format";
 import {
+  Alert,
   Badge,
-  Card,
-  CardHeader,
+  Button,
+  Checkbox,
   EmptyState,
+  Field,
+  Input,
   Modal,
   PageHeader,
   Select,
+  SkeletonRows,
   TableShell,
+  Tbody,
   Td,
   Th,
+  Thead,
+  Toolbar,
   buttonPrimary,
   buttonSecondary,
-  inputClass,
 } from "@/components/ui";
 
 interface CallingList {
@@ -125,6 +131,7 @@ export default function CallingListsPage() {
   return (
     <div>
       <PageHeader
+        eyebrow="Calling"
         title="Calling lists"
         subtitle="What a caller can pick up and work through. Every applied sheet becomes one automatically."
         actions={
@@ -132,49 +139,45 @@ export default function CallingListsPage() {
             <Link href="/calling/start" className={buttonSecondary}>
               Start calling
             </Link>
-            <button onClick={() => setShowNew(true)} className={buttonPrimary}>
+            <Button icon="plus" onClick={() => setShowNew(true)}>
               Build a list
-            </button>
+            </Button>
           </div>
         }
       />
 
-      {error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
-      )}
+      {error && <Alert tone="danger">{error}</Alert>}
 
-      <Card padded={false}>
-        <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-5">
-          <CardHeader title={`${lists.length} list${lists.length === 1 ? "" : "s"}`} />
-          <label className="flex items-center gap-2 text-xs text-slate-500">
-            <input
-              type="checkbox"
-              checked={showRetired}
-              onChange={(e) => setShowRetired(e.target.checked)}
-              className="rounded border-slate-300"
-            />
-            Show retired
-          </label>
-        </div>
+      <Toolbar onClear={() => setShowRetired(false)} activeCount={showRetired ? 1 : 0}>
+        <Field label="Retired lists">
+          <Checkbox checked={showRetired} onChange={setShowRetired} label="Show them too" className="h-9.5" />
+        </Field>
+        <p className="ml-auto pb-2 text-xs text-ink-muted">
+          {number(lists.length)} list{lists.length === 1 ? "" : "s"}
+        </p>
+      </Toolbar>
 
-        <TableShell>
-          <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
-            <tr>
-              <Th>List</Th>
-              <Th>Built from</Th>
-              <Th align="right">To call</Th>
-              <Th align="right">Reached</Th>
-              <Th align="right">Donated</Th>
-              <Th align="right">Actions</Th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {loading ? (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-sm text-slate-400">Loading…</td></tr>
-            ) : !lists.length ? (
+      {/* Deliberately not wrapped in a Card: TableShell already draws the
+          bordered, shadowed surface, and nesting the two gives every table a
+          double edge. */}
+      <TableShell>
+        <Thead>
+          <Th>List</Th>
+          <Th>Built from</Th>
+          <Th align="right">To call</Th>
+          <Th align="right">Reached</Th>
+          <Th align="right">Donated</Th>
+          <Th align="right">Actions</Th>
+        </Thead>
+        {loading ? (
+          <SkeletonRows rows={6} cols={6} />
+        ) : (
+          <Tbody>
+            {!lists.length ? (
               <tr>
                 <td colSpan={6}>
                   <EmptyState
+                    icon="list"
                     title="No lists yet"
                     message="Apply an uploaded sheet and its list appears here, or build one from a tag, a preacher or a city."
                     action={<Link href="/calling/uploads" className={buttonPrimary}>Upload a sheet</Link>}
@@ -183,10 +186,10 @@ export default function CallingListsPage() {
               </tr>
             ) : (
               lists.map((l) => (
-                <tr key={l.id} className={`hover:bg-slate-50/60 ${l.active ? "" : "opacity-60"}`}>
+                <tr key={l.id} className={l.active ? "" : "opacity-60"}>
                   <Td>
-                    <p className="font-medium text-slate-900">{l.name}</p>
-                    <p className="text-[11px] text-slate-500">
+                    <p className="font-medium text-ink">{l.name}</p>
+                    <p className="text-2xs text-ink-muted">
                       {l.origin === "import" ? "From a sheet" : "Built by hand"}
                       {l.created_by_name && ` · ${l.created_by_name}`}
                       {` · ${relativeDate(l.created_at)}`}
@@ -204,42 +207,40 @@ export default function CallingListsPage() {
                         <Badge tone="neutral">over {currency(Number(l.min_external_total))}</Badge>
                       )}
                       {!l.batch_filename && !l.tag && !l.preacher_code && !l.city && !l.min_external_total && (
-                        <span className="text-xs text-slate-400">Everything</span>
+                        <span className="text-xs text-ink-faint">Everything</span>
                       )}
                     </div>
                   </Td>
-                  <Td align="right" className="tabular-nums font-medium text-slate-900">{number(l.to_call)}</Td>
-                  <Td align="right" className="tabular-nums text-slate-600">
-                    {number(l.called)}<span className="text-slate-300"> / {number(l.total)}</span>
+                  <Td align="right" className="tabular-nums font-medium text-ink">{number(l.to_call)}</Td>
+                  <Td align="right" className="tabular-nums text-ink-muted">
+                    {number(l.called)}<span className="text-ink-faint"> / {number(l.total)}</span>
                   </Td>
-                  <Td align="right" className="tabular-nums text-slate-600">
-                    {l.converted ? number(l.converted) : <span className="text-slate-300">—</span>}
+                  <Td align="right" className="tabular-nums text-ink-muted">
+                    {l.converted ? number(l.converted) : <span className="text-ink-faint">—</span>}
                   </Td>
                   <Td align="right">
-                    <div className="flex justify-end gap-1">
-                      <button
-                        onClick={() => setAssigning(l)}
-                        className="rounded-lg px-2 py-1 text-xs text-slate-600 hover:bg-slate-100"
-                      >
+                    <div className="flex justify-end gap-1.5">
+                      <Button size="sm" variant="secondary" icon="userPlus" onClick={() => setAssigning(l)}>
                         Give to…
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
                         onClick={async () => {
                           await apiClient.put(`/api/crm/lists/${l.id}`, { active: !l.active });
                           await load();
                         }}
-                        className="rounded-lg px-2 py-1 text-xs text-slate-600 hover:bg-slate-100"
                       >
                         {l.active ? "Retire" : "Restore"}
-                      </button>
+                      </Button>
                     </div>
                   </Td>
                 </tr>
               ))
             )}
-          </tbody>
-        </TableShell>
-      </Card>
+          </Tbody>
+        )}
+      </TableShell>
 
       {showNew && (
         <NewListDialog
@@ -324,29 +325,38 @@ function NewListDialog({
   }
 
   return (
-    <Modal title="Build a calling list" onClose={onClose}>
-      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+    <Modal
+      title="Build a calling list"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button onClick={() => void save()} disabled={busy || !name.trim()} loading={busy}>
+            {busy ? "Saving…" : "Create the list"}
+          </Button>
+        </>
+      }
+    >
+      {error && <Alert tone="danger">{error}</Alert>}
 
-      <label className="block text-xs text-slate-500">
-        What to call it
-        <input
+      <Field label="What to call it" htmlFor="list-name" required>
+        <Input
+          id="list-name"
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="e.g. Janmashtami lapsed donors"
-          className={`${inputClass} mt-1 w-full`}
         />
-      </label>
+      </Field>
 
-      <p className="mt-4 mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+      <p className="mt-4 mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
         Who is in it
       </p>
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="text-xs text-slate-500">
-          From an uploaded sheet
+        <Field label="From an uploaded sheet">
           <Select
             value={batch}
             onChange={setBatch}
-            className="mt-1 w-full"
+            ariaLabel="From an uploaded sheet"
             placeholder="Any sheet"
             options={[
               { value: "", label: "Any sheet" },
@@ -356,73 +366,62 @@ function NewListDialog({
               })),
             ]}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          With the tag
-          <input
+        </Field>
+        <Field label="With the tag" htmlFor="list-tag">
+          <Input
+            id="list-tag"
             value={tag}
             onChange={(e) => setTag(e.target.value)}
             placeholder="Any tag"
-            className={`${inputClass} mt-1 w-full`}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Brought in by
+        </Field>
+        <Field label="Brought in by">
           <Select
             value={preacher}
             onChange={setPreacher}
-            className="mt-1 w-full"
+            ariaLabel="Brought in by"
             placeholder="Any preacher"
             options={[
               { value: "", label: "Any preacher" },
               ...preachers.map((p) => ({ value: p.id, label: p.name ? `${p.name} (${p.code})` : p.code })),
             ]}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          At stage
+        </Field>
+        <Field label="At stage">
           <Select
             value={status}
             onChange={setStatus}
-            className="mt-1 w-full"
+            ariaLabel="At stage"
             placeholder="Any stage"
             options={[{ value: "", label: "Any stage" }, ...statuses.map((s) => ({ value: s.slug, label: s.label }))]}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          In or near
-          <input
+        </Field>
+        <Field label="In or near" htmlFor="list-city">
+          <Input
+            id="list-city"
             value={city}
             onChange={(e) => setCity(e.target.value)}
             placeholder="Any city"
-            className={`${inputClass} mt-1 w-full`}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Has given at least
-          <input
+        </Field>
+        <Field label="Has given at least" htmlFor="list-min">
+          <Input
+            id="list-min"
             value={minTotal}
             onChange={(e) => setMinTotal(e.target.value.replace(/[^\d]/g, ""))}
             placeholder="Any amount"
             inputMode="numeric"
-            className={`${inputClass} mt-1 w-full`}
+            className="tabular-nums"
           />
-        </label>
+        </Field>
       </div>
 
       {empty && (
-        <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        <Alert tone="warn" className="mt-3 mb-0">
           Nothing chosen, so this list will hold every lead — the same as &ldquo;Everything that is due&rdquo;.
           Narrow it unless that is what you want.
-        </p>
+        </Alert>
       )}
-
-      <div className="mt-5 flex justify-end gap-2">
-        <button onClick={onClose} className={buttonSecondary}>Cancel</button>
-        <button onClick={() => void save()} disabled={busy || !name.trim()} className={buttonPrimary}>
-          {busy ? "Saving…" : "Create the list"}
-        </button>
-      </div>
     </Modal>
   );
 }
@@ -455,69 +454,70 @@ function AssignDialog({
   }, [list.id]);
 
   return (
-    <Modal title={`Who should call ${list.name}?`} onClose={onClose}>
-      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+    <Modal
+      title={`Who should call ${list.name}?`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button
+            disabled={busy}
+            loading={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await apiClient.put(`/api/crm/lists/${list.id}/assignees`, {
+                  user_ids: [...chosen],
+                  note: note.trim() || undefined,
+                });
+                onDone();
+              } catch (e) {
+                setError(e instanceof Error ? e.message : "Could not save that");
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? "Saving…" : "Save"}
+          </Button>
+        </>
+      }
+    >
+      {error && <Alert tone="danger">{error}</Alert>}
 
-      <p className="mb-3 text-sm text-slate-600">
+      <p className="mb-3 text-sm text-ink-muted">
         It becomes their default when they press Start calling. They can still choose another list — a caller who
         finishes early should not be stuck.
       </p>
 
       <div className="max-h-64 space-y-1 overflow-y-auto scroll-slim">
         {users.map((u) => (
-          <label
+          <div
             key={u.id}
-            className="flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50"
+            className="flex items-center gap-3 rounded-control px-3 py-2 transition-colors hover:bg-brand-50/60"
           >
-            <input
-              type="checkbox"
+            <Checkbox
               checked={chosen.has(u.id)}
-              onChange={(e) => {
+              onChange={(on) => {
                 const next = new Set(chosen);
-                if (e.target.checked) next.add(u.id);
+                if (on) next.add(u.id);
                 else next.delete(u.id);
                 setChosen(next);
               }}
-              className="rounded border-slate-300"
+              label={u.name}
             />
-            <span className="text-sm text-slate-900">{u.name}</span>
-            <span className="ml-auto text-[11px] capitalize text-slate-400">{u.role?.replace(/_/g, " ")}</span>
-          </label>
+            <span className="ml-auto text-2xs capitalize text-ink-faint">{u.role?.replace(/_/g, " ")}</span>
+          </div>
         ))}
       </div>
 
-      <label className="mt-4 block text-xs text-slate-500">
-        A note for them (optional)
-        <input
+      <Field label="A note for them (optional)" htmlFor="assign-note" className="mt-4">
+        <Input
+          id="assign-note"
           value={note}
           onChange={(e) => setNote(e.target.value)}
           placeholder="e.g. Finish before Friday — the festival is on Saturday"
-          className={`${inputClass} mt-1 w-full`}
         />
-      </label>
-
-      <div className="mt-5 flex justify-end gap-2">
-        <button onClick={onClose} className={buttonSecondary}>Cancel</button>
-        <button
-          disabled={busy}
-          onClick={async () => {
-            setBusy(true);
-            try {
-              await apiClient.put(`/api/crm/lists/${list.id}/assignees`, {
-                user_ids: [...chosen],
-                note: note.trim() || undefined,
-              });
-              onDone();
-            } catch (e) {
-              setError(e instanceof Error ? e.message : "Could not save that");
-              setBusy(false);
-            }
-          }}
-          className={buttonPrimary}
-        >
-          {busy ? "Saving…" : "Save"}
-        </button>
-      </div>
+      </Field>
     </Modal>
   );
 }

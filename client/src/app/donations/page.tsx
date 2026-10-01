@@ -3,9 +3,37 @@
 import { Fragment, useCallback, useEffect, useRef, useState, FormEvent } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import { currency, number, shortDate, titleCase } from "@/lib/format";
 import { SourceCell, siteLabel } from "@/components/source";
-import { Badge, buttonPrimary, buttonSecondary, Card, EmptyState, inputClass, PageHeader, Pagination, Select, SkeletonRows, StatTile, TableShell, Td, Th } from "@/components/ui";
+import { ExportButton } from "@/components/export-button";
+import {
+  Alert,
+  Badge,
+  Button,
+  buttonSecondary,
+  Checkbox,
+  EmptyState,
+  Field,
+  Icon,
+  IconButton,
+  Input,
+  Modal,
+  PageHeader,
+  Pagination,
+  SearchInput,
+  SegmentedControl,
+  Select,
+  SkeletonRows,
+  StatTile,
+  TableShell,
+  Tbody,
+  Td,
+  Textarea,
+  Th,
+  Thead,
+  Toolbar,
+} from "@/components/ui";
 
 interface Donation {
   id: string;
@@ -65,6 +93,7 @@ const GROUP_FILTER_LABELS: Record<string, string> = {
 };
 
 export default function DonationsPage() {
+  const { user } = useAuth();
   const [data, setData] = useState<DonationsResponse | null>(null);
   const [purposeOptions, setPurposeOptions] = useState<{ purpose: string; count: number }[]>([]);
   const [sources, setSources] = useState<SourceOptions>({ sites: [], pages: [] });
@@ -127,8 +156,16 @@ export default function DonationsPage() {
     setGroupFilter("");
   }, [siteFilter]);
 
-  const fetchDonations = useCallback(() => {
-    setLoading(true);
+  /**
+   * The filters, described once.
+   *
+   * The list request and the download both read this. A second builder for the
+   * export drifts from this one the first time a filter is added to only one of
+   * them, and the result is a spreadsheet that does not hold what the person
+   * had on screen when they pressed Download - which the temple office then
+   * reconciles against.
+   */
+  const filterParams = useCallback(() => {
     const params = new URLSearchParams({ page: String(page), limit: "25" });
     if (debouncedSearch) params.set("search", debouncedSearch);
     if (purpose) params.set("purpose", purpose);
@@ -138,8 +175,13 @@ export default function DonationsPage() {
     if (siteFilter) params.set("source_site", siteFilter);
     if (pageFilter) params.set("source_page", pageFilter);
     if (groupFilter) params.set("group", groupFilter);
+    return params;
+  }, [page, debouncedSearch, purpose, receipt, fromDate, toDate, siteFilter, pageFilter, groupFilter]);
+
+  const fetchDonations = useCallback(() => {
+    setLoading(true);
     apiClient
-      .get<DonationsResponse>(`/api/donations?${params}`)
+      .get<DonationsResponse>(`/api/donations?${filterParams()}`)
       .then((d) => {
         setData(d);
         setLoadError(null);
@@ -150,7 +192,7 @@ export default function DonationsPage() {
       // and the reason a permissions bug can sit unnoticed for weeks.
       .catch((e) => setLoadError(e instanceof Error ? e.message : "Could not load this list"))
       .finally(() => setLoading(false));
-  }, [page, debouncedSearch, purpose, receipt, fromDate, toDate, siteFilter, pageFilter, groupFilter]);
+  }, [filterParams]);
 
   useEffect(fetchDonations, [fetchDonations]);
 
@@ -177,40 +219,57 @@ export default function DonationsPage() {
   };
 
   const donations = data?.donations ?? [];
-  const hasFilters = Boolean(
-    debouncedSearch || purpose || receipt || fromDate || toDate || siteFilter || pageFilter || groupFilter
-  );
+  const activeFilters = [
+    debouncedSearch,
+    purpose,
+    receipt,
+    fromDate,
+    toDate,
+    siteFilter,
+    pageFilter,
+    groupFilter,
+  ].filter(Boolean).length;
+  const hasFilters = activeFilters > 0;
   // Only offer pages belonging to the selected site - a /janmashtami filter
   // combined with the annadan site returns nothing and looks broken.
   const visiblePages = siteFilter ? sources.pages.filter((p) => p.site === siteFilter) : sources.pages;
+  // The two roles /api/donations/export lets through. A caller can read this
+  // screen to answer "did my donor's money arrive", so without this check the
+  // button would sit in their header and answer 403 every single time.
+  const canExport = user?.role === "admin" || user?.role === "accountant";
 
   return (
     <div>
       <PageHeader
+        eyebrow="Donors"
         title="Donations"
         subtitle={data ? `${number(data.total)} donations${hasFilters ? " matching your filters" : ""}` : undefined}
         actions={
-          <div className="flex flex-wrap gap-2">
-            <button onClick={() => setShowOffline(true)} className={buttonSecondary}>
+          <>
+            <Button variant="secondary" icon="receipt" onClick={() => setShowOffline(true)}>
               Record offline donation
-            </button>
-            <button onClick={() => setShowModal(true)} className={buttonPrimary}>
-              + Record Donation
-            </button>
-          </div>
+            </Button>
+            {canExport && (
+              <ExportButton
+                path="/api/donations/export"
+                params={filterParams()}
+                filename="donations"
+                hint={data ? `${number(data.total)} donations match these filters` : undefined}
+              />
+            )}
+            <Button icon="plus" onClick={() => setShowModal(true)}>
+              Record Donation
+            </Button>
+          </>
         }
       />
 
+      {loadError && <Alert tone="danger">{loadError}</Alert>}
+
       {/* The filtered sum is the number staff actually want when they slice by
           purpose or date - without it the page shows rows but never a total. */}
-      {loadError && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          {loadError}
-        </div>
-      )}
-
       {data && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+        <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
           <StatTile
             label={hasFilters ? "Filtered total" : "All-time total"}
             value={currency(data.filteredAmount)}
@@ -225,15 +284,17 @@ export default function DonationsPage() {
         </div>
       )}
 
-      <Card className="mb-4">
-        <div className="flex flex-wrap gap-2 items-center">
-          <input
+      <Toolbar onClear={clearFilters} activeCount={activeFilters}>
+        <Field label="Search" htmlFor="donations-search" className="flex-1 min-w-[15rem]">
+          <SearchInput
+            id="donations-search"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search donor, phone or receipt no…"
-            className={`${inputClass} flex-1 min-w-[15rem]`}
+            onChange={setSearch}
+            placeholder="Donor, phone or receipt no…"
           />
-          <Select value={purpose} onChange={(v) => setPurpose(v)} className="flex-1 min-w-[9rem]">
+        </Field>
+        <Field label="Purpose" className="flex-1 min-w-[9rem]">
+          <Select value={purpose} onChange={(v) => setPurpose(v)} ariaLabel="Purpose">
             <option value="">All purposes</option>
             {(purposeOptions.length ? purposeOptions : purposes.map((p) => ({ purpose: p, count: 0 }))).map((p) => (
               <option key={p.purpose} value={p.purpose}>
@@ -242,12 +303,16 @@ export default function DonationsPage() {
               </option>
             ))}
           </Select>
-          <Select value={receipt} onChange={(v) => setReceipt(v)} className="flex-1 min-w-[9rem]">
+        </Field>
+        <Field label="Receipt" className="flex-1 min-w-[9rem]">
+          <Select value={receipt} onChange={(v) => setReceipt(v)} ariaLabel="Receipt status">
             <option value="">Any receipt status</option>
             <option value="true">Receipt issued</option>
             <option value="false">Receipt pending</option>
           </Select>
-          <Select value={siteFilter} onChange={(v) => setSiteFilter(v)} className="flex-1 min-w-[9rem]">
+        </Field>
+        <Field label="Site" className="flex-1 min-w-[9rem]">
+          <Select value={siteFilter} onChange={(v) => setSiteFilter(v)} ariaLabel="Site">
             <option value="">All sites</option>
             {sources.sites.map((s) => (
               <option key={s.site} value={s.site}>
@@ -255,7 +320,9 @@ export default function DonationsPage() {
               </option>
             ))}
           </Select>
-          <Select value={pageFilter} onChange={(v) => setPageFilter(v)} className="flex-1 min-w-[9rem]">
+        </Field>
+        <Field label="Page" className="flex-1 min-w-[9rem]">
+          <Select value={pageFilter} onChange={(v) => setPageFilter(v)} ariaLabel="Page">
             <option value="">All pages</option>
             {visiblePages.map((p) => (
               <option key={`${p.site}${p.page}`} value={p.page}>
@@ -263,97 +330,89 @@ export default function DonationsPage() {
               </option>
             ))}
           </Select>
-          <input
+        </Field>
+        {/* A bare YYYY-MM-DD is what the server wants and what the date input
+            gives, so these two never go near new Date() on the way out. */}
+        <Field label="From" htmlFor="donations-from" className="w-40">
+          <Input
+            id="donations-from"
             type="date"
             value={fromDate}
             onChange={(e) => setFromDate(e.target.value)}
-            className={inputClass}
-            aria-label="From date"
           />
-          <input
+        </Field>
+        <Field label="To" htmlFor="donations-to" className="w-40">
+          <Input
+            id="donations-to"
             type="date"
             value={toDate}
             onChange={(e) => setToDate(e.target.value)}
-            className={inputClass}
-            aria-label="To date"
           />
-          {hasFilters && (
-            <button onClick={clearFilters} className={buttonSecondary}>
-              Clear
-            </button>
-          )}
-        </div>
+        </Field>
 
         {/* A group filter arrives from a link and has no dropdown of its own,
             so say so plainly - otherwise the list looks mysteriously short. */}
         {groupFilter && (
-          <div className="mt-3 flex items-center gap-2 flex-wrap">
-            <span className="text-xs text-slate-500">Showing only</span>
-            <span className="inline-flex items-center gap-2 rounded-full border border-[var(--accent)]/30 bg-[var(--accent-soft)]/25 px-3 py-1 text-xs text-[var(--accent-ink)]">
-              {GROUP_FILTER_LABELS[groupFilter] ?? groupFilter}
-              <button
-                onClick={() => setGroupFilter("")}
-                className="text-[var(--accent)] hover:text-[var(--accent-ink)] leading-none"
-                aria-label="Remove group filter"
-              >
-                ×
-              </button>
-            </span>
-            <Link href="/pages" className="text-xs text-[var(--accent)] hover:underline">
+          <div className="flex w-full flex-wrap items-center gap-2 border-t border-line-soft pt-2.5">
+            <span className="text-xs text-ink-muted">Showing only</span>
+            <Badge tone="brand">{GROUP_FILTER_LABELS[groupFilter] ?? groupFilter}</Badge>
+            <IconButton
+              name="x"
+              label="Remove group filter"
+              size="xs"
+              onClick={() => setGroupFilter("")}
+            />
+            <Link href="/pages" className="text-xs text-brand-700 hover:underline">
               Back to the breakdown
             </Link>
           </div>
         )}
-      </Card>
+      </Toolbar>
 
       <TableShell>
-        <thead className="bg-slate-50/80">
-          <tr>
-            <Th>Donor</Th>
-            <Th align="right">Amount</Th>
-            <Th>Purpose</Th>
-            <Th>Type</Th>
-            <Th>Receipt</Th>
-            <Th>Came from</Th>
-            <Th align="right">Date</Th>
-            <Th align="right"> </Th>
-          </tr>
-        </thead>
+        <Thead>
+          <Th>Donor</Th>
+          <Th align="right">Amount</Th>
+          <Th>Purpose</Th>
+          <Th>Type</Th>
+          <Th>Receipt</Th>
+          <Th>Came from</Th>
+          <Th align="right">Date</Th>
+          <Th align="right"> </Th>
+        </Thead>
 
         {loading && !data ? (
           <SkeletonRows rows={8} cols={8} />
         ) : (
-          <tbody className="divide-y divide-slate-100">
+          <Tbody>
             {donations.map((d) => (
               <Fragment key={d.id}>
                 <tr
-                  className={`transition-colors cursor-pointer ${
-                    expanded === d.id ? "bg-[var(--accent-wash)]" : "hover:bg-[var(--page)]"
-                  }`}
+                  className={`cursor-pointer ${expanded === d.id ? "bg-brand-50" : ""}`}
                   onClick={() => setExpanded(expanded === d.id ? null : d.id)}
                 >
                   <Td>
                     <Link
                       href={`/people/${d.person_id}`}
                       onClick={(e) => e.stopPropagation()}
-                      className="font-medium text-slate-900 hover:text-[var(--accent)]"
+                      className="font-medium text-ink hover:text-brand-700"
                     >
                       {d.donor_name || "—"}
                     </Link>
                     {d.donor_phone && (
-                      <span className="block text-xs text-slate-500 tabular-nums">{d.donor_phone}</span>
+                      <span className="block text-xs tabular-nums text-ink-muted">{d.donor_phone}</span>
                     )}
                   </Td>
-                  <Td align="right" className="font-semibold tabular-nums text-slate-900">
+                  <Td align="right" className="font-semibold tabular-nums text-ink">
                     {currency(d.amount)}
                   </Td>
-                  <Td className="text-slate-600">{titleCase(d.display_purpose || d.purpose)}</Td>
+                  <Td>{titleCase(d.display_purpose || d.purpose)}</Td>
                   <Td>
                     <Badge tone={d.type === "recurring" ? "good" : "neutral"}>{titleCase(d.type)}</Badge>
                   </Td>
                   <Td>
                     {d.receipt_generated ? (
-                      <span className="text-xs tabular-nums text-slate-700">{d.receipt_number || "Issued"}</span>
+                      <span className="text-xs tabular-nums text-ink-soft">{d.receipt_number || "Issued"}</span>
                     ) : (
                       <Badge tone="warn">Pending</Badge>
                     )}
@@ -361,30 +420,29 @@ export default function DonationsPage() {
                   <Td>
                     <SourceCell site={d.source_site} page={d.source_page} campaign={d.campaign} />
                   </Td>
-                  <Td align="right" className="text-xs text-slate-500 whitespace-nowrap">
+                  <Td align="right" className="whitespace-nowrap text-xs text-ink-muted">
                     {shortDate(d.created_at)}
                   </Td>
                   <Td align="right">
-                    <span
-                      className={`inline-block text-slate-400 transition-transform ${
+                    <Icon
+                      name="chevronRight"
+                      size={15}
+                      className={`inline-block text-ink-faint transition-transform ${
                         expanded === d.id ? "rotate-90" : ""
                       }`}
-                      aria-hidden
-                    >
-                      ›
-                    </span>
+                    />
                   </Td>
                 </tr>
                 {expanded === d.id && (
                   <tr className="row-expand">
-                    <td colSpan={8} className="bg-[var(--page)] px-4 py-4 border-y border-[var(--line-soft)]">
+                    <td colSpan={8} className="border-y border-line-soft bg-sunken px-4 py-4">
                       <DonationDetail donation={d} onChanged={fetchDonations} />
                     </td>
                   </tr>
                 )}
               </Fragment>
             ))}
-          </tbody>
+          </Tbody>
         )}
 
         {!loading && donations.length === 0 && (
@@ -392,6 +450,7 @@ export default function DonationsPage() {
             <tr>
               <td colSpan={8}>
                 <EmptyState
+                  icon="rupee"
                   title={hasFilters ? "No matching donations" : "No donations yet"}
                   message={
                     hasFilters
@@ -400,9 +459,9 @@ export default function DonationsPage() {
                   }
                   action={
                     hasFilters ? (
-                      <button onClick={clearFilters} className={buttonSecondary}>
+                      <Button variant="secondary" icon="x" onClick={clearFilters}>
                         Clear filters
-                      </button>
+                      </Button>
                     ) : undefined
                   }
                 />
@@ -439,12 +498,15 @@ export default function DonationsPage() {
 
 /* ---------------------------------------------------------------- detail */
 
-function Field({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
+// Named DetailField rather than Field: the shared Field is a labelled form
+// control and this is a read-only dt/dd pair, and the filter row above now uses
+// the shared one.
+function DetailField({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</dt>
-      <dd className={`text-sm text-slate-800 mt-0.5 truncate ${mono ? "font-mono text-xs" : ""}`}>
-        {value || <span className="text-slate-300">—</span>}
+      <dt className="text-2xs font-medium uppercase tracking-wide text-ink-faint">{label}</dt>
+      <dd className={`mt-0.5 truncate text-sm text-ink-soft ${mono ? "font-mono text-xs" : ""}`}>
+        {value || <span className="text-ink-faint">—</span>}
       </dd>
     </div>
   );
@@ -499,69 +561,76 @@ function DonationDetail({ donation, onChanged }: { donation: Donation; onChanged
 
   return (
     <div className="space-y-4">
-      <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-x-6 gap-y-3">
-        <Field label="Donor" value={donation.donor_name} />
-        <Field label="Phone" value={donation.donor_phone} />
-        <Field label="Amount" value={currency(donation.amount)} />
-        <Field label="Purpose" value={titleCase(donation.display_purpose || donation.purpose)} />
+      <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-5">
+        <DetailField label="Donor" value={donation.donor_name} />
+        <DetailField label="Phone" value={donation.donor_phone} />
+        <DetailField label="Amount" value={currency(donation.amount)} />
+        <DetailField label="Purpose" value={titleCase(donation.display_purpose || donation.purpose)} />
         {donation.display_purpose &&
           donation.display_purpose.toLowerCase() !== (donation.purpose ?? "").toLowerCase() && (
             /* The donor's site recorded something that describes the input box
                rather than the donation, so the label above shows the page instead.
                The original is kept visible - it is what that site still holds. */
-            <Field label="As recorded on the site" value={donation.purpose} />
+            <DetailField label="As recorded on the site" value={donation.purpose} />
           )}
-        <Field label="Type" value={titleCase(donation.type)} />
+        <DetailField label="Type" value={titleCase(donation.type)} />
 
-        <Field label="Came from" value={siteLabel(donation.source_site)} />
-        <Field label="Page" value={donation.source_page} mono />
-        <Field label="Campaign" value={donation.campaign} />
-        <Field label="Payment mode" value={titleCase(donation.payment_mode)} />
-        <Field label="Payment ref" value={donation.payment_ref} mono />
+        <DetailField label="Came from" value={siteLabel(donation.source_site)} />
+        <DetailField label="Page" value={donation.source_page} mono />
+        <DetailField label="Campaign" value={donation.campaign} />
+        <DetailField label="Payment mode" value={titleCase(donation.payment_mode)} />
+        <DetailField label="Payment ref" value={donation.payment_ref} mono />
 
-        <Field label="Receipt no." value={donation.receipt_number} mono />
-        <Field label="Receipt issued" value={donation.receipt_issued_at ? shortDate(donation.receipt_issued_at) : null} />
-        <Field label="Received on" value={shortDate(donation.created_at)} />
-        <Field label="UTM source" value={donation.utm_source} />
-        <Field label="UTM campaign" value={donation.utm_campaign} />
+        <DetailField label="Receipt no." value={donation.receipt_number} mono />
+        <DetailField label="Receipt issued" value={donation.receipt_issued_at ? shortDate(donation.receipt_issued_at) : null} />
+        <DetailField label="Received on" value={shortDate(donation.created_at)} />
+        <DetailField label="UTM source" value={donation.utm_source} />
+        <DetailField label="UTM campaign" value={donation.utm_campaign} />
       </dl>
 
       <div className="flex flex-wrap items-center gap-2 pt-1">
+        {/* A next/link anchor wearing the button class rather than LinkButton:
+            LinkButton is a plain <a>, which would drop out of the client router
+            and make opening a donor a full page load. */}
         <Link href={`/people/${donation.person_id}`} className={buttonSecondary}>
           Open donor
         </Link>
         {fromSite && donation.receipt_generated && (
           <>
-            <button onClick={download} disabled={busy !== null} className={buttonSecondary}>
+            <Button
+              variant="secondary"
+              icon="download"
+              onClick={download}
+              disabled={busy !== null}
+              loading={busy === "download"}
+            >
               {busy === "download" ? "Fetching…" : "Download receipt"}
-            </button>
-            <button onClick={resend} disabled={busy !== null} className={buttonPrimary}>
+            </Button>
+            <Button
+              variant="whatsapp"
+              icon="message"
+              onClick={resend}
+              disabled={busy !== null}
+              loading={busy === "resend"}
+            >
               {busy === "resend" ? "Sending…" : "Resend receipt on WhatsApp"}
-            </button>
+            </Button>
           </>
         )}
         {fromSite && !donation.receipt_generated && (
-          <span className="text-xs text-slate-500">
+          <span className="text-xs text-ink-muted">
             No receipt issued for this donation yet, so there is nothing to resend.
           </span>
         )}
         {!fromSite && (
-          <span className="text-xs text-slate-500">
+          <span className="text-xs text-ink-muted">
             Recorded directly in DRM — receipts are issued by the donation sites, so there is none to resend.
           </span>
         )}
       </div>
 
       {message && (
-        <p
-          className={`text-sm rounded-lg px-3 py-2 ${
-            message.tone === "ok"
-              ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
-              : "bg-red-50 text-red-700 border border-red-200"
-          }`}
-        >
-          {message.text}
-        </p>
+        <Alert tone={message.tone === "ok" ? "good" : "danger"}>{message.text}</Alert>
       )}
     </div>
   );
@@ -618,96 +687,111 @@ function RecordDonationModal({ onClose, onSaved }: { onClose: () => void; onSave
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <form onSubmit={handleSubmit} className="bg-white rounded-2xl p-6 w-full max-w-md space-y-4 shadow-xl">
-        <div>
-          <h2 className="text-lg font-semibold text-slate-900">Record Donation</h2>
-          <p className="text-sm text-slate-500 mt-0.5">
-            Matched to an existing donor by phone number, or a new one is created.
-          </p>
-        </div>
+    <Modal
+      title="Record Donation"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          {/* The footer sits outside the <form> element, so the submit button
+              is tied back to it by id - otherwise it belongs to no form and
+              pressing it does nothing at all. */}
+          <Button type="submit" form="record-donation" loading={loading}>
+            {loading ? "Saving…" : "Record Donation"}
+          </Button>
+        </>
+      }
+    >
+      <form id="record-donation" onSubmit={handleSubmit} className="space-y-4">
+        <p className="text-sm text-ink-muted">
+          Matched to an existing donor by phone number, or a new one is created.
+        </p>
 
-        {error && <div className="bg-red-50 text-red-700 text-sm p-3 rounded-lg border border-red-200">{error}</div>}
+        {error && <Alert tone="danger">{error}</Alert>}
 
-        <input
-          value={form.name}
-          onChange={(e) => setForm({ ...form, name: e.target.value })}
-          placeholder="Donor name *"
-          required
-          className={`${inputClass} w-full`}
-        />
-        <input
-          value={form.phone}
-          onChange={(e) => setForm({ ...form, phone: e.target.value })}
-          placeholder="Phone number *"
-          required
-          className={`${inputClass} w-full`}
-        />
-        <input
-          type="number"
-          step="0.01"
-          min="0"
-          value={form.amount}
-          onChange={(e) => setForm({ ...form, amount: e.target.value })}
-          placeholder="Amount (₹) *"
-          required
-          className={`${inputClass} w-full`}
-        />
+        <Field label="Donor name" htmlFor="donation-name" required>
+          <Input
+            id="donation-name"
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            required
+          />
+        </Field>
+        <Field label="Phone number" htmlFor="donation-phone" required>
+          <Input
+            id="donation-phone"
+            value={form.phone}
+            onChange={(e) => setForm({ ...form, phone: e.target.value })}
+            required
+          />
+        </Field>
+        <Field label="Amount (₹)" htmlFor="donation-amount" required>
+          <Input
+            id="donation-amount"
+            type="number"
+            step="0.01"
+            min="0"
+            value={form.amount}
+            onChange={(e) => setForm({ ...form, amount: e.target.value })}
+            required
+          />
+        </Field>
 
         <div className="grid grid-cols-2 gap-3">
-          <Select
-            value={form.type}
-            onChange={(v) => setForm({ ...form, type: v })}
-            className="w-full"
-          >
-            <option value="one-time">One-time</option>
-            <option value="recurring">Recurring</option>
-            <option value="in-kind">In-kind</option>
-            <option value="event-sponsorship">Event sponsorship</option>
-          </Select>
-          <Select
-            value={form.purpose}
-            onChange={(v) => setForm({ ...form, purpose: v })}
-            className="w-full"
-          >
-            {purposes.map((p) => (
-              <option key={p} value={p}>
-                {titleCase(p)}
-              </option>
-            ))}
-          </Select>
-          <Select
-            value={form.payment_mode}
-            onChange={(v) => setForm({ ...form, payment_mode: v })}
-            className="w-full"
-          >
-            <option value="cash">Cash</option>
-            <option value="upi">UPI</option>
-            <option value="card">Card</option>
-            <option value="netbanking">Net banking</option>
-            <option value="bank_transfer">Bank transfer</option>
-          </Select>
-          <Select
-            value={form.source}
-            onChange={(v) => setForm({ ...form, source: v })}
-            className="w-full"
-          >
-            <option value="offline">Offline</option>
-            <option value="website">Website</option>
-            <option value="event">Event</option>
-          </Select>
-        </div>
-
-        <div className="flex gap-3 pt-2">
-          <button type="button" onClick={onClose} className={`${buttonSecondary} flex-1 justify-center`}>
-            Cancel
-          </button>
-          <button type="submit" disabled={loading} className={`${buttonPrimary} flex-1 justify-center`}>
-            {loading ? "Saving…" : "Record Donation"}
-          </button>
+          <Field label="Type">
+            <Select
+              value={form.type}
+              onChange={(v) => setForm({ ...form, type: v })}
+              ariaLabel="Donation type"
+            >
+              <option value="one-time">One-time</option>
+              <option value="recurring">Recurring</option>
+              <option value="in-kind">In-kind</option>
+              <option value="event-sponsorship">Event sponsorship</option>
+            </Select>
+          </Field>
+          <Field label="Purpose">
+            <Select
+              value={form.purpose}
+              onChange={(v) => setForm({ ...form, purpose: v })}
+              ariaLabel="Purpose"
+            >
+              {purposes.map((p) => (
+                <option key={p} value={p}>
+                  {titleCase(p)}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Payment mode">
+            <Select
+              value={form.payment_mode}
+              onChange={(v) => setForm({ ...form, payment_mode: v })}
+              ariaLabel="Payment mode"
+            >
+              <option value="cash">Cash</option>
+              <option value="upi">UPI</option>
+              <option value="card">Card</option>
+              <option value="netbanking">Net banking</option>
+              <option value="bank_transfer">Bank transfer</option>
+            </Select>
+          </Field>
+          <Field label="Source">
+            <Select
+              value={form.source}
+              onChange={(v) => setForm({ ...form, source: v })}
+              ariaLabel="Source"
+            >
+              <option value="offline">Offline</option>
+              <option value="website">Website</option>
+              <option value="event">Event</option>
+            </Select>
+          </Field>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -826,19 +910,16 @@ function OfflineDonationModal({ onClose, onSaved }: { onClose: () => void; onSav
   // of the way rather than offering an edit that would do nothing.
   if (done) {
     return (
-      <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50">
-        <Card className="w-full max-w-md text-center">
-          <p className="text-sm text-slate-500">Recorded on the {site === "annadan" ? "annadan" : "main"} site</p>
-          <p className="text-2xl font-semibold text-slate-900 mt-2 tabular-nums">{currency(Number(amount))}</p>
-          {done.receiptNumber && (
-            <p className="font-mono text-sm text-[var(--accent-ink)] mt-1">{done.receiptNumber}</p>
-          )}
-          <p className="text-xs text-slate-500 mt-3">{done.message}</p>
-          <div className="flex gap-2 mt-5">
-            <button onClick={onClose} className={`${buttonSecondary} flex-1 justify-center`}>
+      <Modal
+        title="Donation recorded"
+        onClose={onClose}
+        footer={
+          <>
+            <Button variant="secondary" onClick={onClose}>
               Close
-            </button>
-            <button
+            </Button>
+            <Button
+              icon="plus"
               onClick={() => {
                 // Same donor, next donation — keep who they are, clear the money.
                 setDone(null);
@@ -847,220 +928,201 @@ function OfflineDonationModal({ onClose, onSaved }: { onClose: () => void; onSav
                 setSeva("");
                 setNote("");
               }}
-              className={`${buttonPrimary} flex-1 justify-center`}
             >
               Record another
-            </button>
-          </div>
-        </Card>
-      </div>
+            </Button>
+          </>
+        }
+      >
+        <div className="text-center">
+          <p className="text-sm text-ink-muted">
+            Recorded on the {site === "annadan" ? "annadan" : "main"} site
+          </p>
+          <p className="mt-2 text-2xl font-semibold tabular-nums text-ink">{currency(Number(amount))}</p>
+          {done.receiptNumber && (
+            <p className="mt-1 font-mono text-sm text-brand-700">{done.receiptNumber}</p>
+          )}
+          <p className="mt-3 text-xs text-ink-muted">{done.message}</p>
+        </div>
+      </Modal>
     );
   }
 
   return (
-    <div className="fixed inset-0 bg-slate-900/40 flex items-start justify-center p-4 overflow-y-auto z-50">
-      <Card className="w-full max-w-2xl my-8">
-        <div className="flex items-start justify-between gap-4 mb-4">
-          <div>
-            <h2 className="text-sm font-semibold text-slate-900">Record an offline donation</h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Cash, cheque, bank transfer or a UPI payment taken outside the website. The receipt is
-              issued by the site you choose, exactly as if it had been entered there.
-            </p>
-          </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600" aria-label="Close">
-            ×
-          </button>
+    <Modal
+      title="Record an offline donation"
+      onClose={onClose}
+      wide
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          {/* Tied to the form by id because the footer renders outside it. */}
+          <Button type="submit" form="offline-donation" loading={saving}>
+            {saving ? "Issuing receipt…" : "Record and issue receipt"}
+          </Button>
+        </>
+      }
+    >
+      <p className="mb-4 text-xs text-ink-muted">
+        Cash, cheque, bank transfer or a UPI payment taken outside the website. The receipt is
+        issued by the site you choose, exactly as if it had been entered there.
+      </p>
+
+      {error && <Alert tone="danger">{error}</Alert>}
+
+      <form id="offline-donation" onSubmit={submit} className="space-y-4">
+        <Field label="Which site issues the receipt">
+          <SegmentedControl
+            options={[
+              { value: "hkmv", label: "HKM Vizag site" },
+              { value: "annadan", label: "Annadan site" },
+            ]}
+            value={site}
+            onChange={(v) => setSite(v)}
+          />
+        </Field>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field
+            label="Mobile number"
+            htmlFor="offline-phone"
+            // The lookup result lives in the hint slot so it sits under the
+            // field it describes, and the row does not jump as it appears.
+            hint={
+              looking
+                ? "Looking up…"
+                : matched
+                ? `Known donor · ${number(matched.donation_count)} donations · ${currency(matched.lifetime_total)} lifetime`
+                : phone.replace(/\D/g, "").length >= 10
+                ? "New donor — they will be created"
+                : " "
+            }
+          >
+            <Input
+              id="offline-phone"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              required
+              placeholder="98765 43210"
+            />
+          </Field>
+          <Field label="Donor name" htmlFor="offline-name" required>
+            <Input
+              id="offline-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+            />
+          </Field>
+          <Field label="Email" hint="Optional" htmlFor="offline-email">
+            <Input
+              id="offline-email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </Field>
+          <Field label="Seva / purpose" hint="Optional" htmlFor="offline-seva">
+            <Input
+              id="offline-seva"
+              value={seva}
+              onChange={(e) => setSeva(e.target.value)}
+              placeholder="Gau Seva, Annadan…"
+            />
+          </Field>
         </div>
 
-        {error && <p className="mb-3 text-sm text-red-700 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
-
-        <form onSubmit={submit} className="space-y-4">
-          <div>
-            <p className="text-[11px] uppercase tracking-wide text-slate-400 mb-1.5">
-              Which site issues the receipt
-            </p>
-            <div className="flex gap-2">
-              {(
-                [
-                  ["hkmv", "HKM Vizag site"],
-                  ["annadan", "Annadan site"],
-                ] as const
-              ).map(([key, label]) => (
-                <button
-                  type="button"
-                  key={key}
-                  onClick={() => setSite(key)}
-                  className={
-                    "flex-1 rounded-lg border px-3 py-2 text-sm transition-colors " +
-                    (site === key
-                      ? "border-[var(--accent)] bg-[var(--accent-soft)]/25 text-[var(--accent-ink)] font-medium"
-                      : "border-[var(--line-soft)] text-slate-600 hover:border-[var(--accent)]/40")
-                  }
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <label className="text-xs text-slate-500 sm:col-span-1">
-              Mobile number
-              <input
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                required
-                placeholder="98765 43210"
-                className={`${inputClass} w-full mt-1`}
-              />
-              <span className="block text-[11px] mt-1 min-h-[1rem]">
-                {looking ? (
-                  <span className="text-slate-400">Looking up…</span>
-                ) : matched ? (
-                  <span className="text-[var(--accent-ink)]">
-                    Known donor · {number(matched.donation_count)} donations ·{" "}
-                    {currency(matched.lifetime_total)} lifetime
-                  </span>
-                ) : phone.replace(/\D/g, "").length >= 10 ? (
-                  <span className="text-slate-400">New donor — they will be created</span>
-                ) : null}
-              </span>
-            </label>
-            <label className="text-xs text-slate-500">
-              Donor name
-              <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-                className={`${inputClass} w-full mt-1`}
-              />
-            </label>
-            <label className="text-xs text-slate-500">
-              Email (optional)
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className={`${inputClass} w-full mt-1`}
-              />
-            </label>
-            <label className="text-xs text-slate-500">
-              Seva / purpose (optional)
-              <input
-                value={seva}
-                onChange={(e) => setSeva(e.target.value)}
-                placeholder="Gau Seva, Annadan…"
-                className={`${inputClass} w-full mt-1`}
-              />
-            </label>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-            <label className="text-xs text-slate-500">
-              Amount
-              <input
-                type="number"
-                min="1"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                required
-                className={`${inputClass} w-full mt-1`}
-              />
-            </label>
-            <label className="text-xs text-slate-500">
-              How it was paid
-              <Select value={mode} onChange={(v) => setMode(v)} className="w-full mt-1">
-                <option value="cash">Cash</option>
-                <option value="cheque">Cheque</option>
-                <option value="upi">UPI</option>
-                <option value="bank">Bank transfer</option>
-              </Select>
-            </label>
-            <label className="text-xs text-slate-500">
-              {mode === "cash"
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+          <Field label="Amount" htmlFor="offline-amount" required>
+            <Input
+              id="offline-amount"
+              type="number"
+              min="1"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              required
+            />
+          </Field>
+          <Field label="How it was paid">
+            <Select value={mode} onChange={(v) => setMode(v)} ariaLabel="How it was paid">
+              <option value="cash">Cash</option>
+              <option value="cheque">Cheque</option>
+              <option value="upi">UPI</option>
+              <option value="bank">Bank transfer</option>
+            </Select>
+          </Field>
+          <Field
+            label={
+              mode === "cash"
                 ? "Receipt book no."
                 : mode === "cheque"
                 ? "Cheque number"
-                : "UTR / reference"}
-              <input
-                value={reference}
-                onChange={(e) => setReference(e.target.value)}
-                required
-                className={`${inputClass} w-full mt-1`}
-              />
-            </label>
-            <label className="text-xs text-slate-500">
-              Received on
-              <input
-                type="date"
-                value={paidOn}
-                onChange={(e) => setPaidOn(e.target.value)}
-                className={`${inputClass} w-full mt-1`}
-              />
-            </label>
-          </div>
-          <p className="text-[11px] text-slate-400 -mt-2">
-            The reference has to be unique — both sites refuse a second entry against the same one,
-            which is what stops the same donation being recorded twice.
-          </p>
+                : "UTR / reference"
+            }
+            htmlFor="offline-reference"
+            required
+          >
+            <Input
+              id="offline-reference"
+              value={reference}
+              onChange={(e) => setReference(e.target.value)}
+              required
+            />
+          </Field>
+          {/* The date input's own YYYY-MM-DD string is what the site expects,
+              so it is sent through untouched. */}
+          <Field label="Received on" htmlFor="offline-paid-on">
+            <Input
+              id="offline-paid-on"
+              type="date"
+              value={paidOn}
+              onChange={(e) => setPaidOn(e.target.value)}
+            />
+          </Field>
+        </div>
+        <p className="-mt-2 text-xs text-ink-faint">
+          The reference has to be unique — both sites refuse a second entry against the same one,
+          which is what stops the same donation being recorded twice.
+        </p>
 
-          <div className="space-y-2 border-t border-[var(--line-soft)] pt-3">
-            <label className="flex items-center gap-2 text-sm text-slate-700">
-              <input
-                type="checkbox"
-                checked={wantCertificate}
-                onChange={(e) => setWantCertificate(e.target.checked)}
-              />
-              80G certificate wanted
-            </label>
-            {wantCertificate && (
-              <input
-                value={pan}
-                onChange={(e) => setPan(e.target.value.toUpperCase())}
-                placeholder="PAN (required for 80G)"
-                required
-                className={`${inputClass} w-full`}
-              />
-            )}
-
-            <label className="flex items-center gap-2 text-sm text-slate-700">
-              <input
-                type="checkbox"
-                checked={wantPrasadam}
-                onChange={(e) => setWantPrasadam(e.target.checked)}
-              />
-              Prasadam to be sent
-            </label>
-            {wantPrasadam && (
-              <textarea
-                value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                placeholder="Delivery address"
-                required
-                rows={2}
-                className={`${inputClass} w-full`}
-              />
-            )}
-          </div>
-
-          <input
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder="Note (optional) — who handed it in, anything worth remembering"
-            className={`${inputClass} w-full`}
+        <div className="space-y-2 border-t border-line-soft pt-3">
+          <Checkbox
+            checked={wantCertificate}
+            onChange={setWantCertificate}
+            label="80G certificate wanted"
           />
+          {wantCertificate && (
+            <Input
+              value={pan}
+              onChange={(e) => setPan(e.target.value.toUpperCase())}
+              placeholder="PAN (required for 80G)"
+              aria-label="PAN"
+              required
+            />
+          )}
 
-          <div className="flex gap-2 pt-1">
-            <button type="button" onClick={onClose} className={`${buttonSecondary} flex-1 justify-center`}>
-              Cancel
-            </button>
-            <button type="submit" disabled={saving} className={`${buttonPrimary} flex-1 justify-center`}>
-              {saving ? "Issuing receipt…" : "Record and issue receipt"}
-            </button>
-          </div>
-        </form>
-      </Card>
-    </div>
+          <Checkbox checked={wantPrasadam} onChange={setWantPrasadam} label="Prasadam to be sent" />
+          {wantPrasadam && (
+            <Textarea
+              value={address}
+              onChange={(e) => setAddress(e.target.value)}
+              placeholder="Delivery address"
+              aria-label="Delivery address"
+              required
+              rows={2}
+            />
+          )}
+        </div>
+
+        <Input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="Note (optional) — who handed it in, anything worth remembering"
+          aria-label="Note"
+        />
+      </form>
+    </Modal>
   );
 }

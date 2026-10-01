@@ -34,6 +34,10 @@ import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import { fetchAbandonedPage, isSiteConfigured, type SiteKey } from '../services/hkmvClient';
 import { buildWorkbook } from '../utils/spreadsheet';
+import { parseDate, istDate } from '../bootTimezone';
+import {
+  sendExport, formatFrom, describeFilters, EXPORT_ROW_CAP, type ExportFormat,
+} from '../utils/export';
 // The queue's filter lives with the lists it belongs to, so a change to what
 // counts as callable changes the queue and every list's count together.
 import { CALLABLE, DUE_NOW, listPredicate, loadList, maxAttempts } from './crmLists';
@@ -70,11 +74,8 @@ const num = (v: unknown): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
-const asDate = (v: unknown): string | null => {
-  if (!v) return null;
-  const d = new Date(String(v));
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
-};
+// Bare dates resolve to midnight in India rather than UTC - see parseDate.
+const asDate = parseDate;
 
 /**
  * Links leads to the donations that answered them.
@@ -519,11 +520,23 @@ const SORTS: Record<string, string> = {
 // routing mistake, so it is the kind of bug that survives a long time.
 // Real-looking rows rather than "string, string, string", and offered next to
 // every upload button: the commonest reason an import fails is a column name.
+//
+// THE PREACHER ID COLUMN IS HERE BECAUSE THE SAMPLE IS THE DOCUMENTATION.
+//
+// The importer has understood "Preacher ID" (and "Enrolled by ID", "DCC ID",
+// "Counsellor ID", "Sevak ID") for a while, and it is what makes the donation
+// receipt say "enrolled by" the right person. But it was missing from this
+// sample - and a column nobody is shown is a column nobody fills in. Every
+// sheet uploaded in that period lost the attribution silently.
+//
+// Blank in the third row on purpose: it is optional, and leaving one row empty
+// says that more clearly than a sentence somewhere else would. A sheet with no
+// preacher id falls back to the site's default, same as HKMV does.
 const LEAD_SAMPLE_ROWS = [
-  ['Name', 'Mobile Number', 'Email', 'City', 'Remarks', 'Expected Amount', 'Tags'],
-  ['Radha Krishna Das', '9876543210', 'radha@example.com', 'Visakhapatnam', 'Gave at Janmashtami last year', '5000', 'janmashtami;lapsed'],
-  ['Sita Devi', '9812345678', '', 'Hyderabad', 'Met at the Gita stall', '1100', 'gita-stall'],
-  ['Gopal Rao', '9700011122', 'gopal@example.com', 'Vizag', 'Asked to be called after Diwali', '', 'diwali'],
+  ['Name', 'Mobile Number', 'Email', 'City', 'Preacher ID', 'Enrolled By', 'Remarks', 'Expected Amount', 'Tags'],
+  ['Radha Krishna Das', '9876543210', 'radha@example.com', 'Visakhapatnam', '1042', 'Hari Priya Das', 'Gave at Janmashtami last year', '5000', 'janmashtami;lapsed'],
+  ['Sita Devi', '9812345678', '', 'Hyderabad', '1042', 'Hari Priya Das', 'Met at the Gita stall', '1100', 'gita-stall'],
+  ['Gopal Rao', '9700011122', 'gopal@example.com', 'Vizag', '', '', 'Asked to be called after Diwali', '', 'diwali'],
 ];
 
 router.get('/leads/sample.csv', (_req, res) => {
@@ -552,7 +565,14 @@ router.get('/leads/sample.xlsx', async (_req, res) => {
 
 // The list on screen, as a file. Honours every filter, for the same reason the
 // import does: staff must never be able to export rows the screen cannot show.
-router.get('/leads/export.csv', (req, res) => exportLeadsCsv(req, res));
+// Both extensions answer the same handler; ?format=xlsx also works, so the
+// client can offer a CSV/Excel choice without knowing two paths.
+// The extension picks the format, and ?format=xlsx picks it too, so the client
+// can offer a CSV/Excel choice from one path. The format is passed as an
+// argument rather than written back onto req.query, because in Express 5
+// req.query is a getter and assigning to it throws.
+router.get('/leads/export.csv', (req, res) => exportLeadsFile(req, res, 'csv'));
+router.get('/leads/export.xlsx', (req, res) => exportLeadsFile(req, res, 'xlsx'));
 
 /* ------------------------------------------------- unfinished donations
  *
@@ -741,6 +761,149 @@ const cut = (v: unknown, n: number): string | null => {
   const t = String(v ?? '').trim();
   return t ? t.slice(0, n) : null;
 };
+/**
+ * The "nearly gave" query, built once and used by both the screen and the
+ * download.
+ *
+ * EXTRACTED SO THE EXPORT CANNOT DRIFT. This logic lived inside the list
+ * handler, which meant an export would have had to re-derive it - and a
+ * re-derived filter is a filter that will disagree with the screen the first
+ * time somebody adds a condition to one and not the other. The person who
+ * downloads a list and acts on it is the one who pays for that.
+ */
+function buildAbandonedQuery(
+  q: Record<string, unknown>,
+  wanted: SiteKey[],
+  viewDays: number
+): { base: string; values: unknown[]; order: string } {
+  /* ------------------------------------------------------------ filters
+   *
+   * TWO GROUPS, AND THE ORDER MATTERS
+   *
+   * `scope` decides which attempts exist at all for this view - the sites
+   * chosen, the period, anybody set aside. `narrow` is what the caller is
+   * looking for within that: an amount band, an outcome, a name.
+   *
+   * The scope filters run BEFORE one-row-per-person is picked; the narrowing
+   * ones run after. Mixing them meant the amount filter changed WHICH
+   * attempt represented each person: a donor who tried ₹25,000 in September
+   * and ₹500 last week was represented by the ₹500 row unfiltered, and by
+   * the ₹25,000 row the moment you asked for "at least ₹1,000". Narrowing
+   * the filter made the headline figure fifty times larger, and neither
+   * number was wrong on its own terms - which is the worst kind.
+   */
+  const scope: string[] = [];
+  const narrow: string[] = [];
+  const values: unknown[] = [];
+  let i = 1;
+
+  // Set aside is per PERSON. Dismissing one of somebody's four attempts used
+  // to promote the next one into the list on the following load, taking the
+  // value at stake up rather than down.
+  scope.push(`NOT EXISTS (
+    SELECT 1 FROM abandoned_attempts d
+     WHERE d.phone = a.phone AND d.dismissed_at IS NOT NULL
+  )`);
+
+  scope.push(`a.source_site = ANY($${i++}::text[])`);
+  values.push(wanted);
+
+  // How long ago they tried. Days rather than a date range, because the
+  // question a caller asks is "who nearly gave this week".
+  scope.push(`a.attempted_at >= NOW() - ($${i++} || ' days')::interval`);
+  values.push(String(viewDays));
+
+  // Leave them alone until the attempt has had time to complete.
+  scope.push(`a.attempted_at <= NOW() - INTERVAL '15 minutes'`);
+
+  // Guarded against NaN: a non-numeric min_amount used to reach Postgres as
+  // 'NaN'::numeric, which sorts above every number, so the endpoint answered
+  // 200 with no rows and zero at stake rather than an error.
+  const minAmount = Number(q.min_amount);
+  if (q.min_amount !== undefined && Number.isFinite(minAmount)) {
+    narrow.push(`l.amount >= $${i++}::numeric`);
+    values.push(minAmount);
+  }
+  const maxAmount = Number(q.max_amount);
+  if (q.max_amount !== undefined && Number.isFinite(maxAmount)) {
+    narrow.push(`l.amount <= $${i++}::numeric`);
+    values.push(maxAmount);
+  }
+  if (q.status) {
+    narrow.push(`l.status = ANY($${i++}::text[])`);
+    values.push(String(q.status).split(',').filter(Boolean));
+  }
+  if (q.search) {
+    narrow.push(`(l.name ILIKE $${i} OR l.phone ILIKE $${i} OR l.email ILIKE $${i})`);
+    values.push(`%${String(q.search).trim()}%`);
+    i++;
+  }
+
+  // Aliased to the OUTER query, which selects from the CTE as `l`. Using
+  // `a.` here referenced the inner alias and failed with "missing FROM-clause
+  // entry" - a whitelisted ORDER BY is still SQL that has to parse.
+  const SORTS: Record<string, string> = {
+    recent: 'l.attempted_at DESC',
+    oldest: 'l.attempted_at ASC',
+    amount: 'l.amount DESC NULLS LAST',
+    attempts: 'l.attempts DESC, l.attempted_at DESC',
+  };
+  const order = SORTS[String(q.sort ?? '')] ?? SORTS.recent;
+
+  // One row per person: somebody who tried four times is one phone call.
+  // The row kept is their most recent attempt, which is the one worth
+  // mentioning when the phone is answered.
+  //
+  // THE TOTALS ARE COMPUTED IN SQL, OVER EVERYTHING
+  //
+  // They used to be summed in JavaScript over the rows this query returned -
+  // which is capped at 500. So on a list longer than that, "value at stake"
+  // silently reported the value of the first five hundred people and nothing
+  // else. The figure dropped from about twelve lakhs to seven the moment the
+  // page started reading a stored copy, and the money had not gone anywhere:
+  // the old version fetched the sites live with no cap, and the new one was
+  // adding up a page of the answer and calling it the answer.
+  //
+  // A total and a page are different questions. The page is capped because
+  // nobody scrolls five hundred rows; the total must not be, because it is
+  // what decides whether the list is worth a shift.
+  const base = `
+    WITH in_scope AS (
+      SELECT a.* FROM abandoned_attempts a
+       WHERE ${scope.join(' AND ')}
+    ),
+    latest AS (
+      SELECT DISTINCT ON (a.phone) a.*,
+             -- How many times THIS person tried, within the period and the
+             -- sites being looked at. The stored column counts every attempt
+             -- ever, across both sites and including dismissed ones, so a
+             -- "Today, annadan only" view was showing "tried 7 times" for
+             -- somebody who tried once today.
+             COUNT(*) OVER (PARTITION BY a.phone)::int AS attempts_in_view
+        FROM in_scope a
+       ORDER BY a.phone, a.attempted_at DESC
+    ),
+    resolved AS (
+      SELECT l.*,
+             -- Did they give anyway? Any donation at or after the attempt,
+             -- from either site, by any means.
+             EXISTS (
+               SELECT 1 FROM people p JOIN donations d ON d.person_id = p.id
+                WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = l.phone
+                  AND d.created_at >= l.attempted_at
+             ) AS gave_anyway,
+             ld.id AS lead_id,
+             ld.status AS lead_status,
+             u.name AS assigned_to_name
+        FROM latest l
+        LEFT JOIN leads ld ON ld.phone = l.phone
+        LEFT JOIN users u ON ld.assigned_to = u.id
+        ${narrow.length ? `WHERE ${narrow.join(' AND ')}` : ''}
+    )`;
+  return { base, values, order };
+}
+
+
 
 /**
  * GET /leads/abandoned - the list a caller works through.
@@ -817,130 +980,9 @@ router.get('/leads/abandoned', async (req, res) => {
       );
     }
 
-    /* ------------------------------------------------------------ filters
-     *
-     * TWO GROUPS, AND THE ORDER MATTERS
-     *
-     * `scope` decides which attempts exist at all for this view - the sites
-     * chosen, the period, anybody set aside. `narrow` is what the caller is
-     * looking for within that: an amount band, an outcome, a name.
-     *
-     * The scope filters run BEFORE one-row-per-person is picked; the narrowing
-     * ones run after. Mixing them meant the amount filter changed WHICH
-     * attempt represented each person: a donor who tried ₹25,000 in September
-     * and ₹500 last week was represented by the ₹500 row unfiltered, and by
-     * the ₹25,000 row the moment you asked for "at least ₹1,000". Narrowing
-     * the filter made the headline figure fifty times larger, and neither
-     * number was wrong on its own terms - which is the worst kind.
-     */
-    const scope: string[] = [];
-    const narrow: string[] = [];
-    const values: unknown[] = [];
-    let i = 1;
-
-    // Set aside is per PERSON. Dismissing one of somebody's four attempts used
-    // to promote the next one into the list on the following load, taking the
-    // value at stake up rather than down.
-    scope.push(`NOT EXISTS (
-      SELECT 1 FROM abandoned_attempts d
-       WHERE d.phone = a.phone AND d.dismissed_at IS NOT NULL
-    )`);
-
-    scope.push(`a.source_site = ANY($${i++}::text[])`);
-    values.push(wanted);
-
-    // How long ago they tried. Days rather than a date range, because the
-    // question a caller asks is "who nearly gave this week".
-    scope.push(`a.attempted_at >= NOW() - ($${i++} || ' days')::interval`);
-    values.push(String(viewDays));
-
-    // Leave them alone until the attempt has had time to complete.
-    scope.push(`a.attempted_at <= NOW() - INTERVAL '15 minutes'`);
-
-    // Guarded against NaN: a non-numeric min_amount used to reach Postgres as
-    // 'NaN'::numeric, which sorts above every number, so the endpoint answered
-    // 200 with no rows and zero at stake rather than an error.
-    const minAmount = Number(req.query.min_amount);
-    if (req.query.min_amount !== undefined && Number.isFinite(minAmount)) {
-      narrow.push(`l.amount >= $${i++}::numeric`);
-      values.push(minAmount);
-    }
-    const maxAmount = Number(req.query.max_amount);
-    if (req.query.max_amount !== undefined && Number.isFinite(maxAmount)) {
-      narrow.push(`l.amount <= $${i++}::numeric`);
-      values.push(maxAmount);
-    }
-    if (req.query.status) {
-      narrow.push(`l.status = ANY($${i++}::text[])`);
-      values.push(String(req.query.status).split(',').filter(Boolean));
-    }
-    if (req.query.search) {
-      narrow.push(`(l.name ILIKE $${i} OR l.phone ILIKE $${i} OR l.email ILIKE $${i})`);
-      values.push(`%${String(req.query.search).trim()}%`);
-      i++;
-    }
-
-    // Aliased to the OUTER query, which selects from the CTE as `l`. Using
-    // `a.` here referenced the inner alias and failed with "missing FROM-clause
-    // entry" - a whitelisted ORDER BY is still SQL that has to parse.
-    const SORTS: Record<string, string> = {
-      recent: 'l.attempted_at DESC',
-      oldest: 'l.attempted_at ASC',
-      amount: 'l.amount DESC NULLS LAST',
-      attempts: 'l.attempts DESC, l.attempted_at DESC',
-    };
-    const order = SORTS[String(req.query.sort ?? '')] ?? SORTS.recent;
-
-    // One row per person: somebody who tried four times is one phone call.
-    // The row kept is their most recent attempt, which is the one worth
-    // mentioning when the phone is answered.
-    //
-    // THE TOTALS ARE COMPUTED IN SQL, OVER EVERYTHING
-    //
-    // They used to be summed in JavaScript over the rows this query returned -
-    // which is capped at 500. So on a list longer than that, "value at stake"
-    // silently reported the value of the first five hundred people and nothing
-    // else. The figure dropped from about twelve lakhs to seven the moment the
-    // page started reading a stored copy, and the money had not gone anywhere:
-    // the old version fetched the sites live with no cap, and the new one was
-    // adding up a page of the answer and calling it the answer.
-    //
-    // A total and a page are different questions. The page is capped because
-    // nobody scrolls five hundred rows; the total must not be, because it is
-    // what decides whether the list is worth a shift.
-    const base = `
-      WITH in_scope AS (
-        SELECT a.* FROM abandoned_attempts a
-         WHERE ${scope.join(' AND ')}
-      ),
-      latest AS (
-        SELECT DISTINCT ON (a.phone) a.*,
-               -- How many times THIS person tried, within the period and the
-               -- sites being looked at. The stored column counts every attempt
-               -- ever, across both sites and including dismissed ones, so a
-               -- "Today, annadan only" view was showing "tried 7 times" for
-               -- somebody who tried once today.
-               COUNT(*) OVER (PARTITION BY a.phone)::int AS attempts_in_view
-          FROM in_scope a
-         ORDER BY a.phone, a.attempted_at DESC
-      ),
-      resolved AS (
-        SELECT l.*,
-               -- Did they give anyway? Any donation at or after the attempt,
-               -- from either site, by any means.
-               EXISTS (
-                 SELECT 1 FROM people p JOIN donations d ON d.person_id = p.id
-                  WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = l.phone
-                    AND d.created_at >= l.attempted_at
-               ) AS gave_anyway,
-               ld.id AS lead_id,
-               ld.status AS lead_status,
-               u.name AS assigned_to_name
-          FROM latest l
-          LEFT JOIN leads ld ON ld.phone = l.phone
-          LEFT JOIN users u ON ld.assigned_to = u.id
-          ${narrow.length ? `WHERE ${narrow.join(' AND ')}` : ''}
-      )`;
+    const q = req.query as Record<string, unknown>;
+    const built = buildAbandonedQuery(q, wanted, viewDays);
+    const { base, values, order } = built;
 
     const [page, totals] = await Promise.all([
       pool.query(
@@ -999,6 +1041,76 @@ router.get('/leads/abandoned', async (req, res) => {
     res.status(500).json({ error: 'Could not load the unfinished donations' });
   }
 });
+
+/**
+ * The "nearly gave" list, as a file.
+ *
+ * Deliberately does NOT trigger a sync. A download is a read of what the
+ * screen is showing; making it fetch two external sites first would mean the
+ * file sometimes differs from the list the person was looking at when they
+ * pressed the button, which is the one thing an export must never do.
+ */
+async function exportAbandonedFile(
+  req: import('express').Request,
+  res: import('express').Response,
+  format: ExportFormat
+) {
+  try {
+    const q = req.query as Record<string, unknown>;
+    const sites = String(q.sites ?? '').split(',').filter(Boolean) as SiteKey[];
+    const wanted = sites.length ? sites : (['hkmv', 'annadan'] as SiteKey[]);
+    const viewDays = Math.min(365, Math.max(1, Number(q.days) || 30));
+    const { base, values, order } = buildAbandonedQuery(q, wanted, viewDays);
+
+    const rows = await pool.query(
+      `${base}
+       SELECT * FROM resolved l
+        ${q.include_settled === 'true' ? '' : 'WHERE NOT gave_anyway'}
+        ORDER BY ${order}
+        LIMIT ${EXPORT_ROW_CAP + 1}`,
+      values
+    );
+    const truncated = rows.rows.length > EXPORT_ROW_CAP;
+
+    await sendExport(res, format, {
+      name: 'nearly-gave',
+      truncated,
+      rows: truncated ? rows.rows.slice(0, EXPORT_ROW_CAP) : rows.rows,
+      filterSummary: describeFilters(q, {
+        days: 'Last N days',
+        sites: 'Sites',
+        min_amount: 'Minimum amount',
+        max_amount: 'Maximum amount',
+        status: 'Payment status',
+        search: 'Search',
+        include_settled: 'Including those who gave anyway',
+        sort: 'Sorted by',
+      }),
+      columns: [
+        { header: 'Name', value: (r) => r.name },
+        { header: 'Phone', value: (r) => r.phone, kind: 'phone' },
+        { header: 'Email', value: (r) => r.email },
+        { header: 'Amount', value: (r) => r.amount, kind: 'money' },
+        { header: 'Purpose', value: (r) => r.purpose },
+        { header: 'Site', value: (r) => r.source_site },
+        { header: 'Page', value: (r) => r.source_page },
+        { header: 'Payment status', value: (r) => r.status },
+        { header: 'Tried at', value: (r) => r.attempted_at, kind: 'datetime' },
+        { header: 'Times tried', value: (r) => r.attempts_in_view, kind: 'number' },
+        { header: 'Gave anyway', value: (r) => (r.gave_anyway ? 'Yes' : 'No') },
+        { header: 'Already a lead', value: (r) => (r.lead_id ? 'Yes' : 'No') },
+        { header: 'Lead status', value: (r) => r.lead_status },
+        { header: 'Assigned to', value: (r) => r.assigned_to_name },
+      ],
+    });
+  } catch (err) {
+    console.error('crm.exportAbandoned error:', err);
+    res.status(500).json({ error: 'Could not build that export' });
+  }
+}
+
+router.get('/leads/abandoned/export.csv', (req, res) => exportAbandonedFile(req, res, 'csv'));
+router.get('/leads/abandoned/export.xlsx', (req, res) => exportAbandonedFile(req, res, 'xlsx'));
 
 /** POST /leads/abandoned/refresh - ask both sites now, and wait for them. */
 router.post('/leads/abandoned/refresh', async (req, res) => {
@@ -2444,48 +2556,68 @@ router.post('/leads/import/commit', authorize('admin', 'accountant'), async (req
   res.json({ added, updated, skipped, failed: failures.length, failures: failures.slice(0, 20) });
 });
 
-async function exportLeadsCsv(req: import('express').Request, res: import('express').Response) {
-  const cell = (v: unknown): string => {
-    if (v === null || v === undefined) return '';
-    const s =
-      v instanceof Date
-        ? `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')} ` +
-          `${String(v.getHours()).padStart(2, '0')}:${String(v.getMinutes()).padStart(2, '0')}`
-        : Array.isArray(v)
-        ? v.join('; ')
-        : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-
+/**
+ * The leads on screen, as a file.
+ *
+ * SCOPE IS THE POINT, not an afterthought. This runs buildLeadFilters and
+ * withScope(leadScopeFor(...)) - exactly what GET /leads runs - so a caller
+ * who cannot see the whole donor base on the screen cannot download it either.
+ * Sharing the filter builder rather than re-deriving one here is what keeps
+ * that true when somebody adds the next filter.
+ */
+async function exportLeadsFile(
+  req: import('express').Request,
+  res: import('express').Response,
+  format?: ExportFormat
+) {
   try {
     const f = withScope(
       buildLeadFilters(req.query as Record<string, unknown>),
       await leadScopeFor(req.user)
     );
     const rows = await pool.query(
-      `SELECT ${LEAD_COLUMNS} ${LEAD_JOINS} ${f.where} ORDER BY l.next_follow_up_at ASC NULLS LAST LIMIT 20000`,
+      `SELECT ${LEAD_COLUMNS} ${LEAD_JOINS} ${f.where} ORDER BY l.next_follow_up_at ASC NULLS LAST LIMIT ${EXPORT_ROW_CAP + 1}`,
       f.values
     );
+    const truncated = rows.rows.length > EXPORT_ROW_CAP;
 
-    const cols: [string, string][] = [
-      ['Name', 'name'], ['Phone', 'phone'], ['Email', 'email'], ['City', 'city'],
-      ['Status', 'status_label'], ['Assigned to', 'assigned_to_name'], ['Source', 'source'],
-      ['List', 'source_detail'], ['Tags', 'tags'], ['Attempts', 'call_attempts'],
-      ['Last outcome', 'last_outcome'], ['Last contacted', 'last_contacted_at'],
-      ['Follow-up due', 'next_follow_up_at'], ['Follow-up note', 'follow_up_note'],
-      ['Expected amount', 'expected_amount'], ['Donated', 'converted_amount'],
-      ['Given before (total)', 'total_donated'], ['Donations before', 'donation_count'],
-      ['Remarks', 'remarks'], ['Added', 'created_at'],
-    ];
-
-    const csv = [
-      cols.map((c) => c[0]).join(','),
-      ...rows.rows.map((r) => cols.map((c) => cell(r[c[1]])).join(',')),
-    ].join('\n');
-
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="leads-${new Date().toISOString().slice(0, 10)}.csv"`);
-    res.send('﻿' + csv);
+    await sendExport(res, format ?? formatFrom(req.query as Record<string, unknown>), {
+      name: 'leads',
+      truncated,
+      rows: truncated ? rows.rows.slice(0, EXPORT_ROW_CAP) : rows.rows,
+      filterSummary: describeFilters(req.query as Record<string, unknown>, {
+        search: 'Search',
+        status: 'Status',
+        source: 'Source',
+        assigned_to: 'Assigned to',
+        due: 'Follow-up',
+        preacher: 'Preacher',
+        start_date: 'Added from',
+        end_date: 'Added to',
+      }),
+      columns: [
+        { header: 'Name', value: (r) => r.name },
+        { header: 'Phone', value: (r) => r.phone, kind: 'phone' },
+        { header: 'Email', value: (r) => r.email },
+        { header: 'City', value: (r) => r.city },
+        { header: 'Status', value: (r) => r.status_label },
+        { header: 'Assigned to', value: (r) => r.assigned_to_name },
+        { header: 'Source', value: (r) => r.source },
+        { header: 'List', value: (r) => r.source_detail },
+        { header: 'Tags', value: (r) => r.tags },
+        { header: 'Attempts', value: (r) => r.call_attempts, kind: 'number' },
+        { header: 'Last outcome', value: (r) => r.last_outcome },
+        { header: 'Last contacted', value: (r) => r.last_contacted_at, kind: 'datetime' },
+        { header: 'Follow-up due', value: (r) => r.next_follow_up_at, kind: 'datetime' },
+        { header: 'Follow-up note', value: (r) => r.follow_up_note },
+        { header: 'Expected amount', value: (r) => r.expected_amount, kind: 'money' },
+        { header: 'Donated', value: (r) => r.converted_amount, kind: 'money' },
+        { header: 'Given before (total)', value: (r) => r.total_donated, kind: 'money' },
+        { header: 'Donations before', value: (r) => r.donation_count, kind: 'number' },
+        { header: 'Remarks', value: (r) => r.remarks },
+        { header: 'Added', value: (r) => r.created_at, kind: 'datetime' },
+      ],
+    });
   } catch (err) {
     console.error('crm.exportLeads error:', err);
     res.status(500).json({ error: 'Could not build that export' });

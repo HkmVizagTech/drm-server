@@ -1,9 +1,44 @@
 "use client";
 
+// One donor, and everything the temple holds about them.
+//
+// This screen was the last one still carrying its own design: six hand-rolled
+// `bg-white rounded-xl shadow` cards, three raw tables with their own grey
+// heads, a private modal shell, a private badge(), a private inr(), and a
+// private `inputClass` that shadowed the shared one with different padding and
+// a different border. It is on the shared system now, so a donor profile looks
+// like the rest of DRM and a change to a control reaches it.
+
 import { use, useEffect, useState, FormEvent } from "react";
-import Link from "next/link";
 import { apiClient } from "@/lib/api";
-import { Select } from "@/components/ui";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  Checkbox,
+  EmptyState,
+  Field,
+  Input,
+  LinkButton,
+  Modal,
+  MoneyCell,
+  PageHeader,
+  Select,
+  Skeleton,
+  SkeletonRows,
+  StatTile,
+  StatusBadge,
+  TableShell,
+  Tabs,
+  Tbody,
+  Td,
+  Textarea,
+  Th,
+  Thead,
+} from "@/components/ui";
+import { currency, dateTime, istYear, shortDate, titleCase } from "@/lib/format";
 
 interface Person {
   id: string;
@@ -138,23 +173,22 @@ interface Profile {
   lifetime: { total: number; by_year: { year: string; total: number; count: number }[] };
 }
 
-const inr = (n: number) => `₹${Number(n).toLocaleString("en-IN")}`;
-const fmtDate = (d?: string) => (d ? new Date(d).toLocaleDateString() : "—");
+/** One labelled fact in the summary card. */
+function Detail({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-xs text-ink-muted">{label}</p>
+      <div className="mt-0.5 text-sm font-medium text-ink">{children}</div>
+    </div>
+  );
+}
 
-const badge = (text: string, tone: "brown" | "green" | "amber" | "gray" | "red" = "gray") => {
-  const tones: Record<string, string> = {
-    brown: "bg-[var(--accent-wash)] text-[var(--accent)]",
-    green: "bg-green-50 text-green-700",
-    amber: "bg-amber-50 text-amber-700",
-    gray: "bg-gray-100 text-gray-600",
-    red: "bg-red-50 text-red-700",
-  };
-  return <span className={`px-2 py-0.5 rounded-full text-xs capitalize ${tones[tone]}`}>{text}</span>;
-};
-
-const subscriptionTone = (status: string) => (status === "active" ? "green" : status === "paused" ? "amber" : "red");
-const deliveryTone = (status: string) =>
-  status === "delivered" ? "green" : status === "shipped" ? "brown" : status === "returned" ? "red" : "amber";
+const TABS = [
+  { key: "donations", label: "Donations", icon: "receipt" },
+  { key: "subscriptions", label: "Recurring", icon: "refresh" },
+  { key: "prasadam", label: "Prasadam", icon: "box" },
+  { key: "notes", label: "Notes", icon: "fileText" },
+] as const;
 
 export default function PersonProfilePage({ params }: PageProps<"/people/[id]">) {
   const { id } = use(params);
@@ -169,7 +203,8 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
   const [noteText, setNoteText] = useState("");
   const [savingNote, setSavingNote] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [syncMessage, setSyncMessage] = useState("");
+  const [syncNote, setSyncNote] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
+  const [tab, setTab] = useState<string>("donations");
 
   const load = () => {
     setLoading(true);
@@ -189,18 +224,19 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
 
   const syncFromHkmv = async () => {
     setSyncing(true);
-    setSyncMessage("");
+    setSyncNote(null);
     try {
       const result = await apiClient.post<{ donationsSynced: number; subscriptionsSynced: number; deliveriesSynced: number }>(
         `/api/people/${id}/sync-hkmv`,
         {}
       );
-      setSyncMessage(
-        `Synced ${result.donationsSynced} donation${result.donationsSynced === 1 ? "" : "s"}, ${result.subscriptionsSynced} subscription${result.subscriptionsSynced === 1 ? "" : "s"}, ${result.deliveriesSynced} prasadam ${result.deliveriesSynced === 1 ? "delivery" : "deliveries"} from hkmsite2.0.`
-      );
+      setSyncNote({
+        tone: "ok",
+        text: `Synced ${result.donationsSynced} donation${result.donationsSynced === 1 ? "" : "s"}, ${result.subscriptionsSynced} subscription${result.subscriptionsSynced === 1 ? "" : "s"}, ${result.deliveriesSynced} prasadam ${result.deliveriesSynced === 1 ? "delivery" : "deliveries"} from hkmsite2.0.`,
+      });
       load();
     } catch (err) {
-      setSyncMessage(err instanceof Error ? err.message : "Sync failed");
+      setSyncNote({ tone: "err", text: err instanceof Error ? err.message : "Sync failed" });
     } finally {
       setSyncing(false);
     }
@@ -259,342 +295,436 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
     }
   };
 
-  if (loading) return <p className="text-gray-500">Loading donor profile...</p>;
-  if (notFound || !profile) return <p className="text-red-600">Person not found.</p>;
+  if (loading) return <ProfileSkeleton />;
+  if (notFound || !profile)
+    return (
+      <div>
+        <Alert tone="danger">Person not found.</Alert>
+        <LinkButton href="/people" icon="arrowLeft">
+          Back to people
+        </LinkButton>
+      </div>
+    );
 
   const { person, donations, subscriptions, prasadam_deliveries, notes, lifetime } = profile;
 
+  // The latest of the dates rather than donations[0]: the profile endpoint
+  // makes no promise about the order it returns donations in, so reading the
+  // first row would show whichever one happened to come back first as the most
+  // recent gift.
+  const lastDonationAt = donations.reduce<string | undefined>(
+    (latest, d) => (!latest || d.created_at > latest ? d.created_at : latest),
+    undefined
+  );
+
+  const homeLines = addressLines(readParts(person, "address"), person.address);
+  const ownPrasadam = readParts(person, "prasadam");
+  const prasadamLines = hasParts(ownPrasadam)
+    ? addressLines(ownPrasadam, person.prasadam_address)
+    : addressLines(readParts(person, "address"), person.prasadam_address || person.address);
+  const prasadamSameAsHome = !hasParts(ownPrasadam) && !person.prasadam_address;
+
   return (
-    <div className="space-y-6">
-      <Link href="/people" className="text-sm text-gray-500 hover:text-gray-700">
-        ← Back to People
-      </Link>
+    <div>
+      <PageHeader
+        eyebrow="Donors"
+        title={person.name}
+        subtitle={`${person.phone}${person.email ? ` · ${person.email}` : ""}`}
+        actions={
+          <>
+            <LinkButton href="/people" icon="arrowLeft" variant="ghost">
+              Back to people
+            </LinkButton>
+            <Button variant="secondary" icon="refresh" loading={syncing} onClick={syncFromHkmv}>
+              Sync from HKMV
+            </Button>
+            <Button icon="edit" onClick={() => setShowEdit(true)}>
+              Edit profile
+            </Button>
+          </>
+        }
+      />
 
-      {/* Header / profile card */}
-      <div className="bg-white rounded-xl shadow p-6">
-        <div className="flex justify-between items-start">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">{person.name}</h1>
-            <p className="text-gray-500 mt-1">{person.phone}{person.email ? ` · ${person.email}` : ""}</p>
-            <div className="flex gap-1 mt-3 flex-wrap">
-              {person.roles.map((r) => <span key={r}>{badge(r, "brown")}</span>)}
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={syncFromHkmv}
-              disabled={syncing}
-              className="px-4 py-2 border border-[var(--accent)] text-[var(--accent)] rounded-lg text-sm hover:bg-[var(--accent-wash)] disabled:opacity-50"
-            >
-              {syncing ? "Syncing..." : "Sync from HKMV"}
-            </button>
-            <button
-              onClick={() => setShowEdit(true)}
-              className="px-4 py-2 border border-slate-300 rounded-lg text-sm hover:bg-gray-50"
-            >
-              Edit Profile
-            </button>
-          </div>
-        </div>
-        {syncMessage && <p className="text-sm text-gray-500 mt-3">{syncMessage}</p>}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6 text-sm">
-          <div>
-            <p className="text-gray-500">PAN</p>
-            <p className="font-medium">{person.pan || "—"}</p>
-          </div>
-          <div>
-            <p className="text-gray-500">Date of birth</p>
-            <p className="font-medium">{fmtDate(person.date_of_birth)}</p>
-          </div>
-          <div>
-            <p className="text-gray-500">Anniversary</p>
-            <p className="font-medium">{fmtDate(person.anniversary_date)}</p>
-          </div>
-        </div>
+      {syncNote && <Alert tone={syncNote.tone === "ok" ? "good" : "danger"}>{syncNote.text}</Alert>}
+      {resendNote && <Alert tone={resendNote.tone === "ok" ? "good" : "danger"}>{resendNote.text}</Alert>}
 
-        <div className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
-          <div>
-            <p className="text-gray-500">Address</p>
-            {(() => {
-              const lines = addressLines(readParts(person, "address"), person.address);
-              return lines.length ? (
-                <div className="font-medium leading-snug">
-                  {lines.map((l, i) => (
-                    <p key={i}>{l}</p>
-                  ))}
-                </div>
-              ) : (
-                <p className="font-medium text-slate-400">Not set</p>
-              );
-            })()}
-          </div>
-          <div>
-            <p className="text-gray-500">Prasadam delivery address</p>
-            {(() => {
-              const own = readParts(person, "prasadam");
-              const lines = hasParts(own)
-                ? addressLines(own, person.prasadam_address)
-                : addressLines(readParts(person, "address"), person.prasadam_address || person.address);
-              const sameAsHome = !hasParts(own) && !person.prasadam_address;
-              return lines.length ? (
-                <div className="font-medium leading-snug">
-                  {lines.map((l, i) => (
-                    <p key={i}>{l}</p>
-                  ))}
-                  {sameAsHome && <p className="mt-0.5 text-xs text-slate-400">Same as their address</p>}
-                </div>
-              ) : (
-                <p className="font-medium text-slate-400">Not set</p>
-              );
-            })()}
-          </div>
-        </div>
-
-        {/* The sites disagree about this donor's name. Worth showing on the
-            record rather than only in the edit form: somebody reading the page
-            should know the spelling is contested before they read it out on a
-            call. */}
-        {person.name_alt && (
-          <div className="mt-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900">
-            <strong>{person.name_alt_source === "annadan" ? "annadan" : "The donation site"}</strong> has this donor
-            as <strong>{person.name_alt}</strong>. Open Edit profile to settle which spelling is right — it will be
-            sent to both sites.
-          </div>
-        )}
-
-        {person.push_status === "failed" || person.push_status === "partial" ? (
-          <div className="mt-3 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-800">
-            The last change here did not reach {person.push_status === "partial" ? "every site" : "the sites"}.
-            {person.push_error && <span className="block text-xs mt-0.5">{person.push_error}</span>}
-          </div>
-        ) : null}
-      </div>
-
-      {resendNote && (
-        <div
-          className={`rounded-lg px-4 py-3 text-sm border ${
-            resendNote.tone === "ok"
-              ? "bg-emerald-50 text-emerald-800 border-emerald-200"
-              : "bg-red-50 text-red-700 border-red-200"
-          }`}
-        >
-          {resendNote.text}
-        </div>
+      {/* The sites disagree about this donor's name. Worth showing at the top
+          of the record rather than only in the edit form: somebody reading the
+          page should know the spelling is contested before they read it out on
+          a call. */}
+      {person.name_alt && (
+        <Alert tone="warn" title="The sites disagree about this donor's name">
+          <strong>{person.name_alt_source === "annadan" ? "annadan" : "The donation site"}</strong> has this donor
+          as <strong>{person.name_alt}</strong>. Open Edit profile to settle which spelling is right — it will be
+          sent to both sites.
+        </Alert>
       )}
 
-      {/* Total donated */}
-      <div className="bg-white rounded-xl shadow p-6">
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="text-lg font-semibold text-gray-900">Total Donated</h2>
-          <p className="text-2xl font-bold text-[var(--accent)]">{inr(lifetime.total)}</p>
-        </div>
-        <div className="flex gap-4 flex-wrap">
-          {lifetime.by_year.map((y) => (
-            <div key={y.year} className="px-4 py-2 bg-gray-50 rounded-lg">
-              <p className="text-xs text-gray-500">{new Date(y.year).getFullYear()}</p>
-              <p className="font-semibold text-gray-900">{inr(y.total)}</p>
-              <p className="text-xs text-gray-400">{y.count} donation{Number(y.count) === 1 ? "" : "s"}</p>
-            </div>
-          ))}
-          {lifetime.by_year.length === 0 && <p className="text-gray-500 text-sm">No donations yet.</p>}
-        </div>
+      {person.push_status === "failed" || person.push_status === "partial" ? (
+        <Alert tone="danger" title="The last change did not reach the sites">
+          The last change here did not reach {person.push_status === "partial" ? "every site" : "the sites"}.
+          {person.push_error && <span className="mt-0.5 block text-xs">{person.push_error}</span>}
+        </Alert>
+      ) : null}
+
+      <div className="mb-5 grid gap-4 sm:grid-cols-3">
+        <StatTile label="Lifetime giving" value={currency(lifetime.total)} icon="rupee" accent="brand" />
+        <StatTile label="Donations" value={donations.length} icon="receipt" />
+        <StatTile label="Last donation" value={shortDate(lastDonationAt)} icon="calendar" />
       </div>
 
-      {/* Donations & receipts */}
-      <div className="bg-white rounded-xl shadow overflow-hidden">
-        <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-gray-900">Donations &amp; Receipts</h2>
-        </div>
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 text-left text-gray-600">
-            <tr>
-              <th className="px-6 py-3 font-medium">Amount</th>
-              <th className="px-6 py-3 font-medium">Purpose</th>
-              <th className="px-6 py-3 font-medium">Type</th>
-              <th className="px-6 py-3 font-medium">Date</th>
-              <th className="px-6 py-3 font-medium">Receipt</th>
-              <th className="px-6 py-3 font-medium"></th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {donations.map((d) => (
-              <tr key={d.id} className="hover:bg-gray-50">
-                <td className="px-6 py-3 font-semibold">{inr(d.amount)}</td>
-                <td className="px-6 py-3 capitalize">{d.purpose.replace("_", " ")}</td>
-                <td className="px-6 py-3 capitalize">{d.type.replace("-", " ")}</td>
-                <td className="px-6 py-3 text-gray-500">{fmtDate(d.created_at)}</td>
-                <td className="px-6 py-3">
-                  {d.receipt_generated ? (
-                    d.external_ref ? (
-                      <button
-                        onClick={() => downloadReceiptFile(d.id, d.receipt_number)}
-                        className="text-[var(--accent)] hover:underline"
-                      >
-                        {d.receipt_number || "Download PDF"}
-                      </button>
-                    ) : d.receipt_url ? (
-                      <a href={d.receipt_url} target="_blank" rel="noreferrer" className="text-[var(--accent)] hover:underline">
-                        {d.receipt_number || "View"}
-                      </a>
+      <div className="mb-5 grid gap-4 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <CardHeader title="Donor details" icon="user" />
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Detail label="Phone">{person.phone}</Detail>
+            <Detail label="Email">{person.email || "—"}</Detail>
+            <Detail label="PAN">{person.pan || "—"}</Detail>
+            <Detail label="Date of birth">{shortDate(person.date_of_birth)}</Detail>
+            <Detail label="Anniversary">{shortDate(person.anniversary_date)}</Detail>
+          </div>
+
+          <div className="mt-4 grid gap-4 border-t border-line-soft pt-4 sm:grid-cols-2">
+            <Detail label="Address">
+              {homeLines.length ? (
+                <div className="leading-snug">
+                  {homeLines.map((l, i) => (
+                    <p key={i}>{l}</p>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-ink-faint">Not set</span>
+              )}
+            </Detail>
+            <Detail label="Prasadam delivery address">
+              {prasadamLines.length ? (
+                <div className="leading-snug">
+                  {prasadamLines.map((l, i) => (
+                    <p key={i}>{l}</p>
+                  ))}
+                  {prasadamSameAsHome && (
+                    <p className="mt-0.5 text-xs font-normal text-ink-faint">Same as their address</p>
+                  )}
+                </div>
+              ) : (
+                <span className="text-ink-faint">Not set</span>
+              )}
+            </Detail>
+          </div>
+
+          {person.roles.length > 0 && (
+            <div className="mt-4 flex flex-wrap gap-1.5 border-t border-line-soft pt-4">
+              {person.roles.map((r) => (
+                <Badge key={r} tone="brand">
+                  {titleCase(r)}
+                </Badge>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card>
+          <CardHeader title="Giving by year" icon="chart" />
+          {lifetime.by_year.length ? (
+            <div className="space-y-2">
+              {lifetime.by_year.map((y) => (
+                <div
+                  key={y.year}
+                  className="flex items-baseline justify-between gap-3 rounded-control bg-sunken px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-ink tabular-nums">{istYear(y.year)}</p>
+                    <p className="text-xs text-ink-muted">
+                      {y.count} donation{Number(y.count) === 1 ? "" : "s"}
+                    </p>
+                  </div>
+                  <MoneyCell value={y.total} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState icon="rupee" title="No donations yet" message="Nothing has been recorded against this donor." />
+          )}
+        </Card>
+      </div>
+
+      {/* The four record lists are tabbed rather than stacked. Everything a
+          member of staff needs before picking up the phone - who this is, what
+          they have given, when they last gave, and any warning about the name
+          or a failed push - stays above the tabs, so the only thing a tab hides
+          is the detail of a list whose size is already on its label. Stacked,
+          those four lists ran to four screens of scrolling and the notes nobody
+          could find were at the bottom. */}
+      <Tabs
+        className="mb-4"
+        value={tab}
+        onChange={setTab}
+        items={TABS.map((t) => ({
+          ...t,
+          count: {
+            donations: donations.length,
+            subscriptions: subscriptions.length,
+            prasadam: prasadam_deliveries.length,
+            notes: notes.length,
+          }[t.key],
+        }))}
+      />
+
+      {tab === "donations" && (
+        <TableShell>
+          <Thead>
+            <Th align="right">Amount</Th>
+            <Th>Purpose</Th>
+            <Th>Type</Th>
+            <Th>Date</Th>
+            <Th>Receipt</Th>
+            <Th align="right">Action</Th>
+          </Thead>
+          {donations.length ? (
+            <Tbody>
+              {donations.map((d) => (
+                <tr key={d.id}>
+                  <Td align="right">
+                    <MoneyCell value={d.amount} />
+                  </Td>
+                  <Td className="capitalize">{d.purpose.replace("_", " ")}</Td>
+                  <Td className="capitalize">{d.type.replace("-", " ")}</Td>
+                  <Td className="text-ink-muted">{shortDate(d.created_at)}</Td>
+                  <Td>
+                    {d.receipt_generated ? (
+                      d.external_ref ? (
+                        <Button
+                          size="xs"
+                          variant="ghost"
+                          icon="download"
+                          onClick={() => downloadReceiptFile(d.id, d.receipt_number)}
+                        >
+                          {d.receipt_number || "Download PDF"}
+                        </Button>
+                      ) : d.receipt_url ? (
+                        <a
+                          href={d.receipt_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-medium text-brand-700 hover:underline"
+                        >
+                          {d.receipt_number || "View"}
+                        </a>
+                      ) : (
+                        <Badge tone="good">{d.receipt_number || "issued"}</Badge>
+                      )
                     ) : (
-                      badge(d.receipt_number || "issued", "green")
-                    )
-                  ) : (
-                    badge("not issued", "gray")
-                  )}
-                </td>
-                <td className="px-6 py-3 text-right whitespace-nowrap">
-                  {!d.receipt_generated && !d.external_ref && (
-                    <button
-                      onClick={() => setShowReceiptFor(d)}
-                      className="text-[var(--accent)] text-sm font-medium hover:underline"
-                    >
-                      Issue receipt
-                    </button>
-                  )}
-                  {d.receipt_generated && d.external_ref && (
-                    <button
-                      onClick={() => resendReceipt(d.id)}
-                      disabled={resendingId === d.id}
-                      className="text-[var(--accent)] text-sm font-medium hover:underline disabled:opacity-50"
-                    >
-                      {resendingId === d.id ? "Sending…" : "Resend on WhatsApp"}
-                    </button>
-                  )}
-                </td>
+                      <Badge tone="neutral">not issued</Badge>
+                    )}
+                  </Td>
+                  <Td align="right" className="whitespace-nowrap">
+                    {!d.receipt_generated && !d.external_ref && (
+                      <Button size="xs" variant="secondary" onClick={() => setShowReceiptFor(d)}>
+                        Issue receipt
+                      </Button>
+                    )}
+                    {d.receipt_generated && d.external_ref && (
+                      <Button
+                        size="xs"
+                        variant="whatsapp"
+                        icon="message"
+                        loading={resendingId === d.id}
+                        onClick={() => resendReceipt(d.id)}
+                      >
+                        Resend on WhatsApp
+                      </Button>
+                    )}
+                  </Td>
+                </tr>
+              ))}
+            </Tbody>
+          ) : (
+            <Tbody hoverable={false}>
+              <tr>
+                <Td colSpan={6}>
+                  <EmptyState
+                    icon="rupee"
+                    title="No donations yet"
+                    message="Nothing has come through from the sites, and nothing has been entered by hand."
+                  />
+                </Td>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        {donations.length === 0 && <div className="p-8 text-center text-gray-500">No donations yet</div>}
-      </div>
+            </Tbody>
+          )}
+        </TableShell>
+      )}
 
-      {/* Subscriptions */}
-      <div className="bg-white rounded-xl shadow overflow-hidden">
-        <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-gray-900">Recurring Donations</h2>
-          <button
-            onClick={() => setShowNewSubscription(true)}
-            className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-3 py-1.5 rounded-lg text-sm font-medium"
-          >
-            + New Subscription
-          </button>
-        </div>
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 text-left text-gray-600">
-            <tr>
-              <th className="px-6 py-3 font-medium">Amount</th>
-              <th className="px-6 py-3 font-medium">Frequency</th>
-              <th className="px-6 py-3 font-medium">Purpose</th>
-              <th className="px-6 py-3 font-medium">Next charge</th>
-              <th className="px-6 py-3 font-medium">Status</th>
-              <th className="px-6 py-3 font-medium"></th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {subscriptions.map((s) => (
-              <tr key={s.id} className="hover:bg-gray-50">
-                <td className="px-6 py-3 font-semibold">{inr(s.amount)}</td>
-                <td className="px-6 py-3 capitalize">{s.frequency}</td>
-                <td className="px-6 py-3 capitalize">{s.purpose.replace("_", " ")}</td>
-                <td className="px-6 py-3 text-gray-500">{fmtDate(s.next_charge_date)}</td>
-                <td className="px-6 py-3">{badge(s.status, subscriptionTone(s.status) as "green" | "amber" | "red")}</td>
-                <td className="px-6 py-3 text-right space-x-3">
-                  {s.status === "active" && (
-                    <button onClick={() => updateSubscriptionStatus(s.id, "paused")} className="text-sm text-amber-700 hover:underline">
-                      Pause
-                    </button>
-                  )}
-                  {s.status === "paused" && (
-                    <button onClick={() => updateSubscriptionStatus(s.id, "active")} className="text-sm text-green-700 hover:underline">
-                      Resume
-                    </button>
-                  )}
-                  {s.status !== "cancelled" && (
-                    <button onClick={() => updateSubscriptionStatus(s.id, "cancelled")} className="text-sm text-red-600 hover:underline">
-                      Cancel
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {subscriptions.length === 0 && <div className="p-8 text-center text-gray-500">No recurring donations</div>}
-      </div>
+      {tab === "subscriptions" && (
+        <>
+          <div className="mb-3 flex items-center justify-end">
+            <Button size="sm" icon="plus" onClick={() => setShowNewSubscription(true)}>
+              New subscription
+            </Button>
+          </div>
+          <TableShell>
+            <Thead>
+              <Th align="right">Amount</Th>
+              <Th>Frequency</Th>
+              <Th>Purpose</Th>
+              <Th>Next charge</Th>
+              <Th>Status</Th>
+              <Th align="right">Actions</Th>
+            </Thead>
+            {subscriptions.length ? (
+              <Tbody>
+                {subscriptions.map((s) => (
+                  <tr key={s.id}>
+                    <Td align="right">
+                      <MoneyCell value={s.amount} />
+                    </Td>
+                    <Td className="capitalize">{s.frequency}</Td>
+                    <Td className="capitalize">{s.purpose.replace("_", " ")}</Td>
+                    <Td className="text-ink-muted">{shortDate(s.next_charge_date)}</Td>
+                    <Td>
+                      <StatusBadge status={s.status} />
+                    </Td>
+                    <Td align="right">
+                      <div className="flex items-center justify-end gap-2">
+                        {s.status === "active" && (
+                          <Button
+                            size="xs"
+                            variant="secondary"
+                            onClick={() => updateSubscriptionStatus(s.id, "paused")}
+                          >
+                            Pause
+                          </Button>
+                        )}
+                        {s.status === "paused" && (
+                          <Button
+                            size="xs"
+                            variant="secondary"
+                            onClick={() => updateSubscriptionStatus(s.id, "active")}
+                          >
+                            Resume
+                          </Button>
+                        )}
+                        {s.status !== "cancelled" && (
+                          <Button
+                            size="xs"
+                            variant="dangerSoft"
+                            onClick={() => updateSubscriptionStatus(s.id, "cancelled")}
+                          >
+                            Cancel
+                          </Button>
+                        )}
+                      </div>
+                    </Td>
+                  </tr>
+                ))}
+              </Tbody>
+            ) : (
+              <Tbody hoverable={false}>
+                <tr>
+                  <Td colSpan={6}>
+                    {/* No action on this one: "New subscription" is already a
+                        few pixels above, and two identical buttons that close
+                        together read as two different things. */}
+                    <EmptyState
+                      icon="refresh"
+                      title="No recurring donations"
+                      message="This donor has no standing instruction set up."
+                    />
+                  </Td>
+                </tr>
+              </Tbody>
+            )}
+          </TableShell>
+        </>
+      )}
 
-      {/* Prasadam deliveries */}
-      <div className="bg-white rounded-xl shadow overflow-hidden">
-        <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-gray-900">Prasadam Deliveries</h2>
-          <button
-            onClick={() => setShowNewDelivery(true)}
-            className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-3 py-1.5 rounded-lg text-sm font-medium"
-          >
-            + Queue Delivery
-          </button>
-        </div>
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 text-left text-gray-600">
-            <tr>
-              <th className="px-6 py-3 font-medium">Address</th>
-              <th className="px-6 py-3 font-medium">Courier</th>
-              <th className="px-6 py-3 font-medium">Tracking</th>
-              <th className="px-6 py-3 font-medium">Status</th>
-              <th className="px-6 py-3 font-medium"></th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {prasadam_deliveries.map((d) => (
-              <tr key={d.id} className="hover:bg-gray-50">
-                <td className="px-6 py-3 max-w-xs truncate" title={d.address}>{d.address}</td>
-                <td className="px-6 py-3">{d.courier_name || "—"}</td>
-                <td className="px-6 py-3">{d.tracking_number || "—"}</td>
-                <td className="px-6 py-3">{badge(d.status, deliveryTone(d.status) as "green" | "amber" | "red" | "brown")}</td>
-                <td className="px-6 py-3 text-right">
-                  {d.status !== "delivered" && d.status !== "returned" && (
-                    <button onClick={() => setUpdatingDelivery(d)} className="text-[var(--accent)] text-sm font-medium hover:underline">
-                      Update
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {prasadam_deliveries.length === 0 && <div className="p-8 text-center text-gray-500">No prasadam deliveries queued</div>}
-      </div>
+      {tab === "prasadam" && (
+        <>
+          <div className="mb-3 flex items-center justify-end">
+            <Button size="sm" icon="plus" onClick={() => setShowNewDelivery(true)}>
+              Queue delivery
+            </Button>
+          </div>
+          <TableShell>
+            <Thead>
+              <Th>Address</Th>
+              <Th>Courier</Th>
+              <Th>Tracking</Th>
+              <Th>Status</Th>
+              <Th align="right">Action</Th>
+            </Thead>
+            {prasadam_deliveries.length ? (
+              <Tbody>
+                {prasadam_deliveries.map((d) => (
+                  <tr key={d.id}>
+                    <Td className="max-w-xs truncate">
+                      <span title={d.address}>{d.address}</span>
+                    </Td>
+                    <Td>{d.courier_name || "—"}</Td>
+                    <Td>{d.tracking_number || "—"}</Td>
+                    <Td>
+                      <StatusBadge status={d.status} />
+                    </Td>
+                    <Td align="right">
+                      {d.status !== "delivered" && d.status !== "returned" && (
+                        <Button size="xs" variant="secondary" onClick={() => setUpdatingDelivery(d)}>
+                          Update
+                        </Button>
+                      )}
+                    </Td>
+                  </tr>
+                ))}
+              </Tbody>
+            ) : (
+              <Tbody hoverable={false}>
+                <tr>
+                  <Td colSpan={5}>
+                    <EmptyState
+                      icon="box"
+                      title="No prasadam deliveries queued"
+                      message="Nothing is on its way to this donor."
+                    />
+                  </Td>
+                </tr>
+              </Tbody>
+            )}
+          </TableShell>
+        </>
+      )}
 
-      {/* Staff notes */}
-      <div className="bg-white rounded-xl shadow p-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Staff Notes</h2>
-        <form onSubmit={addNote} className="flex gap-3 mb-4">
-          <input
-            value={noteText}
-            onChange={(e) => setNoteText(e.target.value)}
-            placeholder='e.g. "Called about missing receipt, resent via WhatsApp"'
-            className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
-          />
-          <button
-            type="submit"
-            disabled={savingNote || !noteText.trim()}
-            className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium disabled:opacity-50"
-          >
-            Add Note
-          </button>
-        </form>
-        <div className="space-y-3">
-          {notes.map((n) => (
-            <div key={n.id} className="border-b border-gray-100 pb-3 last:border-0">
-              <p className="text-gray-900">{n.note}</p>
-              <p className="text-xs text-gray-400 mt-1">
-                {n.author_name || "Staff"} · {new Date(n.created_at).toLocaleString()}
-              </p>
+      {tab === "notes" && (
+        <Card>
+          <CardHeader title="Staff notes" icon="fileText" />
+          <form onSubmit={addNote} className="mb-4 flex gap-2">
+            <Input
+              value={noteText}
+              onChange={(e) => setNoteText(e.target.value)}
+              placeholder='e.g. "Called about missing receipt, resent via WhatsApp"'
+              className="flex-1"
+            />
+            <Button type="submit" icon="plus" loading={savingNote} disabled={!noteText.trim()}>
+              Add note
+            </Button>
+          </form>
+          {notes.length ? (
+            <div className="space-y-3">
+              {notes.map((n) => (
+                <div key={n.id} className="border-b border-line-soft pb-3 last:border-0 last:pb-0">
+                  <p className="text-sm text-ink">{n.note}</p>
+                  <p className="mt-1 text-xs text-ink-faint">
+                    {n.author_name || "Staff"} · {dateTime(n.created_at)}
+                  </p>
+                </div>
+              ))}
             </div>
-          ))}
-          {notes.length === 0 && <p className="text-gray-500 text-sm">No notes yet.</p>}
-        </div>
-      </div>
+          ) : (
+            <EmptyState
+              icon="fileText"
+              title="No notes yet"
+              message="Anything staff should know before the next call goes here."
+            />
+          )}
+        </Card>
+      )}
 
       {showEdit && (
         <EditProfileModal person={person} onClose={() => setShowEdit(false)} onSaved={load} />
@@ -615,47 +745,51 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
   );
 }
 
-function ModalShell({ title, children, onClose, onSubmit, busy = false, wide = false }: {
-  title: string;
-  children: React.ReactNode;
-  onClose: () => void;
-  onSubmit: (e: FormEvent) => void;
-  busy?: boolean;
-  wide?: boolean;
-}) {
+/**
+ * What the page looks like while the profile is in flight.
+ *
+ * It used to be the single line "Loading donor profile...", which gives no clue
+ * how much is coming and makes the whole screen jump into place at once. These
+ * blocks sit where the real content will, so nothing moves when it arrives.
+ */
+function ProfileSkeleton() {
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4">
-      <form
-        onSubmit={onSubmit}
-        className={`my-8 w-full ${wide ? "max-w-3xl" : "max-w-xl"} space-y-4 rounded-2xl bg-white p-8`}
-      >
-        <h2 className="text-xl font-bold">{title}</h2>
-        {children}
-        <div className="flex gap-3 pt-2">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={busy}
-            className="flex-1 rounded-lg border border-slate-300 px-4 py-2.5 hover:bg-gray-50 disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          {/* Disabled while saving: the old form let a second click fire a
-              second request, and a slow network turned one edit into two. */}
-          <button
-            type="submit"
-            disabled={busy}
-            className="flex-1 rounded-lg bg-[var(--accent)] px-4 py-2.5 text-white hover:bg-[var(--accent-hover)] disabled:opacity-60"
-          >
-            {busy ? "Saving…" : "Save"}
-          </button>
+    <div>
+      <div className="mb-6 border-b border-line-soft pb-5">
+        <Skeleton className="h-3 w-16" />
+        <Skeleton className="mt-2 h-7 w-64" />
+        <Skeleton className="mt-2 h-4 w-80" />
+      </div>
+      <div className="mb-5 grid gap-4 sm:grid-cols-3">
+        <StatTile label="Lifetime giving" value="" icon="rupee" accent="brand" loading />
+        <StatTile label="Donations" value="" icon="receipt" loading />
+        <StatTile label="Last donation" value="" icon="calendar" loading />
+      </div>
+      <Card className="mb-5">
+        <Skeleton className="h-4 w-32" />
+        <div className="mt-4 grid gap-4 sm:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i}>
+              <Skeleton className="h-3 w-20" />
+              <Skeleton className="mt-1.5 h-4 w-32" />
+            </div>
+          ))}
         </div>
-      </form>
+      </Card>
+      <TableShell>
+        <Thead>
+          <Th align="right">Amount</Th>
+          <Th>Purpose</Th>
+          <Th>Type</Th>
+          <Th>Date</Th>
+          <Th>Receipt</Th>
+          <Th align="right">Action</Th>
+        </Thead>
+        <SkeletonRows rows={6} cols={6} />
+      </TableShell>
     </div>
   );
 }
-
-const inputClass = "w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--accent)]";
 
 /**
  * Editing a donor.
@@ -693,6 +827,7 @@ function EditProfileModal({ person, onClose, onSaved }: { person: Person; onClos
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const roleOptions = ["donor", "volunteer", "folk", "congregation"];
+  const formId = "edit-donor-profile";
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -723,124 +858,150 @@ function EditProfileModal({ person, onClose, onSaved }: { person: Person; onClos
     label: string,
     value: string,
     onChange: (v: string) => void,
-    opts: { type?: string; placeholder?: string; wide?: boolean; hint?: string } = {}
-  ) => (
-    <label className={`block text-xs text-slate-500 ${opts.wide ? "sm:col-span-2" : ""}`}>
-      {label}
-      <input
-        type={opts.type ?? "text"}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={opts.placeholder}
-        className={`${inputClass} mt-1`}
-      />
-      {opts.hint && <span className="mt-0.5 block text-[11px] text-slate-400">{opts.hint}</span>}
-    </label>
-  );
+    opts: { type?: string; placeholder?: string; wide?: boolean; hint?: string; idPrefix?: string } = {}
+  ) => {
+    // The two address grids carry the same labels, so the id has to be scoped
+    // to the grid - otherwise "City" appears twice on the page with the same
+    // id and the second label points a click at the first box.
+    const id = `${opts.idPrefix ?? "person"}-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    return (
+      <Field
+        key={id}
+        label={label}
+        htmlFor={id}
+        hint={opts.hint}
+        className={opts.wide ? "sm:col-span-2" : ""}
+      >
+        <Input
+          id={id}
+          type={opts.type ?? "text"}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={opts.placeholder}
+        />
+      </Field>
+    );
+  };
 
   const addressGrid = (a: AddressParts, set: (v: AddressParts) => void, idPrefix: string) => (
-    <div key={idPrefix} className="grid gap-3 sm:grid-cols-2">
-      {field("Door / flat no.", a.door, (v) => set({ ...a, door: v }), { placeholder: "e.g. 12-3-45" })}
-      {field("Building or house name", a.house, (v) => set({ ...a, house: v }))}
-      {field("Street", a.street, (v) => set({ ...a, street: v }), { wide: true })}
-      {field("Area or locality", a.area, (v) => set({ ...a, area: v }), { wide: true })}
-      {field("City", a.city, (v) => set({ ...a, city: v }), { placeholder: "Visakhapatnam" })}
-      {field("State", a.state, (v) => set({ ...a, state: v }), { placeholder: "Andhra Pradesh" })}
+    <div className="grid gap-3 sm:grid-cols-2">
+      {field("Door / flat no.", a.door, (v) => set({ ...a, door: v }), { placeholder: "e.g. 12-3-45", idPrefix })}
+      {field("Building or house name", a.house, (v) => set({ ...a, house: v }), { idPrefix })}
+      {field("Street", a.street, (v) => set({ ...a, street: v }), { wide: true, idPrefix })}
+      {field("Area or locality", a.area, (v) => set({ ...a, area: v }), { wide: true, idPrefix })}
+      {field("City", a.city, (v) => set({ ...a, city: v }), { placeholder: "Visakhapatnam", idPrefix })}
+      {field("State", a.state, (v) => set({ ...a, state: v }), { placeholder: "Andhra Pradesh", idPrefix })}
       {field("Pincode", a.pincode, (v) => set({ ...a, pincode: v.replace(/\D/g, "").slice(0, 6) }), {
         placeholder: "530017",
+        idPrefix,
       })}
-      {field("Country", a.country, (v) => set({ ...a, country: v }))}
+      {field("Country", a.country, (v) => set({ ...a, country: v }), { idPrefix })}
     </div>
   );
 
   return (
-    <ModalShell title="Edit profile" onClose={onClose} onSubmit={submit} busy={saving}>
-      {error && (
-        <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
-      )}
+    <Modal
+      title="Edit profile"
+      onClose={onClose}
+      wide
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          {/* Blocked while saving: the old form let a second click fire a
+              second request, and a slow network turned one edit into two. */}
+          <Button type="submit" form={formId} loading={saving}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="space-y-4">
+        {error && <Alert tone="danger">{error}</Alert>}
 
-      {person.name_alt && (
-        <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
-          {person.name_alt_source === "annadan" ? "annadan" : "The site"} calls them{" "}
-          <strong>{person.name_alt}</strong>. Saving here settles it and sends your spelling to both sites.
-        </p>
-      )}
-
-      <div className="grid gap-3 sm:grid-cols-2">
-        {field("Full name", form.name, (v) => setForm({ ...form, name: v }), { wide: true })}
-        {field("Phone", form.phone, (v) => setForm({ ...form, phone: v }), {
-          hint: "The number everything is matched on, here and on both sites.",
-        })}
-        {field("Email", form.email, (v) => setForm({ ...form, email: v }), { type: "email" })}
-        {field("PAN", form.pan, (v) => setForm({ ...form, pan: v.toUpperCase() }), {
-          placeholder: "ABCDE1234F",
-          hint: "Needed for an 80G certificate.",
-        })}
-        {field("Date of birth", form.date_of_birth, (v) => setForm({ ...form, date_of_birth: v }), {
-          type: "date",
-        })}
-        {field("Wedding anniversary", form.anniversary_date, (v) => setForm({ ...form, anniversary_date: v }), {
-          type: "date",
-          hint: "Both are optional, and are what the greeting reminders use.",
-        })}
-      </div>
-
-      <div className="pt-2">
-        <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Address</p>
-        {addressGrid(home, setHome, "home")}
-        {legacy && !hasParts(home) && (
-          <p className="mt-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
-            Currently on file as one line: &ldquo;{legacy}&rdquo;. Split it into the boxes above and the receipts
-            will lay it out properly.
-          </p>
+        {person.name_alt && (
+          <Alert tone="warn">
+            {person.name_alt_source === "annadan" ? "annadan" : "The site"} calls them{" "}
+            <strong>{person.name_alt}</strong>. Saving here settles it and sends your spelling to both sites.
+          </Alert>
         )}
-      </div>
 
-      <div className="pt-2">
-        <label className="flex items-center gap-2 text-sm text-slate-700">
-          <input
-            type="checkbox"
+        <div className="grid gap-3 sm:grid-cols-2">
+          {field("Full name", form.name, (v) => setForm({ ...form, name: v }), { wide: true })}
+          {field("Phone", form.phone, (v) => setForm({ ...form, phone: v }), {
+            hint: "The number everything is matched on, here and on both sites.",
+          })}
+          {field("Email", form.email, (v) => setForm({ ...form, email: v }), { type: "email" })}
+          {field("PAN", form.pan, (v) => setForm({ ...form, pan: v.toUpperCase() }), {
+            placeholder: "ABCDE1234F",
+            hint: "Needed for an 80G certificate.",
+          })}
+          {field("Date of birth", form.date_of_birth, (v) => setForm({ ...form, date_of_birth: v }), {
+            type: "date",
+          })}
+          {field("Wedding anniversary", form.anniversary_date, (v) => setForm({ ...form, anniversary_date: v }), {
+            type: "date",
+            hint: "Both are optional, and are what the greeting reminders use.",
+          })}
+        </div>
+
+        <div className="pt-2">
+          <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.06em] text-ink-muted">Address</p>
+          {addressGrid(home, setHome, "home")}
+          {legacy && !hasParts(home) && (
+            <Alert tone="info" className="mt-2 mb-0">
+              Currently on file as one line: &ldquo;{legacy}&rdquo;. Split it into the boxes above and the receipts
+              will lay it out properly.
+            </Alert>
+          )}
+        </div>
+
+        <div className="pt-2">
+          <Checkbox
             checked={samePrasadam}
-            onChange={(e) => setSamePrasadam(e.target.checked)}
-            className="rounded border-slate-300"
+            onChange={setSamePrasadam}
+            label="Send prasadam to the same address"
           />
-          Send prasadam to the same address
-        </label>
-        {!samePrasadam && (
-          <div className="mt-3">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
-              Prasadam delivery address
-            </p>
-            {addressGrid(prasadam, setPrasadam, "prasadam")}
+          {!samePrasadam && (
+            <div className="mt-3">
+              <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.06em] text-ink-muted">
+                Prasadam delivery address
+              </p>
+              {addressGrid(prasadam, setPrasadam, "prasadam")}
+            </div>
+          )}
+        </div>
+
+        <div className="pt-2">
+          <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.06em] text-ink-muted">Roles</p>
+          {/* Tick boxes rather than chips that fill in when chosen. A donor can
+              hold several of these at once, and a filled chip is the same
+              treatment this product uses for "this is the action to take". */}
+          <div className="flex flex-wrap gap-x-5 gap-y-2">
+            {roleOptions.map((role) => (
+              <Checkbox
+                key={role}
+                checked={roles.includes(role)}
+                onChange={(on) => setRoles((prev) => (on ? [...prev, role] : prev.filter((r) => r !== role)))}
+                label={titleCase(role)}
+              />
+            ))}
           </div>
-        )}
-      </div>
+        </div>
 
-      <div className="flex flex-wrap gap-2 pt-2">
-        {roleOptions.map((role) => (
-          <button
-            key={role}
-            type="button"
-            onClick={() => setRoles((prev) => (prev.includes(role) ? prev.filter((r) => r !== role) : [...prev, role]))}
-            className={`rounded-full px-3 py-1.5 text-sm capitalize ${
-              roles.includes(role) ? "bg-[var(--accent)] text-white" : "bg-slate-100 text-slate-700"
-            }`}
-          >
-            {role}
-          </button>
-        ))}
-      </div>
-
-      <p className="text-xs text-slate-500">
-        Saving also sends the correction to the donation sites this donor is known to.
-      </p>
-    </ModalShell>
+        <p className="text-xs text-ink-muted">
+          Saving also sends the correction to the donation sites this donor is known to.
+        </p>
+      </form>
+    </Modal>
   );
 }
 
 function IssueReceiptModal({ donation, onClose, onSaved }: { donation: Donation; onClose: () => void; onSaved: () => void }) {
   const [receiptNumber, setReceiptNumber] = useState("");
   const [receiptUrl, setReceiptUrl] = useState("");
+  const formId = "issue-receipt";
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -853,16 +1014,42 @@ function IssueReceiptModal({ donation, onClose, onSaved }: { donation: Donation;
   };
 
   return (
-    <ModalShell title={`Issue Receipt — ${inr(donation.amount)}`} onClose={onClose} onSubmit={submit}>
-      <input value={receiptNumber} onChange={(e) => setReceiptNumber(e.target.value)} placeholder="Receipt number" className={inputClass} />
-      <input value={receiptUrl} onChange={(e) => setReceiptUrl(e.target.value)} placeholder="Receipt PDF URL (optional)" className={inputClass} />
-      <p className="text-xs text-gray-500">This marks the receipt as issued and queues a WhatsApp notification to the donor.</p>
-    </ModalShell>
+    <Modal
+      title={`Issue receipt — ${currency(donation.amount)}`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" form={formId}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="space-y-3">
+        <Field label="Receipt number" htmlFor="receipt-number">
+          <Input
+            id="receipt-number"
+            value={receiptNumber}
+            onChange={(e) => setReceiptNumber(e.target.value)}
+          />
+        </Field>
+        <Field label="Receipt PDF URL" htmlFor="receipt-url" hint="Optional.">
+          <Input id="receipt-url" value={receiptUrl} onChange={(e) => setReceiptUrl(e.target.value)} />
+        </Field>
+        <p className="text-xs text-ink-muted">
+          This marks the receipt as issued and queues a WhatsApp notification to the donor.
+        </p>
+      </form>
+    </Modal>
   );
 }
 
 function NewSubscriptionModal({ personId, onClose, onSaved }: { personId: string; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState({ amount: "", frequency: "monthly", purpose: "general", next_charge_date: "" });
+  const formId = "new-subscription";
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -878,29 +1065,76 @@ function NewSubscriptionModal({ personId, onClose, onSaved }: { personId: string
   };
 
   return (
-    <ModalShell title="New Recurring Donation" onClose={onClose} onSubmit={submit}>
-      <input type="number" step="0.01" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="Amount (₹) *" required className={inputClass} />
-      <div className="grid grid-cols-2 gap-3">
-        <Select value={form.frequency} onChange={(v) => setForm({ ...form, frequency: v })} className="w-full">
-          <option value="monthly">Monthly</option>
-          <option value="quarterly">Quarterly</option>
-          <option value="yearly">Yearly</option>
-        </Select>
-        <Select value={form.purpose} onChange={(v) => setForm({ ...form, purpose: v })} className="w-full">
-          <option value="annadan">Annadan</option>
-          <option value="temple_maintenance">Temple maintenance</option>
-          <option value="festival">Festival</option>
-          <option value="general">General</option>
-        </Select>
-      </div>
-      <input type="date" value={form.next_charge_date} onChange={(e) => setForm({ ...form, next_charge_date: e.target.value })} className={inputClass} />
-    </ModalShell>
+    <Modal
+      title="New recurring donation"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" form={formId}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="space-y-3">
+        <Field label="Amount" htmlFor="subscription-amount" required>
+          <Input
+            id="subscription-amount"
+            type="number"
+            step="0.01"
+            value={form.amount}
+            onChange={(e) => setForm({ ...form, amount: e.target.value })}
+            placeholder="₹"
+            required
+          />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Frequency">
+            <Select
+              value={form.frequency}
+              onChange={(v) => setForm({ ...form, frequency: v })}
+              ariaLabel="Frequency"
+              className="w-full"
+            >
+              <option value="monthly">Monthly</option>
+              <option value="quarterly">Quarterly</option>
+              <option value="yearly">Yearly</option>
+            </Select>
+          </Field>
+          <Field label="Purpose">
+            <Select
+              value={form.purpose}
+              onChange={(v) => setForm({ ...form, purpose: v })}
+              ariaLabel="Purpose"
+              className="w-full"
+            >
+              <option value="annadan">Annadan</option>
+              <option value="temple_maintenance">Temple maintenance</option>
+              <option value="festival">Festival</option>
+              <option value="general">General</option>
+            </Select>
+          </Field>
+        </div>
+        <Field label="Next charge date" htmlFor="subscription-next-charge">
+          <Input
+            id="subscription-next-charge"
+            type="date"
+            value={form.next_charge_date}
+            onChange={(e) => setForm({ ...form, next_charge_date: e.target.value })}
+          />
+        </Field>
+      </form>
+    </Modal>
   );
 }
 
 function NewDeliveryModal({ personId, onClose, onSaved }: { personId: string; onClose: () => void; onSaved: () => void }) {
   const [address, setAddress] = useState("");
   const [notes, setNotes] = useState("");
+  const formId = "new-delivery";
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -910,16 +1144,38 @@ function NewDeliveryModal({ personId, onClose, onSaved }: { personId: string; on
   };
 
   return (
-    <ModalShell title="Queue Prasadam Delivery" onClose={onClose} onSubmit={submit}>
-      <textarea
-        value={address}
-        onChange={(e) => setAddress(e.target.value)}
-        placeholder="Delivery address (leave blank to use the donor's saved address)"
-        className={inputClass}
-        rows={3}
-      />
-      <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (optional)" className={inputClass} />
-    </ModalShell>
+    <Modal
+      title="Queue prasadam delivery"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" form={formId}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="space-y-3">
+        <Field
+          label="Delivery address"
+          htmlFor="delivery-address"
+          hint="Leave blank to use the donor's saved address."
+        >
+          <Textarea
+            id="delivery-address"
+            rows={3}
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+          />
+        </Field>
+        <Field label="Notes" htmlFor="delivery-notes" hint="Optional.">
+          <Input id="delivery-notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
+        </Field>
+      </form>
+    </Modal>
   );
 }
 
@@ -927,6 +1183,7 @@ function UpdateDeliveryModal({ delivery, onClose, onSaved }: { delivery: Prasada
   const [status, setStatus] = useState(delivery.status === "pending" ? "packed" : "shipped");
   const [courier, setCourier] = useState(delivery.courier_name || "");
   const [tracking, setTracking] = useState(delivery.tracking_number || "");
+  const formId = "update-delivery";
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -936,15 +1193,36 @@ function UpdateDeliveryModal({ delivery, onClose, onSaved }: { delivery: Prasada
   };
 
   return (
-    <ModalShell title="Update Delivery" onClose={onClose} onSubmit={submit}>
-      <Select value={status} onChange={(v) => setStatus(v)} className="w-full">
-        <option value="packed">Packed</option>
-        <option value="shipped">Shipped</option>
-        <option value="delivered">Delivered</option>
-        <option value="returned">Returned</option>
-      </Select>
-      <input value={courier} onChange={(e) => setCourier(e.target.value)} placeholder="Courier name" className={inputClass} />
-      <input value={tracking} onChange={(e) => setTracking(e.target.value)} placeholder="Tracking number" className={inputClass} />
-    </ModalShell>
+    <Modal
+      title="Update delivery"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" form={formId}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="space-y-3">
+        <Field label="Status">
+          <Select value={status} onChange={(v) => setStatus(v)} ariaLabel="Status" className="w-full">
+            <option value="packed">Packed</option>
+            <option value="shipped">Shipped</option>
+            <option value="delivered">Delivered</option>
+            <option value="returned">Returned</option>
+          </Select>
+        </Field>
+        <Field label="Courier name" htmlFor="delivery-courier">
+          <Input id="delivery-courier" value={courier} onChange={(e) => setCourier(e.target.value)} />
+        </Field>
+        <Field label="Tracking number" htmlFor="delivery-tracking">
+          <Input id="delivery-tracking" value={tracking} onChange={(e) => setTracking(e.target.value)} />
+        </Field>
+      </form>
+    </Modal>
   );
 }

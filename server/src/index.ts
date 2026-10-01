@@ -11,12 +11,17 @@
 // UI at all, and every screen 404s. If you are adding a route, add it to the
 // route block below and leave the client wiring alone.
 
+// FIRST, AND IT HAS TO STAY FIRST. Sets the process timezone to IST before any
+// other module is evaluated - see bootTimezone.ts for why the position matters.
+import './bootTimezone';
+import { istDate } from './bootTimezone';
+
 import path from 'path';
 import fs from 'fs';
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import pool from './db/pool';
+import pool, { verifyTimezone } from './db/pool';
 import authRoutes from './routes/auth';
 import peopleRoutes from './routes/people';
 import donationsRoutes from './routes/donations';
@@ -42,6 +47,9 @@ import { scheduleBirthdayAnniversaryCheck } from './utils/cron';
 import { runMigrations, setMigrationResult, getMigrationResult } from './db/migrate';
 
 dotenv.config();
+
+/** Filled at boot by verifyTimezone(); surfaced on /health. */
+let timezoneCheck: { ok: boolean; actual: string } | null = null;
 
 // Diagnostic safety net: if the process is about to die, log WHY before it
 // goes, so the next crash (if there is one) shows up in Railway's logs
@@ -103,11 +111,20 @@ app.get('/health', (_req, res) => {
   // answering 500 with nothing obviously wrong. This makes it visible without
   // having to reproduce it.
   const schema = getMigrationResult();
+  const timeOk = timezoneCheck?.ok !== false;
   res.json({
-    status: schema && !schema.ok ? 'degraded' : 'ok',
+    status: (schema && !schema.ok) || !timeOk ? 'degraded' : 'ok',
     schema: schema
       ? { applied: schema.ok, ms: schema.ms, ...(schema.error ? { error: schema.error } : {}) }
       : { applied: null },
+    // Both halves, because they are set in different places and either one
+    // being wrong puts every date in the product out by hours.
+    time: {
+      process: process.env.TZ ?? '(unset)',
+      database: timezoneCheck?.actual ?? '(not checked yet)',
+      ok: timeOk,
+      now: istDate(),
+    },
     timestamp: new Date().toISOString(),
   });
 });
@@ -281,6 +298,14 @@ async function start(): Promise<void> {
   // all - and whatever is wrong, serving the parts that still work beats
   // serving nothing. It is logged loudly and shows on /health.
   setMigrationResult(await runMigrations());
+
+  // Checked, not assumed. The failure mode is reports that are five and a half
+  // hours out and look entirely plausible, so it has to be loud at boot rather
+  // than discovered in a month-end figure that nobody can reconcile.
+  timezoneCheck = await verifyTimezone().catch((e) => ({
+    ok: false,
+    actual: `(could not read: ${(e as Error).message})`,
+  }));
 
   await mountClient();
 

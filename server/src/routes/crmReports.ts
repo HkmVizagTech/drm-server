@@ -35,6 +35,13 @@ import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import { reconcileConversions } from './crm';
+import { istDate, APP_TIMEZONE } from '../bootTimezone';
+import {
+  describeFilters,
+  sendExport,
+  EXPORT_ROW_CAP,
+  type ExportFormat,
+} from '../utils/export';
 
 const router = Router();
 router.use(authenticate);
@@ -42,30 +49,51 @@ router.use(authenticate);
 // Date window shared by every endpoint here. Defaults to the last 30 days
 // because that is the span a temple's calling campaign actually runs over, and
 // an unbounded default would scan the whole activity table on every page load.
+//
+// EVERY DATE HERE IS AN INDIAN CALENDAR DATE.
+//
+// This used to be `new Date().toISOString().slice(0, 10)`, which is the UTC
+// date however the process is configured. Between midnight and 05:30 IST that
+// is yesterday - so "Today" on the reports screen showed yesterday's calls for
+// the first five and a half hours of every day, and "This month" started on
+// the wrong day for the same window on the 1st.
+//
+// istDate() formats in Asia/Kolkata explicitly, so this is right regardless of
+// what zone the process happens to be running in.
 function range(q: Record<string, unknown>): { from: string; to: string; label: string } {
   const preset = String(q.preset ?? '');
-  const now = new Date();
-  const day = (d: Date) => d.toISOString().slice(0, 10);
+  const today = istDate();
 
   if (q.start_date || q.end_date) {
     return {
       from: String(q.start_date ?? '1970-01-01'),
-      to: String(q.end_date ?? day(now)),
+      to: String(q.end_date ?? today),
       label: 'Custom',
     };
   }
 
-  const back = (n: number) => day(new Date(now.getTime() - n * 86_400_000));
+  // Day arithmetic done on the IST calendar date rather than by subtracting
+  // milliseconds from "now": a 24-hour step from an instant lands at an
+  // arbitrary clock time, and across a month boundary that is a different day
+  // than the one a person counting back on a calendar would name.
+  const back = (n: number) => shiftDays(today, -n);
+  const [year, month] = today.split('-');
   switch (preset) {
-    case 'today': return { from: day(now), to: day(now), label: 'Today' };
+    case 'today': return { from: today, to: today, label: 'Today' };
     case 'yesterday': return { from: back(1), to: back(1), label: 'Yesterday' };
-    case 'week': return { from: back(6), to: day(now), label: 'Last 7 days' };
-    case 'month': return { from: day(new Date(now.getFullYear(), now.getMonth(), 1)), to: day(now), label: 'This month' };
-    case 'quarter': return { from: back(89), to: day(now), label: 'Last 90 days' };
-    case 'year': return { from: `${now.getFullYear()}-01-01`, to: day(now), label: 'This year' };
-    case 'all': return { from: '1970-01-01', to: day(now), label: 'All time' };
-    default: return { from: back(29), to: day(now), label: 'Last 30 days' };
+    case 'week': return { from: back(6), to: today, label: 'Last 7 days' };
+    case 'month': return { from: `${year}-${month}-01`, to: today, label: 'This month' };
+    case 'quarter': return { from: back(89), to: today, label: 'Last 90 days' };
+    case 'year': return { from: `${year}-01-01`, to: today, label: 'This year' };
+    case 'all': return { from: '1970-01-01', to: today, label: 'All time' };
+    default: return { from: back(29), to: today, label: 'Last 30 days' };
   }
+}
+
+/** Calendar arithmetic on a YYYY-MM-DD string, with no timezone in play. */
+function shiftDays(day: string, delta: number): string {
+  const [y, m, d] = day.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + delta)).toISOString().slice(0, 10);
 }
 
 // Inclusive of the end date. Written once because getting this wrong by a day
@@ -355,12 +383,11 @@ router.use('/reports', authorize('admin', 'accountant'));
 // Employee/caller-wise activity. The columns a temple supervisor actually asks
 // for: how many calls, how many got through, how long on the phone, how many
 // moved forward, and how much money followed.
-router.get('/reports/callers', async (req, res) => {
-  const { from, to, label } = range(req.query as Record<string, unknown>);
-  try {
-    await reconcileConversions();
-    const rows = await pool.query(
-      `WITH calls AS (
+//
+// Written once and run by both the screen and the export below. A supervisor
+// who downloads this uses it in a review conversation, so a file whose figures
+// differ from the screen they were quoted from is worse than no file.
+const CALLER_REPORT_SQL = `WITH calls AS (
          SELECT a.user_id,
                 COUNT(*)::int AS calls,
                 COUNT(*) FILTER (WHERE a.connected)::int AS connected,
@@ -423,15 +450,72 @@ router.get('/reports/callers', async (req, res) => {
          LEFT JOIN wins  w ON w.user_id IS NULL
         WHERE COALESCE(c.calls,0) > 0 OR COALESCE(w.conversions,0) > 0
 
-        ORDER BY calls DESC, raised DESC`,
-      [from, to]
-    );
+        ORDER BY calls DESC, raised DESC`;
+
+router.get('/reports/callers', async (req, res) => {
+  const { from, to, label } = range(req.query as Record<string, unknown>);
+  try {
+    await reconcileConversions();
+    const rows = await pool.query(CALLER_REPORT_SQL, [from, to]);
     res.json({ range: { from, to, label }, callers: rows.rows });
   } catch (err) {
     console.error('crm.reportCallers error:', err);
     res.status(500).json({ error: 'Could not build the caller report' });
   }
 });
+
+/**
+ * The caller report, as a file.
+ *
+ * Resolves the window through range() exactly as the screen does, so `preset`
+ * means the same thing in both - and reconciles conversions first for the same
+ * reason the screen does, or the file would report a caller's QR work as zero
+ * rupees purely because nothing had run since their last payment came in.
+ *
+ * No role guard of its own: router.use('/reports', ...) above already refuses
+ * anyone but an admin or accountant, and that is deliberately one guard in
+ * front of every report rather than one remembered per route.
+ */
+async function exportCallerReportFile(
+  req: import('express').Request,
+  res: import('express').Response,
+  format: ExportFormat
+) {
+  try {
+    const { from, to, label } = range(req.query as Record<string, unknown>);
+    await reconcileConversions();
+    const rows = await pool.query(
+      `${CALLER_REPORT_SQL} LIMIT ${EXPORT_ROW_CAP + 1}`,
+      [from, to]
+    );
+    const truncated = rows.rows.length > EXPORT_ROW_CAP;
+
+    await sendExport(res, format, {
+      name: 'caller-report',
+      truncated,
+      rows: truncated ? rows.rows.slice(0, EXPORT_ROW_CAP) : rows.rows,
+      // The window is spelled out rather than left to describeFilters: the
+      // default preset sends no query string at all, and "No filters applied"
+      // on a report that silently covers the last 30 days is a lie the file
+      // tells to whoever reads it next.
+      filterSummary: `${describeFilters(req.query as Record<string, unknown>, {})} | ${label} (${from} to ${to})`,
+      columns: [
+        { header: 'Caller', value: (r) => r.name },
+        { header: 'Calls made', value: (r) => r.calls, kind: 'number' },
+        { header: 'Connected', value: (r) => r.connected, kind: 'number' },
+        { header: 'Active days', value: (r) => r.active_days, kind: 'number' },
+        { header: 'Leads converted', value: (r) => r.conversions, kind: 'number' },
+        { header: 'Amount raised', value: (r) => r.raised, kind: 'money' },
+      ],
+    });
+  } catch (err) {
+    console.error('crm.exportCallerReport error:', err);
+    res.status(500).json({ error: 'Could not build that export' });
+  }
+}
+
+router.get('/reports/callers/export.csv', (req, res) => exportCallerReportFile(req, res, 'csv'));
+router.get('/reports/callers/export.xlsx', (req, res) => exportCallerReportFile(req, res, 'xlsx'));
 
 // Day-by-day (or month-by-month) activity - the shape of a campaign over time,
 // and what the chart on the reports page is drawn from.
@@ -503,7 +587,16 @@ router.get('/reports/calls', async (req, res) => {
       // When calls actually connect. Worth knowing before deciding the calling
       // hours - and it is a real finding, not a vanity chart.
       pool.query(
-        `SELECT EXTRACT(HOUR FROM occurred_at)::int AS hour,
+        // AT TIME ZONE IS NOT OPTIONAL HERE, even with the session on IST.
+        //
+        // This number is printed to the user as a clock time ("best around
+        // 4:00"). Read in UTC, a 10am call reports as hour 4 - and because IST
+        // is offset by thirty minutes as well as five hours, every real
+        // calling hour smeared across two buckets and flattened the very peak
+        // this chart exists to find. Stated explicitly so the one query whose
+        // output IS a wall-clock time can never quietly follow a session
+        // setting somewhere else.
+        `SELECT EXTRACT(HOUR FROM occurred_at AT TIME ZONE '${APP_TIMEZONE}')::int AS hour,
                 COUNT(*)::int AS calls,
                 COUNT(*) FILTER (WHERE connected)::int AS connected
            FROM lead_activities

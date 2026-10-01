@@ -32,6 +32,12 @@ import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import * as storage from '../services/storage';
 import { createOfflineDonation, type SiteKey } from '../services/hkmvClient';
+import {
+  describeFilters,
+  sendExport,
+  EXPORT_ROW_CAP,
+  type ExportFormat,
+} from '../utils/export';
 
 const router = Router();
 
@@ -1233,27 +1239,53 @@ router.post('/qr/payments/:id/issue-receipt', authenticate, async (req, res) => 
  * credited to the right lead with no receipt behind it looks finished from
  * every other angle.
  */
+/**
+ * Which payments this request may see, built once for the screen and the file.
+ *
+ * `me` is the caller scope, and it is wider than "mine" on purpose.
+ *
+ * Scoped to their own QR or their own share, a caller could not see the
+ * payment they were waiting for: most temples hand out one shared QR, which
+ * has no owner, and an unmatched payment has no share yet either. So the one
+ * screen built for attributing a payment showed the caller nothing, and they
+ * could not attribute the money they had just raised.
+ *
+ * So: payments through a QR assigned to them, payments against a share they
+ * made, and unmatched payments on the temple's shared QRs - which is exactly
+ * the set that could plausibly be theirs. Somebody else's matched payment
+ * stays hidden, and so does the raw Razorpay event on every row.
+ */
+function qrPaymentScope(
+  q: Record<string, unknown>,
+  user?: { role?: string; userId?: string }
+): { where: string; me: string | null } {
+  const scope = String(q.scope ?? 'attention');
+  return {
+    where:
+      scope === 'all'
+        ? 'TRUE'
+        : scope === 'unmatched'
+        ? 'p.share_id IS NULL'
+        : "p.share_id IS NULL OR p.receipt_status IS NULL OR p.receipt_status IN ('failed','skipped','pending')",
+    me: user?.role === 'caller' ? user?.userId ?? null : null,
+  };
+}
+
+const QR_PAYMENT_FROM = `FROM qr_payments p
+         LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
+         LEFT JOIN users u ON q.owner_id = u.id
+         LEFT JOIN qr_shares s ON p.share_id = s.id
+         LEFT JOIN leads l ON s.lead_id = l.id`;
+
+/** Spelled out once so the screen and the file cannot disagree about who is in. */
+const QR_PAYMENT_VISIBLE = `($1::uuid IS NULL
+               OR q.owner_id = $1::uuid
+               OR s.shared_by = $1::uuid
+               -- Unclaimed money on a QR anybody may use. Theirs to recognise.
+               OR (p.share_id IS NULL AND q.owner_id IS NULL))`;
+
 router.get('/qr/payments', authenticate, async (req, res) => {
-  const scope = String(req.query.scope ?? 'attention');
-  const where =
-    scope === 'all'
-      ? 'TRUE'
-      : scope === 'unmatched'
-      ? 'p.share_id IS NULL'
-      : "p.share_id IS NULL OR p.receipt_status IS NULL OR p.receipt_status IN ('failed','skipped','pending')";
-  // What a caller may see, and why it is wider than "mine".
-  //
-  // Scoped to their own QR or their own share, a caller could not see the
-  // payment they were waiting for: most temples hand out one shared QR, which
-  // has no owner, and an unmatched payment has no share yet either. So the one
-  // screen built for attributing a payment showed the caller nothing, and they
-  // could not attribute the money they had just raised.
-  //
-  // So: payments through a QR assigned to them, payments against a share they
-  // made, and unmatched payments on the temple's shared QRs - which is exactly
-  // the set that could plausibly be theirs. Somebody else's matched payment
-  // stays hidden, and so does the raw Razorpay event on every row.
-  const me = req.user?.role === 'caller' ? req.user?.userId ?? null : null;
+  const { where, me } = qrPaymentScope(req.query as Record<string, unknown>, req.user);
 
   try {
     const rows = await pool.query(
@@ -1263,17 +1295,9 @@ router.get('/qr/payments', authenticate, async (req, res) => {
               p.match_basis, p.match_score, p.match_note, p.last_event,
               q.label AS qr_label, q.receipt_site AS qr_receipt_site,
               u.name AS qr_owner, l.name AS lead_name, l.id AS lead_id
-         FROM qr_payments p
-         LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
-         LEFT JOIN users u ON q.owner_id = u.id
-         LEFT JOIN qr_shares s ON p.share_id = s.id
-         LEFT JOIN leads l ON s.lead_id = l.id
+         ${QR_PAYMENT_FROM}
         WHERE (${where})
-          AND ($1::uuid IS NULL
-               OR q.owner_id = $1::uuid
-               OR s.shared_by = $1::uuid
-               -- Unclaimed money on a QR anybody may use. Theirs to recognise.
-               OR (p.share_id IS NULL AND q.owner_id IS NULL))
+          AND ${QR_PAYMENT_VISIBLE}
         ORDER BY p.received_at DESC LIMIT 200`,
       [me]
     );
@@ -1283,6 +1307,78 @@ router.get('/qr/payments', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Could not load the QR payments' });
   }
 });
+
+/**
+ * The QR payments on screen, as a file.
+ *
+ * Caller-reachable, like the screen, and scoped by the same qrPaymentScope -
+ * a caller downloads the payments they can see and nobody else's.
+ *
+ * The screen stops at 200 rows because that is a list somebody reads top-down;
+ * a file is read by sorting and totalling, so it runs to the shared row cap
+ * instead. A download silently cut off at 200 would be a reconciliation that
+ * comes up short with nothing on the file to say why.
+ */
+async function exportQrPaymentsFile(
+  req: import('express').Request,
+  res: import('express').Response,
+  format: ExportFormat
+) {
+  try {
+    const { where, me } = qrPaymentScope(req.query as Record<string, unknown>, req.user);
+    const rows = await pool.query(
+      `SELECT p.payment_id, p.amount, p.payer_name, p.payer_phone, p.status,
+              p.received_at, p.receipt_number, p.match_basis, p.match_score,
+              q.label AS qr_label, l.name AS lead_name,
+              -- The caller who shared the QR this money came back through, which
+              -- is who the conversion was credited to.
+              su.name AS shared_by_name
+         ${QR_PAYMENT_FROM}
+         LEFT JOIN users su ON s.shared_by = su.id
+        WHERE (${where})
+          AND ${QR_PAYMENT_VISIBLE}
+        ORDER BY p.received_at DESC LIMIT ${EXPORT_ROW_CAP + 1}`,
+      [me]
+    );
+    const truncated = rows.rows.length > EXPORT_ROW_CAP;
+
+    await sendExport(res, format, {
+      name: 'qr-payments',
+      truncated,
+      rows: truncated ? rows.rows.slice(0, EXPORT_ROW_CAP) : rows.rows,
+      filterSummary: describeFilters(req.query as Record<string, unknown>, { scope: 'Showing' }),
+      columns: [
+        { header: 'Received at', value: (r) => r.received_at, kind: 'datetime' },
+        { header: 'Amount', value: (r) => r.amount, kind: 'money' },
+        { header: 'Payer name', value: (r) => r.payer_name },
+        { header: 'Payer phone', value: (r) => r.payer_phone, kind: 'phone' },
+        { header: 'QR', value: (r) => r.qr_label },
+        { header: 'Matched lead', value: (r) => r.lead_name },
+        { header: 'Matched to caller', value: (r) => r.shared_by_name },
+        { header: 'Match basis', value: (r) => r.match_basis },
+        { header: 'Match score', value: (r) => r.match_score, kind: 'number' },
+        { header: 'Status', value: (r) => r.status },
+        { header: 'Receipt no', value: (r) => r.receipt_number },
+        { header: 'Razorpay payment id', value: (r) => r.payment_id },
+      ],
+    });
+  } catch (err) {
+    console.error('crm.exportQrPayments error:', err);
+    res.status(500).json({ error: 'Could not build that export' });
+  }
+}
+
+// Nothing in this router answers GET /qr/payments/:id, which is the only thing
+// that could swallow these - Express matches in order and "export.csv" is a
+// perfectly good :id as far as a route pattern is concerned. That is the trap
+// that once made /leads/sample.csv answer "Lead not found". Anyone adding a
+// GET /qr/payments/:id later must put it BELOW these two.
+router.get('/qr/payments/export.csv', authenticate, (req, res) =>
+  exportQrPaymentsFile(req, res, 'csv')
+);
+router.get('/qr/payments/export.xlsx', authenticate, (req, res) =>
+  exportQrPaymentsFile(req, res, 'xlsx')
+);
 
 /** GET /qr/unmatched - payments nobody has claimed. A screen, not a dead letter box. */
 router.get('/qr/unmatched', authenticate, async (req, res) => {

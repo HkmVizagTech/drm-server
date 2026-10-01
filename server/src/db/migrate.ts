@@ -83,11 +83,26 @@ export async function runMigrations(): Promise<MigrationResult> {
   const client = await pool.connect();
   try {
     await client.query('SELECT pg_advisory_lock($1)', [LOCK_ID]);
-    // Not wrapped in a transaction. Postgres can do DDL transactionally, but a
-    // single failing statement would then roll back the whole file, and the
-    // statement most likely to fail is an index on a table somebody changed by
-    // hand. Statement by statement, a failure stops the run and says which
-    // one - and everything before it has already landed.
+    // THIS IS ALL-OR-NOTHING. The comment that used to sit here claimed the
+    // opposite - that statements land one by one and everything before a
+    // failure survives. That is wrong, and believing it is how you misread a
+    // failed deploy.
+    //
+    // Passing a multi-statement string to client.query() sends it as a single
+    // simple query, and libpq wraps a simple query containing more than one
+    // statement in an implicit transaction. One failing statement anywhere in
+    // schema.sql rolls back the ENTIRE file, including every statement that
+    // appeared to succeed before it.
+    //
+    // So: a migration failure does not mean "the file got partway". It means
+    // the database is exactly as it was before this boot, and every change in
+    // the file is missing - not just the ones after the failure. Read /health,
+    // fix the offending statement, redeploy.
+    //
+    // This is also why schema.sql must clean up before it constrains: anything
+    // that could make an ALTER ... ADD CONSTRAINT fail has to be deleted or
+    // repaired by an earlier statement in the same file, because there is no
+    // "run the rest anyway" here. See the abandoned_external_id_present block.
     await client.query(sql);
     const ms = Date.now() - started;
     console.log(`[schema] up to date (${ms}ms)`);
@@ -121,3 +136,26 @@ export const setMigrationResult = (r: MigrationResult) => {
   lastResult = r;
 };
 export const getMigrationResult = (): MigrationResult | null => lastResult;
+
+/**
+ * `npm run db:migrate`.
+ *
+ * This used to import the module and exit, printing nothing and applying
+ * nothing - the worst possible failure for a command whose entire job is to
+ * make a change, because it looks exactly like success. Anyone who ran it
+ * before a deploy walked away believing the database was current.
+ *
+ * Exits non-zero on failure so a script or CI step can tell.
+ */
+if (require.main === module) {
+  runMigrations()
+    .then(async (r) => {
+      await pool.end().catch(() => undefined);
+      if (!r.ok) process.exit(1);
+    })
+    .catch(async (e) => {
+      console.error('[schema] could not run:', (e as Error).message);
+      await pool.end().catch(() => undefined);
+      process.exit(1);
+    });
+}

@@ -23,19 +23,24 @@ import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { number, relativeDate } from "@/lib/format";
 import {
+  Alert,
   Badge,
+  Button,
   Card,
   CardHeader,
+  EmptyState,
+  Field,
+  Input,
   Modal,
   PageHeader,
   Select,
+  SkeletonRows,
   TableShell,
+  Tbody,
   Td,
   Th,
+  Thead,
   Toggle,
-  buttonPrimary,
-  buttonSecondary,
-  inputClass,
 } from "@/components/ui";
 
 interface TeamUser {
@@ -74,7 +79,10 @@ const ROLES: { value: string; label: string; blurb: string }[] = [
   },
 ];
 
-const roleLabel = (r: string) => ROLES.find((x) => x.value === r)?.label ?? r.replace(/_/g, " ");
+// The dropdown carries each role's one-line description as its hint, so the
+// person choosing reads what the role can reach at the moment they choose it
+// rather than matching a label against the table of blurbs further down.
+const ROLE_OPTIONS = ROLES.map((r) => ({ value: r.value, label: r.label, hint: r.blurb }));
 
 export default function TeamPage() {
   const { user } = useAuth();
@@ -117,11 +125,13 @@ export default function TeamPage() {
   if (user && user.role !== "admin") {
     return (
       <div>
-        <PageHeader title="Team" subtitle="Accounts and what each of them can reach" />
+        <PageHeader eyebrow="Setup" title="Team" subtitle="Accounts and what each of them can reach" />
         <Card>
-          <p className="text-sm text-slate-600">
-            Only an administrator can see and change accounts. Ask one if you need access to something.
-          </p>
+          <EmptyState
+            icon="shield"
+            title="Administrators only"
+            message="Only an administrator can see and change accounts. Ask one if you need access to something."
+          />
         </Card>
       </div>
     );
@@ -130,111 +140,106 @@ export default function TeamPage() {
   return (
     <div>
       <PageHeader
+        eyebrow="Setup"
         title="Team"
         subtitle="Who can sign in to DRM, and what each of them can reach"
         actions={
-          <button onClick={() => setShowNew(true)} className={buttonPrimary}>
+          <Button icon="userPlus" onClick={() => setShowNew(true)}>
             Add someone
-          </button>
+          </Button>
         }
       />
 
       {notice && (
-        <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+        <Alert tone="good" onDismiss={() => setNotice(null)}>
           {notice}
-        </div>
+        </Alert>
       )}
-      {error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
-      )}
+      {error && <Alert tone="danger">{error}</Alert>}
 
-      <Card padded={false}>
-        <div className="px-5 pt-5">
-          <CardHeader
-            title={`${users.filter((u) => u.active).length} active`}
-            subtitle="Switching someone off stops them signing in and keeps every call they logged."
-          />
-        </div>
+      {/* The header sits above the table rather than around it: a TableShell
+          already draws a bordered, shadowed surface and wrapping it in a card
+          stacked a second one behind it. */}
+      <CardHeader
+        icon="users"
+        title={`${users.filter((u) => u.active).length} active`}
+        subtitle="Switching someone off stops them signing in and keeps every call they logged."
+      />
 
-        <TableShell>
-          <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
-            <tr>
-              <Th>Name</Th>
-              <Th>Can reach</Th>
-              <Th align="right">Leads</Th>
-              <Th align="right">Calls, 7 days</Th>
-              <Th>Last signed in</Th>
-              <Th align="center">Can sign in</Th>
-              <Th align="right">Password</Th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {loading ? (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-400">Loading…</td></tr>
-            ) : (
-              users.map((u) => (
-                <tr key={u.id} className={`hover:bg-slate-50/60 ${u.active ? "" : "opacity-60"}`}>
-                  <Td>
-                    <input
-                      defaultValue={u.name}
-                      onBlur={(e) => e.target.value !== u.name && e.target.value.trim() && void save(u.id, { name: e.target.value })}
-                      className="w-full bg-transparent font-medium text-slate-900 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] rounded px-1 -mx-1"
-                    />
-                    <p className="text-[11px] text-slate-500">{u.email}</p>
-                  </Td>
-                  <Td>
-                    <Select
-                      value={u.role}
-                      onChange={(v) => void save(u.id, { role: v })}
-                      className="min-w-[11rem]"
-                      options={ROLES.map((r) => ({ value: r.value, label: r.label }))}
-                    />
-                  </Td>
-                  <Td align="right" className="tabular-nums text-slate-600">
-                    {u.assigned_leads ? (
-                      <>
-                        {number(u.open_leads)}
-                        <span className="text-slate-300"> / {number(u.assigned_leads)}</span>
-                      </>
-                    ) : (
-                      <span className="text-slate-300">—</span>
-                    )}
-                  </Td>
-                  <Td align="right" className="tabular-nums text-slate-700">
-                    {u.calls_7d ? number(u.calls_7d) : <span className="text-slate-300">—</span>}
-                  </Td>
-                  <Td className="text-slate-500 text-xs">
-                    {u.last_login_at ? relativeDate(u.last_login_at) : <Badge tone="neutral">Never</Badge>}
-                  </Td>
-                  <Td align="center">
-                    <Toggle
-                      on={u.active}
-                      onChange={(v: boolean) => void save(u.id, { active: v })}
-                      label={`${u.name} can sign in`}
-                    />
-                  </Td>
-                  <Td align="right">
-                    <button
-                      onClick={() => setResetting(u)}
-                      className="rounded-lg px-2 py-1 text-xs text-slate-600 hover:bg-slate-100"
-                    >
-                      Set password
-                    </button>
-                  </Td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </TableShell>
-      </Card>
+      <TableShell>
+        <Thead>
+          <Th>Name</Th>
+          <Th>Can reach</Th>
+          <Th align="right">Leads</Th>
+          <Th align="right">Calls, 7 days</Th>
+          <Th>Last signed in</Th>
+          <Th align="center">Can sign in</Th>
+          <Th align="right">Password</Th>
+        </Thead>
+        {loading ? (
+          <SkeletonRows rows={5} cols={7} />
+        ) : (
+          <Tbody>
+            {users.map((u) => (
+              <tr key={u.id} className={u.active ? "" : "opacity-60"}>
+                <Td>
+                  <Input
+                    defaultValue={u.name}
+                    aria-label={`Name for ${u.email}`}
+                    onBlur={(e) => e.target.value !== u.name && e.target.value.trim() && void save(u.id, { name: e.target.value })}
+                  />
+                  <p className="mt-1 text-2xs text-ink-muted">{u.email}</p>
+                </Td>
+                <Td>
+                  <Select
+                    value={u.role}
+                    onChange={(v) => void save(u.id, { role: v })}
+                    className="min-w-[12rem]"
+                    ariaLabel={`What ${u.name} can reach`}
+                    options={ROLE_OPTIONS}
+                  />
+                </Td>
+                <Td align="right" className="tabular-nums">
+                  {u.assigned_leads ? (
+                    <>
+                      {number(u.open_leads)}
+                      <span className="text-ink-faint"> / {number(u.assigned_leads)}</span>
+                    </>
+                  ) : (
+                    <span className="text-ink-faint">—</span>
+                  )}
+                </Td>
+                <Td align="right" className="tabular-nums">
+                  {u.calls_7d ? number(u.calls_7d) : <span className="text-ink-faint">—</span>}
+                </Td>
+                <Td className="text-xs text-ink-muted">
+                  {u.last_login_at ? relativeDate(u.last_login_at) : <Badge tone="neutral">Never</Badge>}
+                </Td>
+                <Td align="center">
+                  <Toggle
+                    on={u.active}
+                    onChange={(v: boolean) => void save(u.id, { active: v })}
+                    label={`${u.name} can sign in`}
+                  />
+                </Td>
+                <Td align="right">
+                  <Button size="sm" variant="secondary" icon="shield" onClick={() => setResetting(u)}>
+                    Set password
+                  </Button>
+                </Td>
+              </tr>
+            ))}
+          </Tbody>
+        )}
+      </TableShell>
 
       <Card className="mt-5">
-        <CardHeader title="What the roles mean" />
+        <CardHeader icon="help" title="What the roles mean" />
         <dl className="space-y-3">
           {ROLES.map((r) => (
             <div key={r.value}>
-              <dt className="text-sm font-medium text-slate-900">{r.label}</dt>
-              <dd className="text-sm text-slate-600">{r.blurb}</dd>
+              <dt className="text-sm font-medium text-ink">{r.label}</dt>
+              <dd className="text-sm text-ink-muted">{r.blurb}</dd>
             </div>
           ))}
         </dl>
@@ -283,81 +288,86 @@ function NewUserDialog({ onClose, onDone }: { onClose: () => void; onDone: (name
   }
 
   return (
-    <Modal title="Add someone to the team" onClose={onClose}>
-      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+    <Modal
+      title="Add someone to the team"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            loading={busy}
+            disabled={!name.trim() || !email.trim() || password.length < 8}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                await apiClient.post("/api/auth/register", {
+                  name: name.trim(),
+                  email: email.trim(),
+                  role,
+                  password,
+                });
+                onDone(name.trim());
+              } catch (e) {
+                setError(e instanceof Error ? e.message : "Could not create that account");
+                setBusy(false);
+              }
+            }}
+          >
+            Create the account
+          </Button>
+        </>
+      }
+    >
+      {error && <Alert tone="danger">{error}</Alert>}
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="text-xs text-slate-500">
-          Their name
-          <input value={name} onChange={(e) => setName(e.target.value)} className={`${inputClass} mt-1 w-full`} />
-        </label>
-        <label className="text-xs text-slate-500">
-          Email they sign in with
-          <input
+        <Field label="Their name" htmlFor="new-user-name" required>
+          <Input id="new-user-name" value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label="Email they sign in with" htmlFor="new-user-email" required>
+          <Input
+            id="new-user-email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             type="email"
             autoComplete="off"
-            className={`${inputClass} mt-1 w-full`}
           />
-        </label>
+        </Field>
       </div>
 
-      <label className="mt-3 block text-xs text-slate-500">
-        What they do
-        <Select
-          value={role}
-          onChange={setRole}
-          className="mt-1 w-full"
-          options={ROLES.map((r) => ({ value: r.value, label: r.label }))}
-        />
-      </label>
-      <p className="mt-1.5 text-xs text-slate-500">{ROLES.find((r) => r.value === role)?.blurb}</p>
+      <Field
+        label="What they do"
+        className="mt-3"
+        hint={ROLES.find((r) => r.value === role)?.blurb}
+      >
+        <Select value={role} onChange={setRole} ariaLabel="What they do" options={ROLE_OPTIONS} />
+      </Field>
 
-      <label className="mt-3 block text-xs text-slate-500">
-        A password to start with
-        <div className="mt-1 flex gap-2">
-          <input
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="new-password"
-            placeholder="At least 8 characters"
-            className={`${inputClass} flex-1`}
-          />
-          <button type="button" onClick={suggest} className={buttonSecondary}>
+      <Field
+        label="A password to start with"
+        htmlFor="new-user-password"
+        className="mt-3"
+        hint="They can change it after signing in, under their own name in the sidebar."
+        required
+      >
+        <div className="flex gap-2">
+          <div className="min-w-0 flex-1">
+            <Input
+              id="new-user-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="new-password"
+              placeholder="At least 8 characters"
+            />
+          </div>
+          <Button variant="secondary" icon="sparkle" onClick={suggest}>
             Suggest one
-          </button>
+          </Button>
         </div>
-      </label>
-      <p className="mt-1.5 text-xs text-slate-500">
-        They can change it after signing in, under their own name in the sidebar.
-      </p>
-
-      <div className="mt-5 flex justify-end gap-2">
-        <button onClick={onClose} className={buttonSecondary}>Cancel</button>
-        <button
-          disabled={busy || !name.trim() || !email.trim() || password.length < 8}
-          onClick={async () => {
-            setBusy(true);
-            setError(null);
-            try {
-              await apiClient.post("/api/auth/register", {
-                name: name.trim(),
-                email: email.trim(),
-                role,
-                password,
-              });
-              onDone(name.trim());
-            } catch (e) {
-              setError(e instanceof Error ? e.message : "Could not create that account");
-              setBusy(false);
-            }
-          }}
-          className={buttonPrimary}
-        >
-          {busy ? "Creating…" : "Create the account"}
-        </button>
-      </div>
+      </Field>
     </Modal>
   );
 }
@@ -376,39 +386,54 @@ function PasswordDialog({
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <Modal title={`Set a password for ${user.name}`} onClose={onClose}>
-      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
-      <p className="mb-3 text-sm text-slate-600">
+    <Modal
+      title={`Set a password for ${user.name}`}
+      onClose={onClose}
+      tone="danger"
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          {/* Destructive, so it is styled as such: this overwrites whatever
+              password the person is using now, and there is no email on this
+              deployment to send them the new one - if it is set by mistake,
+              they are locked out until somebody tells them. */}
+          <Button
+            variant="dangerSoft"
+            loading={busy}
+            disabled={password.length < 8}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                await apiClient.post(`/api/auth/users/${user.id}/password`, { new_password: password });
+                onDone();
+              } catch (e) {
+                setError(e instanceof Error ? e.message : "Could not set that password");
+                setBusy(false);
+              }
+            }}
+          >
+            Set it
+          </Button>
+        </>
+      }
+    >
+      {error && <Alert tone="danger">{error}</Alert>}
+      <p className="mb-3 text-sm text-ink-soft">
         They will be signed out of nothing — an existing session keeps working until it expires. Tell them the new
         password yourself; DRM has no email set up to send it.
       </p>
-      <input
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-        autoComplete="new-password"
-        placeholder="At least 8 characters"
-        className={`${inputClass} w-full`}
-      />
-      <div className="mt-5 flex justify-end gap-2">
-        <button onClick={onClose} className={buttonSecondary}>Cancel</button>
-        <button
-          disabled={busy || password.length < 8}
-          onClick={async () => {
-            setBusy(true);
-            setError(null);
-            try {
-              await apiClient.post(`/api/auth/users/${user.id}/password`, { new_password: password });
-              onDone();
-            } catch (e) {
-              setError(e instanceof Error ? e.message : "Could not set that password");
-              setBusy(false);
-            }
-          }}
-          className={buttonPrimary}
-        >
-          {busy ? "Saving…" : "Set it"}
-        </button>
-      </div>
+      <Field label="New password" htmlFor="reset-password" required>
+        <Input
+          id="reset-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete="new-password"
+          placeholder="At least 8 characters"
+        />
+      </Field>
     </Modal>
   );
 }

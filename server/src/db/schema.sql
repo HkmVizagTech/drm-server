@@ -1571,17 +1571,44 @@ ALTER TABLE abandoned_sync_state ADD COLUMN IF NOT EXISTS truncated BOOLEAN NOT 
 -- An attempt with no id from the site cannot be stored: the unique key is
 -- (site, external id), so every id-less row from a site would collide into one
 -- row and that site's whole list would collapse to a single person.
-ALTER TABLE abandoned_attempts DROP CONSTRAINT IF EXISTS abandoned_external_id_present;
--- Clear any id-less row first, or the ADD CONSTRAINT below fails and takes
--- every statement after it with it. The release before this one guarded only
--- on the phone number, so an empty id could be stored: the unique key is
--- (site, id), and all of a site's id-less rows would have collapsed into one
--- row, standing for one person instead of all of them. Nothing is lost - a row
--- with no id is not something anybody can ring or attribute, which is why the
--- sync now skips and counts them. No-op on any database without such a row.
-DELETE FROM abandoned_attempts WHERE external_id = '';
-ALTER TABLE abandoned_attempts ADD CONSTRAINT abandoned_external_id_present
-  CHECK (external_id <> '');
+--
+-- CLEARED BEFORE THE CONSTRAINT, AND WHY THAT ORDER IS NOT OPTIONAL
+--
+-- The release before this one guarded only on the phone number and inserted
+-- the id unchecked, so a site returning an explicit "externalId": "" could
+-- land exactly such a row. Adding the constraint to a table already holding
+-- one fails - and this whole file is applied as a single client.query(), which
+-- Postgres runs as one implicit transaction. So that failure would not merely
+-- skip the statements after it: it would roll back every change in the file,
+-- including synced_days, rows_skipped, truncated and the two indexes below.
+-- The deploy would come up looking healthy, report degraded on /health, and
+-- silently lack the very columns the staleness fix depends on.
+--
+-- A row with no id is unusable by construction - it is the collapsed row, not
+-- a donor - so removing it loses nothing. The count is raised as a notice
+-- because a migration that quietly deletes rows is worse than one that says so.
+DO $$
+DECLARE removed INT;
+BEGIN
+  DELETE FROM abandoned_attempts WHERE external_id = '';
+  GET DIAGNOSTICS removed = ROW_COUNT;
+  IF removed > 0 THEN
+    RAISE NOTICE '[schema] abandoned_attempts: removed % row(s) with no id from the site - these were unusable and would have blocked the new constraint.', removed;
+  END IF;
+END $$;
+
+-- Added only when it is missing, rather than dropped and re-added every boot.
+-- ADD CONSTRAINT validates the whole table, so the drop-then-add form paid for
+-- a full scan of abandoned_attempts on every single deploy.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'abandoned_external_id_present'
+  ) THEN
+    ALTER TABLE abandoned_attempts
+      ADD CONSTRAINT abandoned_external_id_present CHECK (external_id <> '');
+  END IF;
+END $$;
 
 -- Dismissal is per person, not per attempt: setting aside one of somebody's
 -- four attempts used to promote the next one into the list the moment the

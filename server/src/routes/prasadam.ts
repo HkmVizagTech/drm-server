@@ -5,6 +5,13 @@ import { canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroup
 import { displayPurposeSql } from '../utils/donationLabel';
 import { updatePrasadamStatus, isSiteConfigured, type SiteKey } from '../services/hkmvClient';
 import { buildWorkbook } from '../utils/spreadsheet';
+import {
+  describeFilters,
+  sendExport,
+  EXPORT_ROW_CAP,
+  type ExportColumn,
+  type ExportFormat,
+} from '../utils/export';
 
 const router = Router();
 router.use(authenticate);
@@ -589,64 +596,75 @@ router.post('/resync', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /export.csv - the courier manifest, honouring every filter on screen.
-function csvCell(v: unknown): string {
-  if (v === null || v === undefined) return '';
-  // Dates go out as "2026-09-29 14:30", not JavaScript's default
-  // "Tue Sep 29 2026 05:26:00 GMT+0000 (Coordinated Universal Time)" - this
-  // file is read by a courier and opened in Excel, which cannot parse the
-  // latter as a date at all.
-  const s =
-    v instanceof Date
-      ? `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')} ` +
-        `${String(v.getHours()).padStart(2, '0')}:${String(v.getMinutes()).padStart(2, '0')}`
-      : String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-
-const EXPORT_COLUMNS: { key: string; header: string }[] = [
-  { key: 'id', header: 'Delivery ID' },
-  { key: 'donor_name', header: 'Donor' },
-  { key: 'donor_phone', header: 'Phone' },
-  { key: 'address', header: 'Address' },
-  { key: 'status', header: 'Status' },
-  { key: 'courier_name', header: 'Courier' },
-  { key: 'tracking_number', header: 'Tracking number' },
-  { key: 'donation_amount', header: 'Donation amount' },
-  { key: 'donation_purpose', header: 'Seva' },
-  { key: 'donation_page', header: 'Page' },
-  { key: 'donation_receipt', header: 'Receipt no' },
-  { key: 'source_site', header: 'Site' },
-  { key: 'created_at', header: 'Queued at' },
-  { key: 'dispatched_at', header: 'Dispatched at' },
-  { key: 'delivered_at', header: 'Delivered at' },
+// The courier manifest, honouring every filter on screen.
+//
+// One column list for both formats. This file used to carry its own CSV
+// escaper and its own date formatting, which is how the two exports that
+// existed before utils/export had already drifted apart from each other; the
+// courier gets the same manifest whichever button the office presses.
+const EXPORT_COLUMNS: ExportColumn<Record<string, unknown>>[] = [
+  { header: 'Delivery ID', value: (r) => r.id },
+  { header: 'Donor', value: (r) => r.donor_name },
+  { header: 'Phone', value: (r) => r.donor_phone, kind: 'phone' },
+  { header: 'Address', value: (r) => r.address },
+  { header: 'Status', value: (r) => r.status },
+  { header: 'Courier', value: (r) => r.courier_name },
+  { header: 'Tracking number', value: (r) => r.tracking_number },
+  { header: 'Donation amount', value: (r) => r.donation_amount, kind: 'money' },
+  { header: 'Seva', value: (r) => r.donation_purpose },
+  { header: 'Page', value: (r) => r.donation_page },
+  { header: 'Receipt no', value: (r) => r.donation_receipt },
+  { header: 'Site', value: (r) => r.source_site },
+  { header: 'Queued at', value: (r) => r.created_at, kind: 'datetime' },
+  { header: 'Dispatched at', value: (r) => r.dispatched_at, kind: 'datetime' },
+  { header: 'Delivered at', value: (r) => r.delivered_at, kind: 'datetime' },
 ];
 
-router.get('/export.csv', async (req, res) => {
+async function exportDeliveriesFile(
+  req: import('express').Request,
+  res: import('express').Response,
+  format: ExportFormat
+) {
   try {
     const f = buildFilters(req.query as Record<string, unknown>);
     const result = await pool.query(
-      `SELECT ${SELECT_COLUMNS} ${FROM_JOINS} ${f.where} ORDER BY d.created_at DESC LIMIT 20000`,
+      `SELECT ${SELECT_COLUMNS} ${FROM_JOINS} ${f.where}
+       ORDER BY d.created_at DESC LIMIT ${EXPORT_ROW_CAP + 1}`,
       f.values
     );
+    const truncated = result.rows.length > EXPORT_ROW_CAP;
 
-    const header = EXPORT_COLUMNS.map((c) => csvCell(c.header)).join(',');
-    const body = result.rows
-      .map((row) => EXPORT_COLUMNS.map((c) => csvCell(row[c.key])).join(','))
-      .join('\n');
-
-    const stamp = new Date().toISOString().slice(0, 10);
+    // The status in the filename, as before: a packing table ends up with
+    // several of these open at once and the tab name is how they are told apart.
     const label = typeof req.query.status === 'string' && req.query.status ? req.query.status : 'all';
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="prasadam-${label}-${stamp}.csv"`);
-    // A BOM so Excel opens Indian names and addresses as UTF-8 rather than
-    // mangling them - these files go straight to a courier.
-    res.send('﻿' + header + '\n' + body + '\n');
+
+    await sendExport(res, format, {
+      name: `prasadam-${label}`,
+      truncated,
+      rows: truncated ? result.rows.slice(0, EXPORT_ROW_CAP) : result.rows,
+      columns: EXPORT_COLUMNS,
+      filterSummary: describeFilters(req.query as Record<string, unknown>, {
+        status: 'Status',
+        site: 'Site',
+        search: 'Search',
+        from_date: 'From',
+        to_date: 'To',
+        include_purpose: 'Only these sevas',
+        exclude_purpose: 'Excluding sevas',
+        include_page: 'Page',
+        group: 'Page group',
+      }),
+    });
   } catch (err) {
     console.error('prasadam.export error:', err);
+    // 400, not 500: buildFilters throws on an unknown status, and that is the
+    // caller's query being wrong rather than this server being broken.
     res.status(400).json({ error: (err as Error).message });
   }
-});
+}
+
+router.get('/export.csv', (req, res) => exportDeliveriesFile(req, res, 'csv'));
+router.get('/export.xlsx', (req, res) => exportDeliveriesFile(req, res, 'xlsx'));
 
 // ---------------------------------------------------------------------------
 // Import: preview, then commit. Never one step.

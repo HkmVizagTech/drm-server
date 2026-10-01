@@ -23,24 +23,13 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency } from "@/lib/format";
+import { Badge, Button, IconButton, LinkButton, buttonClass } from "@/components/ui";
 import { useCallingAlerts } from "./calling-alerts";
 
-interface Alert {
-  id: string;
-  lead_id: string;
-  title: string;
-  note: string | null;
-  occasion: string | null;
-  due_at: string;
-  expected_amount: string | null;
-  lead_name: string | null;
-  lead_phone: string;
-}
-
-// A minute. Short enough that a 15-minutes-before alert is never more than a
-// minute late, long enough that a day at the desk is 480 requests rather than
-// thousands - and the query is an indexed lookup that usually writes nothing.
-const POLL_MS = 60_000;
+// The cadence - a minute - lives with the timer that uses it, in
+// calling-alerts.tsx. A second POLL_MS was declared here and read by nothing,
+// which is the worst kind of constant: editing it looks like it changed the
+// poll and does not.
 
 function timeUntil(iso: string): string {
   const mins = Math.round((new Date(iso).getTime() - Date.now()) / 60_000);
@@ -97,106 +86,124 @@ export function ReminderBell() {
 
   return (
     <div ref={panelRef} className="relative">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        aria-label={dueCount ? `${dueCount} reminders need attention` : "Reminders"}
-        className="relative rounded-lg p-2 text-slate-600 hover:bg-white/70 hover:text-slate-900 transition-colors"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="w-5 h-5">
-          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+      {/* The count rides on top of the shared IconButton rather than being
+          baked into it: a badge is the only thing this bell needs that a
+          standard icon button does not have, and a wrapper is cheaper than a
+          variant nothing else would use. */}
+      <span className="relative block">
+        <IconButton
+          name="bell"
+          label={dueCount ? `${dueCount} reminders need attention` : "Reminders"}
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-haspopup="true"
+        />
         {dueCount > 0 && (
-          <span className="absolute -top-0.5 -right-0.5 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full bg-red-600 text-white text-[10px] font-semibold grid place-items-center tabular-nums">
+          <span className="pointer-events-none absolute -right-0.5 -top-0.5 grid h-[1.1rem] min-w-[1.1rem] place-items-center rounded-pill bg-danger px-1 text-2xs font-semibold tabular-nums text-white ring-2 ring-surface">
             {dueCount > 99 ? "99+" : dueCount}
           </span>
         )}
-      </button>
+      </span>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-[22rem] max-w-[calc(100vw-2rem)] rounded-xl border border-[var(--line-strong)] bg-white shadow-xl z-50">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--line-soft)]">
-            <p className="text-sm font-semibold text-slate-900">Reminders</p>
-            <Link href="/calling/reminders" onClick={() => setOpen(false)} className="text-xs text-[var(--accent)] hover:underline">
+        <div
+          aria-label="Reminders"
+          className="fade-rise absolute right-0 z-50 mt-2 w-[22rem] max-w-[calc(100vw-2rem)] rounded-control border border-line-strong bg-surface shadow-float"
+        >
+          <div className="flex items-center justify-between border-b border-line-soft px-4 py-3">
+            <p className="text-sm font-semibold text-ink">Reminders</p>
+            <Link
+              href="/calling/reminders"
+              onClick={() => setOpen(false)}
+              className="text-xs text-brand-700 hover:underline"
+            >
               See all
             </Link>
           </div>
 
-          <div className="max-h-96 overflow-y-auto">
+          <div className="scroll-slim max-h-96 overflow-y-auto">
             {/* A lead that has donated goes above the reminders. It is the one
                 piece of news that changes what a caller does next — including
                 not ringing someone who has already given. */}
             {conversions.length > 0 && (
-              <ul className="divide-y divide-emerald-100 bg-emerald-50/60">
+              <ul className="divide-y divide-line-soft bg-good-wash">
                 {conversions.map((c) => (
                   <li key={c.id} className="px-4 py-3">
-                    <p className="text-sm font-medium text-emerald-900">
+                    <div className="mb-1">
+                      <Badge tone="good" dot>
+                        Donated
+                      </Badge>
+                    </div>
+                    <p className="text-sm font-medium text-ink">
                       {c.name || c.phone} donated {c.converted_amount ? currency(Number(c.converted_amount)) : ""}
                     </p>
-                    <p className="text-xs text-emerald-800 mt-0.5">
+                    <p className="mt-0.5 text-xs text-ink-muted">
                       {c.purpose ? `${c.purpose} · ` : ""}
                       {c.converted_via === "auto" ? "came through on the site" : "recorded by hand"}
                     </p>
                     <div className="mt-2 flex gap-2">
+                      {/* Still a next/link, not the shared LinkButton: that one
+                          renders a plain anchor, and swapping it in here would
+                          turn a client-side hop into a full page reload in the
+                          middle of a call. The class string is the same one the
+                          component builds from. */}
                       <Link
                         href={`/leads/${c.id}`}
                         onClick={() => setOpen(false)}
-                        className="rounded-lg bg-[var(--accent)] px-2.5 py-1 text-xs font-medium text-white"
+                        className={buttonClass("primary", "xs")}
                       >
                         Open
                       </Link>
-                      <button
-                        onClick={() => void dismissConversions([c.id])}
-                        className="rounded-lg border border-emerald-200 bg-white px-2.5 py-1 text-xs text-emerald-800"
-                      >
+                      <Button size="xs" variant="secondary" onClick={() => void dismissConversions([c.id])}>
                         Got it
-                      </button>
+                      </Button>
                     </div>
                   </li>
                 ))}
               </ul>
             )}
             {!alerts.length && !conversions.length ? (
-              <p className="px-4 py-6 text-sm text-slate-500 text-center">
+              <p className="px-4 py-6 text-center text-sm text-ink-muted">
                 {dueCount > 0
                   ? `${dueCount} reminder${dueCount === 1 ? "" : "s"} need attention.`
                   : "Nothing is alerting right now."}
               </p>
             ) : (
-              <ul className="divide-y divide-slate-100">
+              <ul className="divide-y divide-line-soft">
                 {alerts.map((a) => (
                   <li key={a.id + a.due_at} className="px-4 py-3">
                     <div className="flex items-baseline justify-between gap-2">
                       <Link
                         href={`/leads/${a.lead_id}`}
                         onClick={() => setOpen(false)}
-                        className="text-sm font-medium text-slate-900 hover:text-[var(--accent)] truncate"
+                        className="truncate text-sm font-medium text-ink hover:text-brand-700"
                       >
                         {a.lead_name || a.lead_phone}
                       </Link>
-                      <span className="text-[11px] text-amber-700 font-medium whitespace-nowrap">
-                        {timeUntil(a.due_at)}
-                      </span>
+                      {/* The timing is the reason this row is in front of
+                          someone, so it wears a badge rather than a line of
+                          coloured text that reads as a caption. */}
+                      <Badge tone="warn">{timeUntil(a.due_at)}</Badge>
                     </div>
-                    <p className="mt-0.5 text-sm text-slate-600">{a.title}</p>
+                    <p className="mt-0.5 text-sm text-ink-soft">{a.title}</p>
                     {a.expected_amount && (
-                      <p className="text-xs text-slate-500">Said they would give {currency(Number(a.expected_amount))}</p>
+                      <p className="text-xs text-ink-muted">
+                        Said they would give {currency(Number(a.expected_amount))}
+                      </p>
                     )}
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      <a
-                        href={`tel:+91${a.lead_phone}`}
-                        className="rounded-lg bg-[var(--accent)] px-2.5 py-1 text-xs font-medium text-white hover:opacity-90"
-                      >
+                      <LinkButton href={`tel:+91${a.lead_phone}`} variant="primary" size="xs" icon="phone">
                         Call {a.lead_phone}
-                      </a>
-                      <button onClick={() => void act(a.id, "snooze", 15)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">
+                      </LinkButton>
+                      <Button size="xs" variant="secondary" onClick={() => void act(a.id, "snooze", 15)}>
                         15 min
-                      </button>
-                      <button onClick={() => void act(a.id, "snooze", 60)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">
+                      </Button>
+                      <Button size="xs" variant="secondary" onClick={() => void act(a.id, "snooze", 60)}>
                         1 hour
-                      </button>
-                      <button onClick={() => void act(a.id, "done")} className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">
+                      </Button>
+                      <Button size="xs" variant="secondary" icon="check" onClick={() => void act(a.id, "done")}>
                         Done
-                      </button>
+                      </Button>
                     </div>
                   </li>
                 ))}
@@ -205,12 +212,12 @@ export function ReminderBell() {
           </div>
 
           {canNotify === "default" && (
-            <div className="border-t border-[var(--line-soft)] px-4 py-3">
+            <div className="border-t border-line-soft px-4 py-3">
               <button
                 onClick={() =>
                   Notification.requestPermission().then((p) => setCanNotify(p as "granted" | "denied" | "default"))
                 }
-                className="text-xs text-[var(--accent)] hover:underline"
+                className="text-left text-xs text-brand-700 hover:underline"
               >
                 Also alert me on the desktop, even when this tab is behind something
               </button>

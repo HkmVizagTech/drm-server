@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiClient } from "@/lib/api";
 import { currency } from "@/lib/format";
-import { Select } from "./ui";
+import { Alert, Button, Field, Input, Select } from "./ui";
 
 interface Qr {
   id: string;
@@ -196,12 +196,16 @@ export function SendQr({
   return (
     <div>
       <div className="flex flex-wrap items-end gap-2">
-        <label className="min-w-[12rem] flex-1 text-xs text-slate-500">
-          Send a QR
+        {/* Field rather than a <label> wrapped around the control: Select is a
+            button plus a listbox, and a label wrapping a button makes clicking
+            the word "Send a QR" open the list, which is not what the caller
+            was aiming at. The name reaches the control through ariaLabel. */}
+        <Field label="Send a QR" className="min-w-[12rem] flex-1">
           <Select
             value={chosen}
             onChange={setChosen}
-            className="mt-1 w-full"
+            ariaLabel="Send a QR"
+            className="w-full"
             options={[
               // A group on each option, which is how Select renders headings.
               ...mine.map((q) => ({
@@ -218,48 +222,50 @@ export function SendQr({
               })),
             ]}
           />
-        </label>
+        </Field>
 
-        <label className="w-28 text-xs text-slate-500">
-          Amount
-          <input
+        {/* The shared Input, which borders on --line-strong. This box used to
+            roll its own on --line, so the amount field sat a shade paler than
+            every other field on the calling screen. */}
+        <Field label="Amount" className="w-28" htmlFor="qr-amount">
+          <Input
+            id="qr-amount"
             value={amount}
             onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
             placeholder="Optional"
             inputMode="numeric"
-            className="mt-1 w-full rounded-lg border border-[var(--line)] px-3 py-2 text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+            className="tabular-nums"
           />
-        </label>
+        </Field>
 
-        <button
-          type="button"
+        <Button
+          variant="whatsapp"
+          icon="qr"
           onClick={() => void share()}
-          disabled={busy || !chosen}
+          disabled={!chosen}
+          loading={busy}
           data-send-qr
-          className="inline-flex items-center gap-1.5 rounded-lg bg-[#25D366] px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+          title="Copies the QR picture and opens WhatsApp in this donor's chat"
         >
-          <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor" aria-hidden>
-            <path d="M3 11h8V3H3v8zm2-6h4v4H5V5zM3 21h8v-8H3v8zm2-6h4v4H5v-4zM13 3v8h8V3h-8zm6 6h-4V5h4v4zM13 13h2v2h-2zM17 13h2v2h-2zM15 15h2v2h-2zM13 17h2v2h-2zM17 17h2v2h-2zM19 15h2v2h-2zM19 19h2v2h-2z" />
-          </svg>
-          {busy ? "…" : "Copy QR & open chat"}
-        </button>
+          Copy QR &amp; open chat
+        </Button>
       </div>
 
       {current?.purpose && (
-        <p className="mt-1.5 text-[11px] text-slate-500">
+        <p className="mt-1.5 text-2xs text-ink-muted">
           {current.label} is for {current.purpose}
           {current.fixed_amount && ` · fixed at ${currency(Number(current.fixed_amount))}`}
         </p>
       )}
 
       {sent && (
-        <div className="mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+        <Alert tone="good" className="mt-2">
           {sent.copied ? (
             <p>
               <strong>The QR picture is copied.</strong> In the WhatsApp window that just opened, press{" "}
-              <kbd className="rounded border border-emerald-300 bg-white px-1">Ctrl</kbd>+
-              <kbd className="rounded border border-emerald-300 bg-white px-1">V</kbd> to paste it, then send.
-              The message is already in the box.
+              <kbd className="rounded-md border border-line-strong bg-surface px-1 font-mono">Ctrl</kbd>+
+              <kbd className="rounded-md border border-line-strong bg-surface px-1 font-mono">V</kbd> to paste it,
+              then send. The message is already in the box.
             </p>
           ) : (
             <p>
@@ -268,19 +274,21 @@ export function SendQr({
               <button
                 type="button"
                 onClick={() => void downloadImage(chosen)}
-                className="underline underline-offset-2"
+                className="font-medium underline underline-offset-2"
               >
                 download the QR
               </button>{" "}
               and attach it.
             </p>
           )}
-          <p className="mt-1 text-emerald-800">
-            When they pay, it shows up against this lead on its own.
-          </p>
-        </div>
+          <p className="mt-1">When they pay, it shows up against this lead on its own.</p>
+        </Alert>
       )}
-      {error && <p className="mt-2 text-xs text-red-700">{error}</p>}
+      {error && (
+        <Alert tone="danger" className="mt-2">
+          {error}
+        </Alert>
+      )}
     </div>
   );
 }

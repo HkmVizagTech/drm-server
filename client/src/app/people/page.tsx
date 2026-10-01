@@ -3,8 +3,32 @@
 import { useCallback, useEffect, useState, FormEvent } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import { currency, number, relativeDate } from "@/lib/format";
-import { Avatar, Badge, buttonPrimary, buttonSecondary, Card, EmptyState, inputClass, PageHeader, Pagination, Select, SkeletonRows, TableShell, Td, Th } from "@/components/ui";
+import { ExportButton } from "@/components/export-button";
+import {
+  Alert,
+  Avatar,
+  Badge,
+  Button,
+  Checkbox,
+  EmptyState,
+  Field,
+  Icon,
+  Input,
+  Modal,
+  PageHeader,
+  Pagination,
+  SearchInput,
+  Select,
+  SkeletonRows,
+  TableShell,
+  Tbody,
+  Td,
+  Th,
+  Thead,
+  Toolbar,
+} from "@/components/ui";
 
 interface Person {
   id: string;
@@ -42,6 +66,7 @@ const sortOptions = [
 ];
 
 export default function PeoplePage() {
+  const { user } = useAuth();
   const [data, setData] = useState<PeopleResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -73,15 +98,27 @@ export default function PeoplePage() {
   // of a result set that now has 2 pages shows an empty table.
   useEffect(() => setPage(1), [debouncedSearch, roleFilter, sort, siteFilter, groupFilter]);
 
-  const fetchPeople = useCallback(() => {
-    setLoading(true);
+  /**
+   * The filters, described once.
+   *
+   * Both the list request and the download read this. Building the query a
+   * second time for the export is how a download ends up holding a different
+   * set of people than the screen that was looked at before pressing it - and
+   * the office acts on the file, not on the screen.
+   */
+  const filterParams = useCallback(() => {
     const params = new URLSearchParams({ page: String(page), limit: "25", sort });
     if (debouncedSearch) params.set("search", debouncedSearch);
     if (roleFilter) params.set("role", roleFilter);
     if (siteFilter) params.set("site", siteFilter);
     if (groupFilter) params.set("group", groupFilter);
+    return params;
+  }, [page, sort, debouncedSearch, roleFilter, siteFilter, groupFilter]);
+
+  const fetchPeople = useCallback(() => {
+    setLoading(true);
     apiClient
-      .get<PeopleResponse>(`/api/people?${params}`)
+      .get<PeopleResponse>(`/api/people?${filterParams()}`)
       .then((d) => {
         setData(d);
         setLoadError(null);
@@ -92,7 +129,7 @@ export default function PeoplePage() {
       // and the reason a permissions bug can sit unnoticed for weeks.
       .catch((e) => setLoadError(e instanceof Error ? e.message : "Could not load this list"))
       .finally(() => setLoading(false));
-  }, [page, sort, debouncedSearch, roleFilter, siteFilter, groupFilter]);
+  }, [filterParams]);
 
   useEffect(fetchPeople, [fetchPeople]);
 
@@ -134,117 +171,131 @@ export default function PeoplePage() {
     }
   };
 
+  const clearFilters = () => {
+    setSearch("");
+    setRoleFilter("");
+    setSiteFilter("");
+    setGroupFilter("");
+  };
+
   const people = data?.people ?? [];
-  const hasFilters = Boolean(debouncedSearch || roleFilter || siteFilter || groupFilter);
+  const activeFilters = [debouncedSearch, roleFilter, siteFilter, groupFilter].filter(Boolean).length;
+  const hasFilters = activeFilters > 0;
+  // The two roles the server lets through /api/people/export. A caller can read
+  // this screen, so the button would be here for them - and it would answer 403
+  // every time, which teaches people the download is broken rather than that it
+  // is not theirs.
+  const canExport = user?.role === "admin" || user?.role === "accountant";
 
   return (
     <div>
       <PageHeader
+        eyebrow="Donors"
         title="People"
         subtitle={data ? `${number(data.total)} records${hasFilters ? " matching your filters" : ""}` : undefined}
         actions={
           <>
             {importSites.map((s) => (
-              <button
+              <Button
                 key={s.key}
+                variant="secondary"
+                icon="refresh"
                 onClick={() => runImport(s.key, s.label)}
                 disabled={importing !== null}
-                className={buttonSecondary}
+                loading={importing === s.key}
                 title={`Pull donors and donations from ${s.label}. Safe to re-run - it updates rather than duplicates.`}
               >
                 {importing === s.key ? "Importing…" : `Import ${s.label}`}
-              </button>
+              </Button>
             ))}
-            <button onClick={() => setShowModal(true)} className={buttonPrimary}>
-              + Add Person
-            </button>
+            {canExport && (
+              <ExportButton
+                path="/api/people/export"
+                params={filterParams()}
+                filename="people"
+                hint={data ? `${number(data.total)} people match these filters` : undefined}
+              />
+            )}
+            <Button icon="plus" onClick={() => setShowModal(true)}>
+              Add Person
+            </Button>
           </>
         }
       />
 
-      {loadError && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          {loadError}
-        </div>
-      )}
+      {loadError && <Alert tone="danger">{loadError}</Alert>}
 
-      {importMessage && (
-        <div className="mb-4 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-900">
-          {importMessage}
-        </div>
-      )}
+      {importMessage && <Alert tone="warn">{importMessage}</Alert>}
 
-      <div className="flex flex-wrap gap-2 mb-4">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search name, phone or email…"
-          className={`${inputClass} flex-1 min-w-[16rem]`}
-        />
-        <Select value={roleFilter} onChange={(v) => setRoleFilter(v)} className="flex-1 min-w-[9rem]">
-          <option value="">All roles</option>
-          {roleOptions.map((r) => (
-            <option key={r} value={r}>
-              {r[0].toUpperCase() + r.slice(1)}
-            </option>
-          ))}
-        </Select>
-        <Select
-          value={siteFilter}
-          onChange={(v) => setSiteFilter(v)}
-          className="flex-1 min-w-[9rem]"
-          aria-label="Filter by donation site"
-        >
-          <option value="">All sites</option>
-          <option value="hkmv">HKMV site</option>
-          <option value="annadan">Annadan site</option>
-        </Select>
-        <Select
-          value={groupFilter}
-          onChange={(v) => setGroupFilter(v)}
-          className="flex-1 min-w-[9rem]"
-          aria-label="Filter by donation page"
-        >
-          <option value="">Any page</option>
-          <option value="donations">Donations page (incl. nested)</option>
-          <option value="donate">Donate — seva campaigns</option>
-          <option value="other">Other pages</option>
-        </Select>
-        <Select value={sort} onChange={(v) => setSort(v)} className="flex-1 min-w-[9rem]">
-          {sortOptions.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </Select>
-      </div>
+      <Toolbar onClear={clearFilters} activeCount={activeFilters}>
+        <Field label="Search" htmlFor="people-search" className="flex-1 min-w-[16rem]">
+          <SearchInput
+            id="people-search"
+            value={search}
+            onChange={setSearch}
+            placeholder="Name, phone or email…"
+          />
+        </Field>
+        <Field label="Role" className="flex-1 min-w-[9rem]">
+          <Select value={roleFilter} onChange={(v) => setRoleFilter(v)} ariaLabel="Role">
+            <option value="">All roles</option>
+            {roleOptions.map((r) => (
+              <option key={r} value={r}>
+                {r[0].toUpperCase() + r.slice(1)}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Donation site" className="flex-1 min-w-[9rem]">
+          <Select value={siteFilter} onChange={(v) => setSiteFilter(v)} ariaLabel="Donation site">
+            <option value="">All sites</option>
+            <option value="hkmv">HKMV site</option>
+            <option value="annadan">Annadan site</option>
+          </Select>
+        </Field>
+        <Field label="Donation page" className="flex-1 min-w-[9rem]">
+          <Select value={groupFilter} onChange={(v) => setGroupFilter(v)} ariaLabel="Donation page">
+            <option value="">Any page</option>
+            <option value="donations">Donations page (incl. nested)</option>
+            <option value="donate">Donate — seva campaigns</option>
+            <option value="other">Other pages</option>
+          </Select>
+        </Field>
+        <Field label="Sort by" className="flex-1 min-w-[9rem]">
+          <Select value={sort} onChange={(v) => setSort(v)} ariaLabel="Sort by">
+            {sortOptions.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      </Toolbar>
 
       <TableShell>
-        <thead className="bg-slate-50/80">
-          <tr>
-            <Th>Person</Th>
-            <Th>Roles</Th>
-            <Th align="right">Donations</Th>
-            <Th align="right">Total donated</Th>
-            <Th align="right">Last donation</Th>
-            <Th align="right"> </Th>
-          </tr>
-        </thead>
+        <Thead>
+          <Th>Person</Th>
+          <Th>Roles</Th>
+          <Th align="right">Donations</Th>
+          <Th align="right">Total donated</Th>
+          <Th align="right">Last donation</Th>
+          <Th align="right"> </Th>
+        </Thead>
 
         {loading && !data ? (
           <SkeletonRows rows={8} cols={6} />
         ) : (
-          <tbody className="divide-y divide-slate-100">
+          <Tbody>
             {people.map((p) => (
-              <tr key={p.id} className="hover:bg-slate-50 transition-colors">
+              <tr key={p.id}>
                 <Td>
-                  <Link href={`/people/${p.id}`} className="flex items-center gap-3 group">
+                  <Link href={`/people/${p.id}`} className="group flex items-center gap-3">
                     <Avatar name={p.name} />
                     <span className="min-w-0">
-                      <span className="block font-medium text-slate-900 group-hover:text-[var(--accent)] truncate">
+                      <span className="block truncate font-medium text-ink group-hover:text-brand-700">
                         {p.name}
                       </span>
-                      <span className="block text-xs text-slate-500 tabular-nums">
+                      <span className="block text-xs tabular-nums text-ink-muted">
                         {p.phone}
                         {p.email ? ` · ${p.email}` : ""}
                       </span>
@@ -260,7 +311,7 @@ export default function PeoplePage() {
                         </Badge>
                       ))
                     ) : (
-                      <span className="text-slate-400 text-xs">—</span>
+                      <span className="text-xs text-ink-faint">—</span>
                     )}
                     {p.active_subscriptions > 0 && (
                       <Badge tone="good">
@@ -269,30 +320,31 @@ export default function PeoplePage() {
                     )}
                   </div>
                 </Td>
-                <Td align="right" className="tabular-nums text-slate-700">
-                  {p.donation_count > 0 ? number(p.donation_count) : <span className="text-slate-300">0</span>}
+                <Td align="right" className="tabular-nums">
+                  {p.donation_count > 0 ? number(p.donation_count) : <span className="text-ink-faint">0</span>}
                 </Td>
                 <Td align="right">
                   {p.lifetime_total > 0 ? (
-                    <span className="font-semibold tabular-nums text-slate-900">{currency(p.lifetime_total)}</span>
+                    <span className="font-semibold tabular-nums text-ink">{currency(p.lifetime_total)}</span>
                   ) : (
-                    <span className="text-slate-300">—</span>
+                    <span className="text-ink-faint">—</span>
                   )}
                 </Td>
-                <Td align="right" className="text-xs text-slate-500 whitespace-nowrap">
+                <Td align="right" className="whitespace-nowrap text-xs text-ink-muted">
                   {relativeDate(p.last_donation_at)}
                 </Td>
                 <Td align="right">
                   <Link
                     href={`/people/${p.id}`}
-                    className="text-xs font-medium text-[var(--accent)] hover:underline whitespace-nowrap"
+                    className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-medium text-brand-700 hover:underline"
                   >
-                    View →
+                    View
+                    <Icon name="arrowRight" size={13} />
                   </Link>
                 </Td>
               </tr>
             ))}
-          </tbody>
+          </Tbody>
         )}
 
         {!loading && people.length === 0 && (
@@ -300,6 +352,7 @@ export default function PeoplePage() {
             <tr>
               <td colSpan={6}>
                 <EmptyState
+                  icon="users"
                   title={hasFilters ? "No matches" : "No people yet"}
                   message={
                     hasFilters
@@ -308,16 +361,17 @@ export default function PeoplePage() {
                   }
                   action={
                     !hasFilters && importSites.length ? (
-                      <div className="flex flex-wrap gap-2 justify-center">
+                      <div className="flex flex-wrap justify-center gap-2">
                         {importSites.map((s) => (
-                          <button
+                          <Button
                             key={s.key}
+                            icon="refresh"
                             onClick={() => runImport(s.key, s.label)}
                             disabled={importing !== null}
-                            className={buttonPrimary}
+                            loading={importing === s.key}
                           >
                             {importing === s.key ? "Importing…" : `Import ${s.label}`}
-                          </button>
+                          </Button>
                         ))}
                       </div>
                     ) : undefined
@@ -376,82 +430,89 @@ function AddPersonModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
   };
 
   return (
-    <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <form onSubmit={handleSubmit} className="bg-white rounded-2xl p-6 w-full max-w-lg space-y-4 shadow-xl">
-        <div>
-          <h2 className="text-lg font-semibold text-slate-900">Add Person</h2>
-          <p className="text-sm text-slate-500 mt-0.5">
-            Phone number is the unique key — an existing donor with this number will not be duplicated.
-          </p>
+    <Modal
+      title="Add Person"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          {/* The dialog's footer sits outside the <form>, so the submit button
+              is tied back to it by id. Without that it is a button in no form
+              at all, and Add Person silently does nothing. */}
+          <Button type="submit" form="add-person" loading={loading}>
+            {loading ? "Saving…" : "Add Person"}
+          </Button>
+        </>
+      }
+    >
+      <form id="add-person" onSubmit={handleSubmit} className="space-y-4">
+        <p className="text-sm text-ink-muted">
+          Phone number is the unique key — an existing donor with this number will not be duplicated.
+        </p>
+
+        {error && <Alert tone="danger">{error}</Alert>}
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="Full name" htmlFor="person-name" required className="sm:col-span-2">
+            <Input
+              id="person-name"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              required
+            />
+          </Field>
+          <Field label="Phone number" htmlFor="person-phone" required>
+            <Input
+              id="person-phone"
+              value={form.phone}
+              onChange={(e) => setForm({ ...form, phone: e.target.value })}
+              required
+            />
+          </Field>
+          <Field label="Email" htmlFor="person-email">
+            <Input
+              id="person-email"
+              type="email"
+              value={form.email}
+              onChange={(e) => setForm({ ...form, email: e.target.value })}
+            />
+          </Field>
+          <Field label="PAN" hint="For 80G receipts" htmlFor="person-pan">
+            <Input
+              id="person-pan"
+              value={form.pan}
+              onChange={(e) => setForm({ ...form, pan: e.target.value })}
+            />
+          </Field>
+          <Field label="Address" htmlFor="person-address">
+            <Input
+              id="person-address"
+              value={form.address}
+              onChange={(e) => setForm({ ...form, address: e.target.value })}
+            />
+          </Field>
         </div>
 
-        {error && <div className="bg-red-50 text-red-700 text-sm p-3 rounded-lg border border-red-200">{error}</div>}
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <input
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
-            placeholder="Full name *"
-            required
-            className={`${inputClass} w-full sm:col-span-2`}
-          />
-          <input
-            value={form.phone}
-            onChange={(e) => setForm({ ...form, phone: e.target.value })}
-            placeholder="Phone number *"
-            required
-            className={`${inputClass} w-full`}
-          />
-          <input
-            value={form.email}
-            onChange={(e) => setForm({ ...form, email: e.target.value })}
-            placeholder="Email"
-            type="email"
-            className={`${inputClass} w-full`}
-          />
-          <input
-            value={form.pan}
-            onChange={(e) => setForm({ ...form, pan: e.target.value })}
-            placeholder="PAN (for 80G receipts)"
-            className={`${inputClass} w-full`}
-          />
-          <input
-            value={form.address}
-            onChange={(e) => setForm({ ...form, address: e.target.value })}
-            placeholder="Address"
-            className={`${inputClass} w-full`}
-          />
-        </div>
-
+        {/* Checkboxes rather than a segmented control or pill tabs: a person
+            can hold several of these at once - a folk volunteer who also
+            donates is the common case - and a control that only ever has one
+            choice on would quietly drop the others. */}
         <div>
-          <p className="text-sm font-medium text-slate-700 mb-2">Roles</p>
-          <div className="flex gap-2 flex-wrap">
+          <p className="mb-2 text-xs font-medium text-ink-soft">Roles</p>
+          <div className="flex flex-wrap gap-x-5 gap-y-2">
             {roleOptions.map((role) => (
-              <button
+              <Checkbox
                 key={role}
-                type="button"
-                onClick={() => toggleRole(role)}
-                className={`px-3 py-1.5 rounded-full text-sm transition-colors ${
-                  roles.includes(role)
-                    ? "bg-[var(--accent)] text-white"
-                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                }`}
-              >
-                {role}
-              </button>
+                checked={roles.includes(role)}
+                onChange={() => toggleRole(role)}
+                label={role}
+              />
             ))}
           </div>
         </div>
-
-        <div className="flex gap-3 pt-2">
-          <button type="button" onClick={onClose} className={`${buttonSecondary} flex-1 justify-center`}>
-            Cancel
-          </button>
-          <button type="submit" disabled={loading} className={`${buttonPrimary} flex-1 justify-center`}>
-            {loading ? "Saving…" : "Add Person"}
-          </button>
-        </div>
       </form>
-    </div>
+    </Modal>
   );
 }

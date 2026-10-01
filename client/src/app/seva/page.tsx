@@ -2,6 +2,20 @@
 
 import { useEffect, useState } from "react";
 import { apiClient } from "@/lib/api";
+import { dateTime, number } from "@/lib/format";
+import {
+  Badge,
+  Card,
+  CardHeader,
+  EmptyState,
+  PageHeader,
+  StatusBadge,
+  TableShell,
+  Tbody,
+  Td,
+  Th,
+  Thead,
+} from "@/components/ui";
 
 interface SevaBooking {
   id: string;
@@ -19,56 +33,73 @@ export default function SevaPage() {
 
   useEffect(() => {
     apiClient.get<{ id: string; name: string }[]>("/api/seva/types").then(setTypes).catch(console.error);
+    // This asks for the slots of a seva type literally named "placeholder",
+    // which is not a type anybody created - so the request fails and the list
+    // below is empty whatever is actually booked. Left as it stands because
+    // choosing a real type here is a decision about how the screen should work
+    // rather than a restyle, but it is why there is never anything to show.
     apiClient.get<SevaBooking[]>("/api/seva/types/placeholder/slots").then(setBookings).catch(console.error);
   }, []);
 
   return (
     <div>
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Seva Bookings</h1>
-      </div>
+      <PageHeader
+        eyebrow="Fulfilment"
+        title="Seva bookings"
+        subtitle="The sevas the temple offers, and the slots people have booked."
+      />
 
-      <div className="bg-white rounded-xl shadow p-6 mb-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Seva Types</h2>
-        <div className="flex gap-2 flex-wrap">
-          {types.map((t) => (
-            <span key={t.id} className="px-3 py-1.5 bg-[var(--accent-wash)] text-[var(--accent)] rounded-full text-sm">
-              {t.name}
-            </span>
-          ))}
-          {types.length === 0 && <p className="text-gray-500 text-sm">No seva types defined yet.</p>}
-        </div>
-      </div>
+      <Card className="mb-5">
+        <CardHeader title="Seva types" subtitle="What can be booked." icon="tag" />
+        {types.length === 0 ? (
+          <p className="text-sm text-ink-muted">No seva types defined yet.</p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {types.map((t) => (
+              <Badge key={t.id} tone="brand">
+                {t.name}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </Card>
 
-      <div className="bg-white rounded-xl shadow overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 text-left text-gray-600">
-            <tr>
-              <th className="px-6 py-3 font-medium">Seva Type</th>
-              <th className="px-6 py-3 font-medium">Slot</th>
-              <th className="px-6 py-3 font-medium">Booked</th>
-              <th className="px-6 py-3 font-medium">Capacity</th>
-              <th className="px-6 py-3 font-medium">Status</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
+      {bookings.length === 0 ? (
+        <Card padded={false}>
+          <EmptyState
+            icon="calendar"
+            title="Slot bookings are not built yet"
+            message="This screen can list the seva types above, but nothing here reads real slots: it asks the server for a seva type that does not exist, so no booking ever comes back. The seva routes are still on the server for whoever builds it."
+          />
+        </Card>
+      ) : (
+        <TableShell>
+          <Thead>
+            <Th>Seva type</Th>
+            <Th>Slot</Th>
+            <Th align="right">Booked</Th>
+            <Th align="right">Capacity</Th>
+            <Th>Status</Th>
+          </Thead>
+          <Tbody>
             {bookings.map((b) => (
-              <tr key={b.id} className="hover:bg-gray-50">
-                <td className="px-6 py-3 font-medium text-gray-900">{b.seva_type}</td>
-                <td className="px-6 py-3">{new Date(b.slot_datetime).toLocaleString()}</td>
-                <td className="px-6 py-3">{b.slots_booked}</td>
-                <td className="px-6 py-3">{b.max_slots}</td>
-                <td className="px-6 py-3">
-                  <span className={`px-2 py-0.5 rounded-full text-xs ${b.status === "confirmed" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>
-                    {b.status}
-                  </span>
-                </td>
+              <tr key={b.id}>
+                <Td className="font-medium text-ink">{b.seva_type}</Td>
+                <Td>{dateTime(b.slot_datetime)}</Td>
+                <Td align="right" className="tabular-nums">
+                  {number(b.slots_booked)}
+                </Td>
+                <Td align="right" className="tabular-nums">
+                  {number(b.max_slots)}
+                </Td>
+                <Td>
+                  <StatusBadge status={b.status} />
+                </Td>
               </tr>
             ))}
-          </tbody>
-        </table>
-        {bookings.length === 0 && <div className="p-8 text-center text-gray-500">No bookings yet</div>}
-      </div>
+          </Tbody>
+        </TableShell>
+      )}
     </div>
   );
 }

@@ -24,14 +24,19 @@ import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import {
+  Alert,
   Badge,
+  Button,
   Card,
   CardHeader,
   EmptyState,
+  Field,
+  IconButton,
+  Input,
   PageHeader,
-  buttonPrimary,
+  Skeleton,
+  Textarea,
   buttonSecondary,
-  inputClass,
 } from "@/components/ui";
 
 interface LinkRow {
@@ -131,21 +136,25 @@ export default function MyLinksPage() {
   return (
     <div className="max-w-4xl">
       <PageHeader
+        eyebrow="Calling"
         title="My links"
         subtitle="Set these up before a shift, and they are one tap away on every call"
         actions={
-          <div className="flex flex-wrap gap-2">
+          <>
+            {/* A next/link anchor wearing the button class rather than
+                LinkButton: LinkButton is a plain <a>, which would drop out of
+                the client router. */}
             <Link href="/calling/queue" className={buttonSecondary}>
               Back to calling
             </Link>
-            <button onClick={() => setAdding((v) => !v)} className={buttonPrimary}>
+            <Button icon={adding ? "x" : "plus"} onClick={() => setAdding((v) => !v)}>
               {adding ? "Cancel" : "Add a link"}
-            </button>
-          </div>
+            </Button>
+          </>
         }
       />
 
-      {error && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}
+      {error && <Alert tone="danger">{error}</Alert>}
 
       {adding && (
         <Card className="mb-5">
@@ -171,73 +180,76 @@ export default function MyLinksPage() {
         </div>
 
         {loading ? (
-          <div className="px-5 pb-5 space-y-2">
+          <div className="space-y-2 px-5 pb-5">
             {[0, 1].map((i) => (
-              <div key={i} className="h-14 rounded-lg bg-slate-100 animate-pulse" />
+              <Skeleton key={i} className="h-14" />
             ))}
           </div>
         ) : !mine.length ? (
           <EmptyState
+            icon="link"
             title="No presets of your own yet"
             message="Copy one of the temple's links below and change the wording, or add your own campaign link with its UTM."
           />
         ) : (
-          <ul className="divide-y divide-slate-100 border-t border-[var(--line-soft)]">
+          <ul className="divide-y divide-line-soft border-t border-line-soft">
             {mine.map((l, i) => (
               <li key={l.id} className="px-5 py-3">
                 <div className="flex flex-wrap items-start gap-3">
                   {/* Order matters here: the first preset is the one the picker
                       opens on, so moving one to the top is a real action. */}
-                  <div className="flex flex-col rounded-md border border-[var(--line-soft)] overflow-hidden flex-none">
-                    <button
+                  <div className="flex flex-none flex-col gap-0.5">
+                    <IconButton
+                      name="chevronUp"
+                      label={`Move ${l.label} up`}
+                      size="xs"
+                      variant="secondary"
                       onClick={() => void move(l, -1)}
                       disabled={i === 0}
-                      aria-label="Move up"
-                      className="px-1.5 py-0.5 text-[10px] leading-none text-slate-500 hover:bg-[var(--accent-wash)] disabled:text-slate-200 disabled:hover:bg-transparent"
-                    >
-                      ▲
-                    </button>
-                    <button
+                    />
+                    <IconButton
+                      name="chevronDown"
+                      label={`Move ${l.label} down`}
+                      size="xs"
+                      variant="secondary"
                       onClick={() => void move(l, 1)}
                       disabled={i === mine.length - 1}
-                      aria-label="Move down"
-                      className="px-1.5 py-0.5 text-[10px] leading-none text-slate-500 border-t border-[var(--line-soft)] hover:bg-[var(--accent-wash)] disabled:text-slate-200 disabled:hover:bg-transparent"
-                    >
-                      ▼
-                    </button>
+                    />
                   </div>
 
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium text-slate-900">{l.label}</span>
+                      <span className="font-medium text-ink">{l.label}</span>
                       {i === 0 && <Badge tone="brand">picked by default</Badge>}
                       {l.use_count > 0 && (
-                        <span className="text-xs text-slate-400">
+                        <span className="text-xs text-ink-faint">
                           sent {l.use_count} time{l.use_count === 1 ? "" : "s"}
                         </span>
                       )}
                       {!l.active && <Badge tone="neutral">off</Badge>}
                     </div>
-                    <p className="text-xs text-slate-500 truncate" title={l.url}>
+                    <p className="truncate text-xs text-ink-muted" title={l.url}>
                       {l.url}
                     </p>
                   </div>
 
-                  <div className="flex items-center gap-3 whitespace-nowrap">
-                    <button
+                  <div className="flex items-center gap-1 whitespace-nowrap">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={editing === l.id ? "x" : "edit"}
                       onClick={() => setEditing(editing === l.id ? null : l.id)}
-                      className="text-xs text-[var(--accent)] hover:underline"
                     >
                       {editing === l.id ? "Close" : "Edit"}
-                    </button>
-                    <button onClick={() => void remove(l)} className="text-xs text-red-600 hover:underline">
+                    </Button>
+                    <Button variant="dangerSoft" size="sm" icon="trash" onClick={() => void remove(l)}>
                       Delete
-                    </button>
+                    </Button>
                   </div>
                 </div>
 
                 {editing === l.id && (
-                  <div className="mt-3 rounded-lg bg-slate-50 p-3">
+                  <div className="mt-3 rounded-card bg-sunken p-3">
                     <LinkForm
                       initial={l}
                       onSave={async (body) => {
@@ -262,24 +274,24 @@ export default function MyLinksPage() {
             subtitle="Everyone can send these. Copy one to get your own version with your wording, rather than changing it for the whole team."
           />
         </div>
-        <ul className="divide-y divide-slate-100 border-t border-[var(--line-soft)]">
+        <ul className="divide-y divide-line-soft border-t border-line-soft">
           {shared.map((l) => (
-            <li key={l.id} className="px-5 py-3 flex flex-wrap items-center gap-3">
+            <li key={l.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
               <div className="min-w-0 flex-1">
-                <span className="font-medium text-slate-900">{l.label}</span>
-                <p className="text-xs text-slate-500 truncate" title={l.url}>
+                <span className="font-medium text-ink">{l.label}</span>
+                <p className="truncate text-xs text-ink-muted" title={l.url}>
                   {l.url}
                 </p>
               </div>
-              <button onClick={() => void copyToMine(l)} className={buttonSecondary}>
+              <Button variant="secondary" icon="copy" onClick={() => void copyToMine(l)}>
                 Copy to my links
-              </button>
+              </Button>
             </li>
           ))}
         </ul>
-        <p className="px-5 py-4 text-xs text-slate-500 border-t border-[var(--line-soft)]">
+        <p className="border-t border-line-soft px-5 py-4 text-xs text-ink-muted">
           Shared links are managed in{" "}
-          <Link href="/calling/settings" className="text-[var(--accent)] hover:underline">
+          <Link href="/calling/settings" className="text-brand-700 hover:underline">
             Calling settings
           </Link>{" "}
           — changing one there changes it for every caller{user?.name ? `, not just you, ${user.name.split(" ")[0]}` : ""}.
@@ -322,67 +334,52 @@ function LinkForm({
   return (
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="block">
-          <span className="block text-xs text-slate-500 mb-1">What to call it</span>
-          <input
+        <Field label="What to call it">
+          <Input
             value={label}
             onChange={(e) => setLabel(e.target.value)}
             placeholder="Govardhan Puja 2026"
-            className={`${inputClass} w-full`}
           />
-        </label>
-        <label className="block">
-          <span className="block text-xs text-slate-500 mb-1">Seva name, as a donor would say it</span>
-          <input
+        </Field>
+        <Field label="Seva name, as a donor would say it">
+          <Input
             value={seva}
             onChange={(e) => setSeva(e.target.value)}
             placeholder="Govardhan Puja Seva"
-            className={`${inputClass} w-full`}
           />
-        </label>
+        </Field>
       </div>
 
-      <label className="block">
-        <span className="block text-xs text-slate-500 mb-1">The link, UTM and all</span>
-        <input
+      <Field label="The link, UTM and all">
+        <Input
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           placeholder="https://harekrishnavizag.org/govardhan?utm_source=call&utm_medium=whatsapp&utm_campaign=govardhan-2026"
-          className={`${inputClass} w-full text-xs`}
+          className="text-xs"
         />
-      </label>
+      </Field>
 
-      <label className="block">
-        <span className="block text-xs text-slate-500 mb-1">The message that goes with it</span>
-        <textarea
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          rows={5}
-          className={`${inputClass} w-full text-sm resize-y`}
-        />
-      </label>
+      <Field label="The message that goes with it">
+        <Textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={5} className="resize-y" />
+      </Field>
 
-      <p className="text-[11px] text-slate-400">
-        In the message: <code className="text-slate-500">{"{name}"}</code>{" "}
-        <code className="text-slate-500">{"{seva}"}</code> <code className="text-slate-500">{"{link}"}</code>{" "}
-        <code className="text-slate-500">{"{amount}"}</code>. In the link:{" "}
-        <code className="text-slate-500">{"{lead}"}</code> <code className="text-slate-500">{"{caller}"}</code> — so a
+      <p className="text-xs text-ink-faint">
+        In the message: <code className="text-ink-muted">{"{name}"}</code>{" "}
+        <code className="text-ink-muted">{"{seva}"}</code> <code className="text-ink-muted">{"{link}"}</code>{" "}
+        <code className="text-ink-muted">{"{amount}"}</code>. In the link:{" "}
+        <code className="text-ink-muted">{"{lead}"}</code> <code className="text-ink-muted">{"{caller}"}</code> — so a
         donation that came from a call can be told apart from one that arrived on its own.
       </p>
 
-      {error && <p className="text-xs text-red-700">{error}</p>}
+      {error && <Alert tone="danger">{error}</Alert>}
 
       <div className="flex gap-2">
-        <button
-          onClick={() => void submit()}
-          disabled={busy || !label.trim() || !url.trim()}
-          className={buttonPrimary}
-        >
-          {busy ? "Saving…" : initial ? "Save changes" : "Add it"}
-        </button>
-        <button onClick={onCancel} className={buttonSecondary}>
+        <Button onClick={() => void submit()} disabled={!label.trim() || !url.trim()} loading={busy}>
+          {initial ? "Save changes" : "Add it"}
+        </Button>
+        <Button variant="secondary" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );

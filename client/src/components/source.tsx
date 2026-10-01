@@ -38,17 +38,17 @@ export function SourceCell({
   campaign?: string | null;
 }) {
   return (
-    <div className="flex flex-col gap-1 items-start">
+    <div className="flex flex-col items-start gap-1">
       <SiteBadge site={site} />
       {page ? (
-        <span className="text-xs text-slate-500 font-mono truncate max-w-[12rem]" title={page}>
+        <span className="max-w-[12rem] truncate font-mono text-xs text-ink-muted" title={page}>
           {page}
         </span>
       ) : (
-        <span className="text-xs text-slate-300">no page recorded</span>
+        <span className="text-xs text-ink-faint">no page recorded</span>
       )}
       {campaign && (
-        <span className="text-[11px] text-slate-400 truncate max-w-[12rem]" title={campaign}>
+        <span className="max-w-[12rem] truncate text-2xs text-ink-faint" title={campaign}>
           campaign: {campaign}
         </span>
       )}

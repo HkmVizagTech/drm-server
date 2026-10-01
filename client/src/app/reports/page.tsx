@@ -2,6 +2,19 @@
 
 import { useEffect, useState } from "react";
 import { apiClient } from "@/lib/api";
+import { number } from "@/lib/format";
+import {
+  Card,
+  CardHeader,
+  EmptyState,
+  MoneyCell,
+  PageHeader,
+  TableShell,
+  Tbody,
+  Td,
+  Th,
+  Thead,
+} from "@/components/ui";
 
 interface TopDonor {
   id: string;
@@ -27,42 +40,88 @@ export default function ReportsPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">Reports</h1>
+      <PageHeader
+        eyebrow="Insight"
+        title="Reports"
+        subtitle="Who gives the most, and how the people on the books are recorded."
+      />
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white rounded-xl shadow p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Top Donors</h2>
-          <div className="space-y-3">
-            {topDonors.map((d, i) => (
-              <div key={d.id} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
-                <div className="flex items-center gap-3">
-                  <span className="w-6 h-6 rounded-full bg-[var(--accent-wash)] text-[var(--accent)] flex items-center justify-center text-xs font-bold">
-                    {i + 1}
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+        <Card>
+          <CardHeader
+            title="Top donors"
+            subtitle="Ranked by everything given to date."
+            icon="rupee"
+          />
+          <TableShell>
+            <Thead>
+              <Th className="w-12">#</Th>
+              <Th>Donor</Th>
+              <Th align="right">Given</Th>
+            </Thead>
+            {topDonors.length === 0 ? (
+              <tbody>
+                <tr>
+                  <td colSpan={3}>
+                    <EmptyState
+                      icon="rupee"
+                      title="No donations to rank yet"
+                      message="Once donations are recorded against people, the biggest givers are listed here."
+                    />
+                  </td>
+                </tr>
+              </tbody>
+            ) : (
+              <Tbody>
+                {topDonors.map((d, i) => (
+                  <tr key={d.id}>
+                    <Td>
+                      <span className="grid h-6 w-6 place-items-center rounded-full bg-brand-50 text-2xs font-semibold tabular-nums text-brand-700">
+                        {i + 1}
+                      </span>
+                    </Td>
+                    <Td>
+                      <span className="block font-medium text-ink">{d.name}</span>
+                      <span className="block text-xs text-ink-muted">
+                        {number(d.donation_count)}{" "}
+                        {d.donation_count === 1 ? "donation" : "donations"}
+                      </span>
+                    </Td>
+                    <Td align="right">
+                      <MoneyCell value={d.total_donated} />
+                    </Td>
+                  </tr>
+                ))}
+              </Tbody>
+            )}
+          </TableShell>
+        </Card>
+
+        <Card>
+          <CardHeader
+            title="People by role"
+            subtitle="Everyone on the books, counted by the role they carry."
+            icon="users"
+          />
+          {roles.length === 0 ? (
+            <EmptyState
+              icon="users"
+              title="Nobody on the books yet"
+              message="Roles are set on a person's record — donor, volunteer, devotee — and each one is counted here."
+            />
+          ) : (
+            <ul className="divide-y divide-line-soft">
+              {roles.map((r) => (
+                <li key={r.role} className="flex items-center justify-between gap-4 py-2.5">
+                  <span className="text-sm capitalize text-ink-soft">{r.role}</span>
+                  <span className="text-sm font-semibold tabular-nums text-ink">
+                    {number(r.count)}
                   </span>
-                  <div>
-                    <p className="font-medium text-gray-900">{d.name}</p>
-                    <p className="text-xs text-gray-500">{d.donation_count} donations</p>
-                  </div>
-                </div>
-                <span className="font-semibold">₹{Number(d.total_donated).toLocaleString("en-IN")}</span>
-              </div>
-            ))}
-            {topDonors.length === 0 && <p className="text-gray-500 text-sm">No data yet</p>}
-          </div>
-        </div>
-
-        <div className="bg-white rounded-xl shadow p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">People by Role</h2>
-          <div className="space-y-3">
-            {roles.map((r) => (
-              <div key={r.role} className="flex items-center justify-between">
-                <span className="capitalize text-gray-700">{r.role}</span>
-                <span className="font-semibold">{r.count}</span>
-              </div>
-            ))}
-            {roles.length === 0 && <p className="text-gray-500 text-sm">No data yet</p>}
-          </div>
-        </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
       </div>
     </div>
   );

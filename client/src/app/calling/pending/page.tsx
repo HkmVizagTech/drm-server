@@ -22,19 +22,27 @@ import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency, number, relativeDate, shortDate } from "@/lib/format";
 import {
+  Alert,
   Badge,
-  Card,
+  Button,
   EmptyState,
+  Field,
+  Input,
+  LinkButton,
   PageHeader,
+  SearchInput,
   Select,
+  SkeletonRows,
   StatTile,
   TableShell,
+  Tbody,
   Td,
   Th,
-  buttonPrimary,
-  buttonSecondary,
-  inputClass,
+  Thead,
+  Toolbar,
+  buttonClass,
 } from "@/components/ui";
+import { ExportButton } from "@/components/export-button";
 
 interface Row {
   id: string;
@@ -120,23 +128,35 @@ export default function PendingPaymentsPage() {
     return () => clearTimeout(t);
   }, [search]);
 
+  /**
+   * The filters, described once.
+   *
+   * The list request and the download both read this. Rebuilding the query for
+   * the export is how somebody narrows to last week's failed payments, presses
+   * download, and hands the office a file covering thirty days — and the office
+   * rings from the file, not from the screen.
+   */
+  const filterParams = useCallback(() => {
+    const q = new URLSearchParams({ days, sort });
+    if (site) q.set("sites", site);
+    if (minAmount) q.set("min_amount", minAmount);
+    if (maxAmount) q.set("max_amount", maxAmount);
+    if (status) q.set("status", status);
+    if (debounced.trim()) q.set("search", debounced.trim());
+    return q;
+  }, [days, site, minAmount, maxAmount, status, sort, debounced]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const q = new URLSearchParams({ days, sort });
-      if (site) q.set("sites", site);
-      if (minAmount) q.set("min_amount", minAmount);
-      if (maxAmount) q.set("max_amount", maxAmount);
-      if (status) q.set("status", status);
-      if (debounced.trim()) q.set("search", debounced.trim());
-      setData(await apiClient.get<Answer>(`/api/crm/leads/abandoned?${q}`));
+      setData(await apiClient.get<Answer>(`/api/crm/leads/abandoned?${filterParams()}`));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load the list");
     } finally {
       setLoading(false);
     }
-  }, [days, site, minAmount, maxAmount, status, sort, debounced]);
+  }, [filterParams]);
 
   /**
    * Ask the sites now, and wait.
@@ -222,29 +242,65 @@ export default function PendingPaymentsPage() {
   }
 
   const rows = data?.rows ?? [];
+  // Counted rather than tested as one boolean, because the Toolbar says how
+  // many filters are on as well as offering to clear them. The defaults are
+  // part of the count: a 30-day window sorted by recency is "no filters".
+  const activeFilters = [
+    minAmount,
+    maxAmount,
+    status,
+    search,
+    site,
+    days !== "30" ? days : "",
+    sort !== "recent" ? sort : "",
+  ].filter(Boolean).length;
 
   return (
     <div>
       <PageHeader
+        eyebrow="Calling"
         title="Nearly gave"
         subtitle="Donations started on the websites and never completed — the warmest calls in DRM"
         actions={
-          <button onClick={() => void refreshNow()} disabled={refreshing} className={buttonSecondary}>
-            {refreshing ? "Checking…" : "Check the sites now"}
-          </button>
+          <>
+            <Button
+              variant="secondary"
+              icon="refresh"
+              loading={refreshing}
+              onClick={() => void refreshNow()}
+            >
+              {refreshing ? "Checking…" : "Check the sites now"}
+            </Button>
+            <ExportButton
+              path="/api/crm/leads/abandoned/export"
+              params={filterParams()}
+              filename="nearly-gave"
+              hint={data ? `${number(data.open)} people match these filters` : undefined}
+            />
+          </>
         }
       />
 
       {/* The filters a caller actually sorts by before a shift: the biggest
           first when there is an hour, the freshest first when there is a
           morning, and the repeat triers when neither is working. */}
-      <div className="mb-5 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <label className="text-xs text-slate-500">
-          How far back
+      <Toolbar
+        activeCount={activeFilters}
+        onClear={() => {
+          setMinAmount("");
+          setMaxAmount("");
+          setStatus("");
+          setSearch("");
+          setDays("30");
+          setSite("");
+          setSort("recent");
+        }}
+      >
+        <Field label="How far back" className="w-36">
           <Select
             value={days}
             onChange={setDays}
-            className="mt-1 w-full"
+            ariaLabel="How far back"
             options={[
               { value: "1", label: "Today" },
               { value: "7", label: "Last 7 days" },
@@ -253,39 +309,36 @@ export default function PendingPaymentsPage() {
               { value: "365", label: "Last year" },
             ]}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Site
+        </Field>
+        <Field label="Site" className="w-52">
           <Select
             value={site}
             onChange={setSite}
-            className="mt-1 w-full"
+            ariaLabel="Site"
             options={[
               { value: "", label: "Both sites" },
               { value: "hkmv", label: SITE_LABELS.hkmv },
               { value: "annadan", label: SITE_LABELS.annadan },
             ]}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          What happened
+        </Field>
+        <Field label="What happened" className="w-44">
           <Select
             value={status}
             onChange={setStatus}
-            className="mt-1 w-full"
+            ariaLabel="What happened"
             options={[
               { value: "", label: "Any outcome" },
               { value: "failed", label: "Payment failed" },
               { value: "pending,created", label: "Never completed" },
             ]}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Order
+        </Field>
+        <Field label="Order" className="w-48">
           <Select
             value={sort}
             onChange={setSort}
-            className="mt-1 w-full"
+            ariaLabel="Order"
             options={[
               { value: "recent", label: "Most recent first" },
               { value: "amount", label: "Biggest amount first" },
@@ -293,65 +346,43 @@ export default function PendingPaymentsPage() {
               { value: "oldest", label: "Oldest first" },
             ]}
           />
-        </label>
+        </Field>
 
-        <div className="text-xs text-slate-500">
-          Amount between
-          <div className="mt-1 flex items-center gap-1.5">
-            <input
+        <Field label="Amount between" className="w-56">
+          <div className="flex items-center gap-1.5">
+            <Input
               value={minAmount}
               onChange={(e) => setMinAmount(e.target.value.replace(/\D/g, ""))}
               placeholder="any"
               inputMode="numeric"
-              className={`${inputClass} w-full tabular-nums`}
+              aria-label="Smallest amount"
+              className="tabular-nums"
             />
-            <span className="text-slate-400">to</span>
-            <input
+            <span className="text-xs text-ink-faint">to</span>
+            <Input
               value={maxAmount}
               onChange={(e) => setMaxAmount(e.target.value.replace(/\D/g, ""))}
               placeholder="any"
               inputMode="numeric"
-              className={`${inputClass} w-full tabular-nums`}
+              aria-label="Largest amount"
+              className="tabular-nums"
             />
           </div>
-        </div>
+        </Field>
 
-        <label className="text-xs text-slate-500 lg:col-span-2">
-          Find
-          <input
+        <Field label="Find" htmlFor="pending-search" className="min-w-[16rem] flex-1">
+          <SearchInput
+            id="pending-search"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Name, number or email"
-            className={`${inputClass} mt-1 w-full`}
+            onChange={setSearch}
+            placeholder="Name, number or email…"
           />
-        </label>
+        </Field>
+      </Toolbar>
 
-        {(minAmount || maxAmount || status || search || days !== "30" || site || sort !== "recent") && (
-          <button
-            onClick={() => {
-              setMinAmount("");
-              setMaxAmount("");
-              setStatus("");
-              setSearch("");
-              setDays("30");
-              setSite("");
-              setSort("recent");
-            }}
-            className="self-end rounded-lg px-3 py-2 text-xs text-slate-500 hover:bg-slate-100"
-          >
-            Clear filters
-          </button>
-        )}
-      </div>
+      {error && <Alert tone="danger">{error}</Alert>}
+      {notice && <Alert tone="good">{notice}</Alert>}
 
-      {error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
-      )}
-      {notice && (
-        <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
-          {notice}
-        </div>
-      )}
       {/* A site being unreachable, or never connected, must not look like a
           quiet week. And the page now reads a stored copy, so when that copy
           was last refreshed is part of what the number means. */}
@@ -361,16 +392,16 @@ export default function PendingPaymentsPage() {
           table and still in the totals. */}
       {data?.sites.map((st) =>
         st.error ? (
-          <div
+          <Alert
             key={st.site}
-            className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+            tone="warn"
+            title={`${SITE_LABELS[st.site] ?? st.site} could not be reached.`}
           >
-            <strong className="font-medium">{SITE_LABELS[st.site] ?? st.site} could not be reached.</strong>{" "}
             {st.error}{" "}
             {st.last_synced_at
               ? `What you see from it is the copy taken ${relativeDate(st.last_synced_at)}.`
               : "Nothing from it has ever been fetched, so none of it is listed below."}
-          </div>
+          </Alert>
         ) : null
       )}
 
@@ -378,20 +409,17 @@ export default function PendingPaymentsPage() {
           DRM could not use. Either makes the total a floor. */}
       {data?.sites.map((st) =>
         !st.error && (st.truncated || st.rows_skipped > 0) ? (
-          <div
-            key={`${st.site}-partial`}
-            className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600"
-          >
+          <Alert key={`${st.site}-partial`} tone="info">
             {SITE_LABELS[st.site] ?? st.site}:{" "}
             {st.truncated && "there are more attempts than DRM fetched in one go, so the figures below are a floor. "}
             {st.rows_skipped > 0 &&
               `${number(st.rows_skipped)} row${st.rows_skipped === 1 ? "" : "s"} could not be used — no number to ring, or nothing to identify them by.`}
-          </div>
+          </Alert>
         ) : null
       )}
 
       {data && (
-        <p className="mb-4 text-xs text-slate-500">
+        <p className="mb-4 text-xs text-ink-muted">
           {data.sites
             .map((st) =>
               st.last_synced_at
@@ -432,28 +460,21 @@ export default function PendingPaymentsPage() {
         />
       </div>
 
-      <Card padded={false}>
-        <TableShell>
-          <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
-            <tr>
-              <Th>Who</Th>
-              <Th align="right">Tried to give</Th>
-              <Th>For</Th>
-              <Th>When</Th>
-              <Th>What happened</Th>
-              <Th align="right">&nbsp;</Th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {loading ? (
-              [0, 1, 2, 3].map((i) => (
-                <tr key={i}>
-                  <td colSpan={6} className="px-5 py-3">
-                    <div className="h-6 animate-pulse rounded bg-slate-100" />
-                  </td>
-                </tr>
-              ))
-            ) : !rows.length ? (
+      <TableShell>
+        <Thead>
+          <Th>Who</Th>
+          <Th align="right">Tried to give</Th>
+          <Th>For</Th>
+          <Th>When</Th>
+          <Th>What happened</Th>
+          <Th align="right"> </Th>
+        </Thead>
+
+        {loading ? (
+          <SkeletonRows rows={6} cols={6} />
+        ) : (
+          <Tbody>
+            {!rows.length ? (
               <tr>
                 <td colSpan={6}>
                   <EmptyState
@@ -472,61 +493,63 @@ export default function PendingPaymentsPage() {
               rows.map((r) => {
                 const word = STATUS_WORDS[r.status] ?? { label: r.status, tone: "info" as const };
                 return (
-                  <tr key={r.id} className="hover:bg-slate-50/60">
+                  <tr key={r.id}>
                     <Td>
-                      <div className="font-medium text-slate-900">{r.name || "Name not given"}</div>
-                      <div className="text-xs tabular-nums text-slate-500">{r.phone}</div>
+                      <div className="font-medium text-ink">{r.name || "Name not given"}</div>
+                      <div className="text-xs tabular-nums text-ink-muted">{r.phone}</div>
                     </Td>
-                    <Td align="right" className="tabular-nums font-medium text-slate-900">
-                      {r.amount ? currency(Number(r.amount)) : <span className="text-slate-300">—</span>}
+                    <Td align="right" className="font-medium tabular-nums text-ink">
+                      {r.amount ? currency(Number(r.amount)) : <span className="text-ink-faint">—</span>}
                     </Td>
-                    <Td className="text-sm text-slate-600">
-                      {r.purpose || <span className="text-slate-300">—</span>}
-                      <div className="text-[11px] text-slate-400">{SITE_LABELS[r.source_site] ?? r.source_site}</div>
+                    <Td>
+                      {r.purpose || <span className="text-ink-faint">—</span>}
+                      <div className="text-xs text-ink-faint">{SITE_LABELS[r.source_site] ?? r.source_site}</div>
                     </Td>
-                    <Td className="text-xs text-slate-500">
+                    <Td className="text-xs text-ink-muted">
                       {shortDate(r.attempted_at)}
-                      <div className="text-slate-400">{relativeDate(r.attempted_at)}</div>
+                      <div className="text-ink-faint">{relativeDate(r.attempted_at)}</div>
                     </Td>
                     <Td>
                       <Badge tone={word.tone}>{word.label}</Badge>
                       {r.attempts_in_view > 1 && (
-                        <div className="mt-0.5 text-[11px] text-slate-500">
+                        <div className="mt-0.5 text-xs text-ink-muted">
                           tried {number(r.attempts_in_view)} times
                         </div>
                       )}
                     </Td>
                     <Td align="right">
                       <div className="flex justify-end gap-1.5">
-                        <a
-                          href={`tel:+91${r.phone}`}
-                          className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
-                        >
+                        <LinkButton href={`tel:+91${r.phone}`} variant="primary" size="sm" icon="phone">
                           Call
-                        </a>
-                        <button
+                        </LinkButton>
+                        <Button
+                          variant="ghost"
+                          size="sm"
                           onClick={() => void dismiss(r)}
                           disabled={busy === r.phone}
                           title="Not worth a call — hide them, and keep them hidden after the next refresh"
-                          className="rounded-lg px-2 py-1.5 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50"
                         >
                           Set aside
-                        </button>
+                        </Button>
                         {r.lead_id ? (
+                          // A next/link anchor wearing the button class rather
+                          // than LinkButton: LinkButton is a plain <a>, which
+                          // would drop out of the client router.
                           <Link
                             href={`/leads/${r.lead_id}`}
-                            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
+                            className={buttonClass("secondary", "sm")}
                           >
                             Open lead
                           </Link>
                         ) : (
-                          <button
+                          <Button
+                            variant="secondary"
+                            size="sm"
                             onClick={() => void adopt(r)}
-                            disabled={busy === r.phone}
-                            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                            loading={busy === r.phone}
                           >
-                            {busy === r.phone ? "…" : "Add as lead"}
-                          </button>
+                            Add as lead
+                          </Button>
                         )}
                       </div>
                     </Td>
@@ -534,28 +557,24 @@ export default function PendingPaymentsPage() {
                 );
               })
             )}
-          </tbody>
-        </TableShell>
-
-        {data && !data.complete && (
-          <div className="border-t border-[var(--line-soft)] px-5 py-3">
-            <p className="text-xs text-amber-800">
-              Showing the first {number(rows.length)} of {number(data.open)}. The totals above cover all of them —
-              narrow the filters to work through the rest.
-            </p>
-          </div>
+          </Tbody>
         )}
+      </TableShell>
 
-        <div className="border-t border-[var(--line-soft)] px-5 py-4">
-          <p className="text-xs text-slate-500">
-            Kept in DRM and refreshed from both sites in the background, so this screen opens instantly instead of
-            waiting on two websites every time. Press <strong>Check the sites now</strong> if you have just watched a
-            donation fail. Anyone who has since given — on either site, by any means, including cash — is removed
-            before the list reaches you, because chasing money that has already arrived is worse than not calling at
-            all; that check runs on every load, not on the refresh, so it is never out of date.
-          </p>
-        </div>
-      </Card>
+      {data && !data.complete && (
+        <Alert tone="warn" className="mt-4">
+          Showing the first {number(rows.length)} of {number(data.open)}. The totals above cover all of them — narrow
+          the filters to work through the rest.
+        </Alert>
+      )}
+
+      <p className="mt-4 text-xs text-ink-muted">
+        Kept in DRM and refreshed from both sites in the background, so this screen opens instantly instead of waiting
+        on two websites every time. Press <strong>Check the sites now</strong> if you have just watched a donation
+        fail. Anyone who has since given — on either site, by any means, including cash — is removed before the list
+        reaches you, because chasing money that has already arrived is worse than not calling at all; that check runs
+        on every load, not on the refresh, so it is never out of date.
+      </p>
     </div>
   );
 }

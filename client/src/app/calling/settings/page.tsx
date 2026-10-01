@@ -22,7 +22,33 @@
 import { Fragment, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiClient } from "@/lib/api";
-import { AlertPicker, Badge, buttonPrimary, buttonSecondary, Card, CardHeader, inputClass, PageHeader, Select, TableShell, Td, Th, Toggle, Modal } from "@/components/ui";
+import {
+  Alert,
+  AlertPicker,
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  EmptyState,
+  Field,
+  Icon,
+  IconButton,
+  Input,
+  Modal,
+  PageHeader,
+  SearchInput,
+  Select,
+  Skeleton,
+  SkeletonRows,
+  TableShell,
+  Tabs,
+  Tbody,
+  Td,
+  Textarea,
+  Th,
+  Thead,
+  Toggle,
+} from "@/components/ui";
 import { ALERT_OPTIONS, DEFAULT_ALERTS, cleanAlerts } from "@/lib/reminders";
 import { apiClient as api } from "@/lib/api";
 import { currency, number, relativeDate } from "@/lib/format";
@@ -92,13 +118,13 @@ const SETTING_COPY: Record<string, { label: string; help: string; kind: "number"
  * is set up once and then forgotten.
  */
 const TABS = [
-  { key: "queue", label: "Queue" },
-  { key: "stages", label: "Stages & outcomes" },
-  { key: "reminders", label: "Reminders" },
-  { key: "preachers", label: "Preachers" },
-  { key: "qr", label: "QR codes" },
-  { key: "links", label: "Links" },
-  { key: "storage", label: "Storage" },
+  { key: "queue", label: "Queue", icon: "list" },
+  { key: "stages", label: "Stages & outcomes", icon: "target" },
+  { key: "reminders", label: "Reminders", icon: "bell" },
+  { key: "preachers", label: "Preachers", icon: "users" },
+  { key: "qr", label: "QR codes", icon: "qr" },
+  { key: "links", label: "Links", icon: "link" },
+  { key: "storage", label: "Storage", icon: "box" },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
@@ -106,7 +132,15 @@ type TabKey = (typeof TABS)[number]["key"];
 // useSearchParams needs a Suspense boundary, so the screen is split in two.
 export default function CallingSettingsPage() {
   return (
-    <Suspense fallback={<div className="max-w-4xl"><Card><div className="h-40 animate-pulse rounded bg-slate-100" /></Card></div>}>
+    <Suspense
+      fallback={
+        <div className="max-w-6xl">
+          <Card>
+            <Skeleton className="h-40 w-full" />
+          </Card>
+        </div>
+      }
+    >
       <CallingSettings />
     </Suspense>
   );
@@ -181,63 +215,60 @@ function CallingSettings() {
     // money. Tables inside still scroll on a narrow screen.
     <div className="max-w-6xl">
       <PageHeader
+        eyebrow="Setup"
         title="Calling settings"
         subtitle="How the queue behaves, the words your team uses, and what they can send"
       />
 
-      {error && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}
+      {error && <Alert tone="danger">{error}</Alert>}
 
       {/* One screen at a time. This page had grown to eight stacked cards and
           about four thousand pixels: finding the preacher list meant scrolling
           past every queue setting, and nobody could send somebody a link to
           the part they meant. The tab lives in the URL for exactly that. */}
-      <div className="mb-5 flex flex-wrap gap-1 border-b border-[var(--line-soft)]">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            aria-current={tab === t.key ? "page" : undefined}
-            className={`-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
-              tab === t.key
-                ? "border-[var(--accent)] font-semibold text-[var(--accent-ink)]"
-                : "border-transparent text-slate-500 hover:text-slate-800"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <Tabs
+        className="mb-5"
+        items={TABS.map((t) => ({ key: t.key, label: t.label, icon: t.icon }))}
+        value={tab}
+        onChange={(k) => setTab(k as TabKey)}
+      />
 
       <div className="space-y-6">
         {tab === "queue" && (
           <>
         <Card>
-          <CardHeader title="How the queue behaves" />
+          <CardHeader icon="list" title="How the queue behaves" />
           <div className="space-y-4">
             {Object.entries(SETTING_COPY).map(([key, meta]) => {
               const value = config?.settings[key];
               return (
-                <div key={key} className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-100 pb-4 last:border-0 last:pb-0">
+                <div key={key} className="flex flex-wrap items-start justify-between gap-4 border-b border-line-soft pb-4 last:border-0 last:pb-0">
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-slate-900">{meta.label}</p>
-                    <p className="text-xs text-slate-500 mt-0.5">{meta.help}</p>
+                    <p className="text-sm font-medium text-ink">{meta.label}</p>
+                    <p className="mt-0.5 text-xs text-ink-muted">{meta.help}</p>
                   </div>
                   {meta.kind === "boolean" ? (
-                    <button
+                    // A switch, not a button labelled On/Off: a primary button
+                    // means "this is the action to take", and using one to show
+                    // a state made the setting look like something you press to
+                    // do something rather than something that is already on.
+                    <Toggle
+                      on={!!value}
                       disabled={saving === key}
-                      onClick={() => void saveSetting(key, !value)}
-                      className={value ? buttonPrimary : buttonSecondary}
-                    >
-                      {value ? "On" : "Off"}
-                    </button>
-                  ) : (
-                    <input
-                      type="number"
-                      min={1}
-                      defaultValue={String(value ?? "")}
-                      onBlur={(e) => Number(e.target.value) !== Number(value) && void saveSetting(key, Number(e.target.value))}
-                      className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm tabular-nums"
+                      onChange={(v) => void saveSetting(key, v)}
+                      label={meta.label}
                     />
+                  ) : (
+                    <div className="w-24">
+                      <Input
+                        type="number"
+                        min={1}
+                        aria-label={meta.label}
+                        defaultValue={String(value ?? "")}
+                        onBlur={(e) => Number(e.target.value) !== Number(value) && void saveSetting(key, Number(e.target.value))}
+                        className="tabular-nums"
+                      />
+                    </div>
                   )}
                 </div>
               );
@@ -249,126 +280,158 @@ function CallingSettings() {
         )}
         {tab === "stages" && (
           <>
-        <Card padded={false}>
-          <div className="px-5 pt-5">
-            <CardHeader
-              title="Stages"
-              subtitle="Where a lead can be. Won and lost are what the conversion reports count; open decides whether it stays in the queue."
-            />
-          </div>
+        <div>
+          {/* Header above the table rather than a Card wrapped around it:
+              TableShell already draws a bordered, shadowed surface, and one
+              inside a card showed two edges a pixel apart. */}
+          <CardHeader
+            icon="target"
+            title="Stages"
+            subtitle="Where a lead can be. Won and lost are what the conversion reports count; open decides whether it stays in the queue."
+          />
           <TableShell>
-            <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
+            <Thead>
+              <Th>Stage</Th>
+              <Th align="center">Counts as won</Th>
+              <Th align="center">Counts as lost</Th>
+              <Th align="center">Stays in queue</Th>
+              <Th align="center">In use</Th>
+            </Thead>
+            {!config ? (
+              <SkeletonRows rows={5} cols={5} />
+            ) : (
+              <Tbody>
+                {config.statuses.map((s) => (
+                  <tr key={s.slug}>
+                    <Td>
+                      <Input
+                        defaultValue={s.label}
+                        aria-label={`Name of the ${s.slug} stage`}
+                        onBlur={(e) => e.target.value !== s.label && void saveStatus(s.slug, { label: e.target.value })}
+                      />
+                      <span className="mt-1 block text-2xs text-ink-faint">{s.slug}</span>
+                    </Td>
+                    <Td align="center"><Toggle on={s.is_won} onChange={(v) => void saveStatus(s.slug, { is_won: v })} label={`${s.label} counts as won`} /></Td>
+                    <Td align="center"><Toggle on={s.is_lost} onChange={(v) => void saveStatus(s.slug, { is_lost: v })} label={`${s.label} counts as lost`} /></Td>
+                    <Td align="center"><Toggle on={s.is_open} onChange={(v) => void saveStatus(s.slug, { is_open: v })} label={`${s.label} stays in the queue`} /></Td>
+                    <Td align="center"><Toggle on={s.active} onChange={(v) => void saveStatus(s.slug, { active: v })} label={`${s.label} in use`} /></Td>
+                  </tr>
+                ))}
+              </Tbody>
+            )}
+            {/* The add row rides in the table's own footer so the section stays
+                one surface — it used to sit under the table inside a second
+                bordered card. */}
+            <tfoot>
               <tr>
-                <Th>Stage</Th>
-                <Th align="center">Counts as won</Th>
-                <Th align="center">Counts as lost</Th>
-                <Th align="center">Stays in queue</Th>
-                <Th align="center">In use</Th>
+                <td colSpan={5} className="border-t border-line-soft bg-sunken px-4 py-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="min-w-0 flex-1">
+                      <Input
+                        value={newStage}
+                        aria-label="New stage"
+                        onChange={(e) => setNewStage(e.target.value)}
+                        placeholder="Add a stage, e.g. Will give after Kartik"
+                      />
+                    </div>
+                    <Button
+                      icon="plus"
+                      disabled={!newStage.trim()}
+                      onClick={() => {
+                        const slug = newStage.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 30);
+                        void saveStatus(slug, { label: newStage.trim(), sort_order: 55, is_open: true, active: true });
+                        setNewStage("");
+                      }}
+                    >
+                      Add
+                    </Button>
+                  </div>
+                </td>
               </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {config?.statuses.map((s) => (
-                <tr key={s.slug} className="hover:bg-slate-50/60">
-                  <Td>
-                    <input
-                      defaultValue={s.label}
-                      onBlur={(e) => e.target.value !== s.label && void saveStatus(s.slug, { label: e.target.value })}
-                      className="w-full bg-transparent font-medium text-slate-900 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] rounded px-1 -mx-1"
-                    />
-                    <span className="text-[11px] text-slate-400">{s.slug}</span>
-                  </Td>
-                  <Td align="center"><Toggle on={s.is_won} onChange={(v) => void saveStatus(s.slug, { is_won: v })} /></Td>
-                  <Td align="center"><Toggle on={s.is_lost} onChange={(v) => void saveStatus(s.slug, { is_lost: v })} /></Td>
-                  <Td align="center"><Toggle on={s.is_open} onChange={(v) => void saveStatus(s.slug, { is_open: v })} /></Td>
-                  <Td align="center"><Toggle on={s.active} onChange={(v) => void saveStatus(s.slug, { active: v })} /></Td>
-                </tr>
-              ))}
-            </tbody>
+            </tfoot>
           </TableShell>
-          <div className="px-5 py-4 flex gap-2 border-t border-[var(--line-soft)]">
-            <input
-              value={newStage}
-              onChange={(e) => setNewStage(e.target.value)}
-              placeholder="Add a stage, e.g. Will give after Kartik"
-              className={`${inputClass} w-full`}
-            />
-            <button
-              disabled={!newStage.trim()}
-              onClick={() => {
-                const slug = newStage.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 30);
-                void saveStatus(slug, { label: newStage.trim(), sort_order: 55, is_open: true, active: true });
-                setNewStage("");
-              }}
-              className={buttonPrimary}
-            >
-              Add
-            </button>
-          </div>
-        </Card>
+        </div>
 
         {/* -------------------------------------------------- call outcomes */}
-        <Card padded={false}>
-          <div className="px-5 pt-5">
-            <CardHeader
-              title="Call outcomes"
-              subtitle="What a caller taps after a call. The stage it suggests is what makes one tap enough."
-            />
-          </div>
+        <div>
+          <CardHeader
+            icon="phone"
+            title="Call outcomes"
+            subtitle="What a caller taps after a call. The stage it suggests is what makes one tap enough."
+          />
           <TableShell>
-            <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
-              <tr>
-                <Th>Outcome</Th>
-                <Th align="center">Counts as got through</Th>
-                <Th>Moves the lead to</Th>
-                <Th align="center">Books a callback</Th>
-                <Th align="center">In use</Th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {config?.dispositions.map((d) => (
-                <tr key={d.slug} className="hover:bg-slate-50/60">
-                  <Td>
-                    <input
-                      defaultValue={d.label}
-                      onBlur={(e) => e.target.value !== d.label && void saveDisposition(d.slug, { label: e.target.value })}
-                      className="w-full bg-transparent font-medium text-slate-900 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] rounded px-1 -mx-1"
-                    />
-                  </Td>
-                  <Td align="center">
-                    <Toggle on={d.counts_connected} onChange={(v) => void saveDisposition(d.slug, { counts_connected: v })} />
-                  </Td>
-                  <Td>
-                    <Select
-                      value={d.suggests_status ?? ""}
-                      onChange={(v) => void saveDisposition(d.slug, { suggests_status: v || null })}
-                      className="min-w-[9rem]"
-                    >
-                      <option value="">Leave it alone</option>
-                      {config?.statuses.map((s) => (
-                        <option key={s.slug} value={s.slug}>{s.label}</option>
-                      ))}
-                    </Select>
-                  </Td>
-                  <Td align="center">
-                    <Toggle on={d.wants_follow_up} onChange={(v) => void saveDisposition(d.slug, { wants_follow_up: v })} />
-                  </Td>
-                  <Td align="center"><Toggle on={d.active} onChange={(v) => void saveDisposition(d.slug, { active: v })} /></Td>
-                </tr>
-              ))}
-            </tbody>
+            <Thead>
+              <Th>Outcome</Th>
+              <Th align="center">Counts as got through</Th>
+              <Th>Moves the lead to</Th>
+              <Th align="center">Books a callback</Th>
+              <Th align="center">In use</Th>
+            </Thead>
+            {!config ? (
+              <SkeletonRows rows={5} cols={5} />
+            ) : (
+              <Tbody>
+                {config.dispositions.map((d) => (
+                  <tr key={d.slug}>
+                    <Td>
+                      <Input
+                        defaultValue={d.label}
+                        aria-label={`Name of the ${d.slug} outcome`}
+                        onBlur={(e) => e.target.value !== d.label && void saveDisposition(d.slug, { label: e.target.value })}
+                      />
+                    </Td>
+                    <Td align="center">
+                      <Toggle
+                        on={d.counts_connected}
+                        onChange={(v) => void saveDisposition(d.slug, { counts_connected: v })}
+                        label={`${d.label} counts as got through`}
+                      />
+                    </Td>
+                    <Td>
+                      <Select
+                        value={d.suggests_status ?? ""}
+                        onChange={(v) => void saveDisposition(d.slug, { suggests_status: v || null })}
+                        className="min-w-[9rem]"
+                        ariaLabel={`Stage ${d.label} moves the lead to`}
+                      >
+                        <option value="">Leave it alone</option>
+                        {config.statuses.map((s) => (
+                          <option key={s.slug} value={s.slug}>{s.label}</option>
+                        ))}
+                      </Select>
+                    </Td>
+                    <Td align="center">
+                      <Toggle
+                        on={d.wants_follow_up}
+                        onChange={(v) => void saveDisposition(d.slug, { wants_follow_up: v })}
+                        label={`${d.label} books a callback`}
+                      />
+                    </Td>
+                    <Td align="center">
+                      <Toggle
+                        on={d.active}
+                        onChange={(v) => void saveDisposition(d.slug, { active: v })}
+                        label={`${d.label} in use`}
+                      />
+                    </Td>
+                  </tr>
+                ))}
+              </Tbody>
+            )}
           </TableShell>
-        </Card>
+        </div>
 
           </>
         )}
         {tab === "reminders" && (
           <Card>
             <CardHeader
+              icon="bell"
               title="When reminders reach you"
               subtitle="A reminder is a promise a donor made at a moment they chose. These are the warnings raised before that moment arrives."
             />
 
-            <p className="text-sm text-slate-600">
+            <p className="text-sm text-ink-soft">
               The temple&apos;s default, used whenever a caller does not pick their own. A caller can always change
               it on the call, and on a promise recorded from the follow-ups screen.
             </p>
@@ -385,24 +448,21 @@ function CallingSettings() {
               />
             </div>
 
-            <div className="mt-5 flex flex-wrap items-start justify-between gap-4 border-t border-slate-100 pt-4">
+            <div className="mt-5 flex flex-wrap items-start justify-between gap-4 border-t border-line-soft pt-4">
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-slate-900">Desktop notifications</p>
-                <p className="mt-0.5 text-xs text-slate-500">
+                <p className="text-sm font-medium text-ink">Desktop notifications</p>
+                <p className="mt-0.5 text-xs text-ink-muted">
                   Raises a notification outside the browser when a reminder falls due, so a caller who has DRM in a
                   background tab still hears about it. Each caller&apos;s browser asks their permission the first
                   time.
                 </p>
               </div>
-              <button
+              <Toggle
+                on={!!config?.settings.reminder_desktop_alerts}
                 disabled={saving === "reminder_desktop_alerts"}
-                onClick={() =>
-                  void saveSetting("reminder_desktop_alerts", !config?.settings.reminder_desktop_alerts)
-                }
-                className={config?.settings.reminder_desktop_alerts ? buttonPrimary : buttonSecondary}
-              >
-                {config?.settings.reminder_desktop_alerts ? "On" : "Off"}
-              </button>
+                onChange={(v) => void saveSetting("reminder_desktop_alerts", v)}
+                label="Desktop notifications"
+              />
             </div>
           </Card>
         )}
@@ -414,12 +474,12 @@ function CallingSettings() {
         {tab === "queue" && (
           <>
         <Card>
-          <CardHeader title="Call recording and automatic call logs" />
-          <p className="text-sm text-slate-600">
+          <CardHeader icon="info" title="Call recording and automatic call logs" />
+          <p className="text-sm text-ink-soft">
             Calls are made from callers&apos; own phones, so DRM records what they tell it afterwards — there is
             nothing to switch on here for recording, call duration or automatic connected/unanswered detection.
           </p>
-          <p className="mt-2 text-sm text-slate-600">
+          <p className="mt-2 text-sm text-ink-soft">
             Those become real measurements only with a cloud telephony provider (Exotel, MyOperator, Knowlarity and
             Twilio all work this way): the caller presses call in DRM, the provider dials both numbers, and its
             webhook sends back the duration, whether it connected and a recording link. The call log already has
@@ -500,97 +560,107 @@ function PreachersSection() {
   }
 
   return (
-    <Card padded={false}>
-      <div className="flex flex-wrap items-end justify-between gap-3 px-5 pt-5">
-        <CardHeader
-          title={`Preachers${rows.length ? ` · ${rows.length}` : ""}`}
-          subtitle="The Enrolled By codes from your sheets. Give them real names and every caller sees the name instead of the code."
-        />
-        <div className="flex flex-wrap gap-2">
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search name, code or ID…"
-            className={`${inputClass} w-52`}
-          />
-          <button onClick={() => setAdding(true)} className={buttonPrimary}>
-            Add a preacher
-          </button>
-        </div>
-      </div>
+    <div>
+      <CardHeader
+        icon="users"
+        title={`Preachers${rows.length ? ` · ${rows.length}` : ""}`}
+        subtitle="The Enrolled By codes from your sheets. Give them real names and every caller sees the name instead of the code."
+        action={
+          <div className="flex flex-wrap items-center gap-2">
+            <SearchInput
+              value={q}
+              onChange={setQ}
+              placeholder="Search name, code or ID…"
+              className="w-52"
+            />
+            <Button icon="userPlus" onClick={() => setAdding(true)}>
+              Add a preacher
+            </Button>
+          </div>
+        }
+      />
 
-      {error && <p className="px-5 pb-3 text-sm text-red-700">{error}</p>}
+      {error && <Alert tone="danger">{error}</Alert>}
 
       <TableShell>
-        <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
-          <tr>
-            <Th>Code</Th>
-            <Th>Name</Th>
-            <Th>ID number</Th>
-            <Th align="right">Leads</Th>
-            <Th align="right">Still to call</Th>
-            <Th align="right">In temple accounts</Th>
-            <Th align="right">Raised by calling</Th>
-            <Th align="center">In use</Th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {!rows.length ? (
+        <Thead>
+          <Th>Code</Th>
+          <Th>Name</Th>
+          <Th>ID number</Th>
+          <Th align="right">Leads</Th>
+          <Th align="right">Still to call</Th>
+          <Th align="right">In temple accounts</Th>
+          <Th align="right">Raised by calling</Th>
+          <Th align="center">In use</Th>
+        </Thead>
+        {!rows.length ? (
+          <tbody>
             <tr>
-              <td colSpan={8} className="px-4 py-8 text-center text-sm text-slate-400">
-                {q.trim()
-                  ? `Nothing matches “${q.trim()}”.`
-                  : "None yet — add one, or upload a sheet with an Enrolled By column and they appear on their own."}
+              <td colSpan={8}>
+                <EmptyState
+                  icon="users"
+                  title={q.trim() ? "Nobody matches that" : "No preachers yet"}
+                  message={
+                    q.trim()
+                      ? `Nothing matches “${q.trim()}”.`
+                      : "None yet — add one, or upload a sheet with an Enrolled By column and they appear on their own."
+                  }
+                />
               </td>
             </tr>
-          ) : (
-            rows.map((p) => (
-              <tr key={p.id} className="hover:bg-slate-50/60">
-                <Td className="font-medium text-slate-900 tabular-nums">{p.code}</Td>
+          </tbody>
+        ) : (
+          <Tbody>
+            {rows.map((p) => (
+              <tr key={p.id}>
+                <Td className="font-medium tabular-nums text-ink">{p.code}</Td>
                 <Td>
-                  <input
+                  <Input
                     defaultValue={p.name ?? ""}
                     placeholder="Their name…"
+                    aria-label={`Name for ${p.code}`}
                     onBlur={(e) => e.target.value !== (p.name ?? "") && void save(p.id, { name: e.target.value })}
-                    className="w-full bg-transparent text-slate-800 placeholder:text-slate-300 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] rounded px-1 -mx-1"
                   />
                 </Td>
                 <Td>
                   {/* Typed in, never generated. A number DRM invented would
                       look identical on screen to one the office issued, and
                       afterwards nobody could tell which was which. */}
-                  <input
-                    defaultValue={p.id_number ?? ""}
-                    placeholder="—"
-                    onBlur={(e) =>
-                      e.target.value.trim().toUpperCase() !== (p.id_number ?? "") &&
-                      void save(p.id, { id_number: e.target.value })
-                    }
-                    className="w-24 bg-transparent tabular-nums text-slate-700 placeholder:text-slate-300 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] rounded px-1 -mx-1"
-                  />
+                  <div className="w-28">
+                    <Input
+                      defaultValue={p.id_number ?? ""}
+                      placeholder="—"
+                      aria-label={`ID number for ${p.code}`}
+                      className="tabular-nums"
+                      onBlur={(e) =>
+                        e.target.value.trim().toUpperCase() !== (p.id_number ?? "") &&
+                        void save(p.id, { id_number: e.target.value })
+                      }
+                    />
+                  </div>
                 </Td>
-                <Td align="right" className="tabular-nums text-slate-600">{number(p.leads)}</Td>
-                <Td align="right" className="tabular-nums text-slate-600">{number(p.open_leads)}</Td>
-                <Td align="right" className="tabular-nums text-slate-700">
-                  {Number(p.external_total) ? currency(Number(p.external_total)) : <span className="text-slate-300">—</span>}
+                <Td align="right" className="tabular-nums">{number(p.leads)}</Td>
+                <Td align="right" className="tabular-nums">{number(p.open_leads)}</Td>
+                <Td align="right" className="tabular-nums">
+                  {Number(p.external_total) ? currency(Number(p.external_total)) : <span className="text-ink-faint">—</span>}
                 </Td>
-                <Td align="right" className="tabular-nums font-medium text-slate-900">
-                  {Number(p.raised) ? currency(Number(p.raised)) : <span className="text-slate-300">—</span>}
+                <Td align="right" className="font-medium tabular-nums text-ink">
+                  {Number(p.raised) ? currency(Number(p.raised)) : <span className="text-ink-faint">—</span>}
                 </Td>
-                <Td align="center"><Toggle on={p.active} onChange={(v) => void save(p.id, { active: v })} /></Td>
+                <Td align="center">
+                  <Toggle on={p.active} onChange={(v) => void save(p.id, { active: v })} label={`${p.code} in use`} />
+                </Td>
               </tr>
-            ))
-          )}
-        </tbody>
+            ))}
+          </Tbody>
+        )}
       </TableShell>
 
-      <div className="border-t border-[var(--line-soft)] px-5 py-4">
-        <p className="text-xs text-slate-500">
-          A preacher is somebody the DONOR knows, not somebody who signs in to DRM — which is why this is a separate
-          list from your team. Retiring one keeps every donor they brought in; it only takes the code out of the
-          dropdowns. Name and ID number can be edited straight in the table.
-        </p>
-      </div>
+      <p className="mt-3 text-xs text-ink-muted">
+        A preacher is somebody the DONOR knows, not somebody who signs in to DRM — which is why this is a separate
+        list from your team. Retiring one keeps every donor they brought in; it only takes the code out of the
+        dropdowns. Name and ID number can be edited straight in the table.
+      </p>
 
       {adding && (
         <AddPreacherDialog
@@ -601,7 +671,7 @@ function PreachersSection() {
           }}
         />
       )}
-    </Card>
+    </div>
   );
 }
 
@@ -622,78 +692,83 @@ function AddPreacherDialog({ onClose, onDone }: { onClose: () => void; onDone: (
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <Modal title="Add a preacher" onClose={onClose}>
-      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+    <Modal
+      title="Add a preacher"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            loading={busy}
+            disabled={!code.trim()}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                await api.post("/api/crm/preachers", {
+                  code: code.trim(),
+                  name: name.trim() || undefined,
+                  id_number: idNumber.trim() || undefined,
+                  phone: phone.trim() || undefined,
+                });
+                onDone();
+              } catch (e) {
+                setError(e instanceof Error ? e.message : "Could not save that preacher");
+                setBusy(false);
+              }
+            }}
+          >
+            Add them
+          </Button>
+        </>
+      }
+    >
+      {error && <Alert tone="danger">{error}</Alert>}
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="text-xs text-slate-500">
-          Their name
-          <input
+        <Field label="Their name" htmlFor="preacher-name">
+          <Input
+            id="preacher-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. Jagat Tarini Mataji"
-            className={`${inputClass} mt-1 w-full`}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Short form (code) <span className="text-red-600">*</span>
-          <input
+        </Field>
+        <Field label="Short form (code)" htmlFor="preacher-code" required>
+          <Input
+            id="preacher-code"
             value={code}
             onChange={(e) => setCode(e.target.value.toUpperCase().replace(/\s+/g, ""))}
             placeholder="e.g. JTMD"
-            className={`${inputClass} mt-1 w-full tabular-nums`}
+            className="tabular-nums"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          ID number
-          <input
+        </Field>
+        <Field label="ID number" htmlFor="preacher-id">
+          <Input
+            id="preacher-id"
             value={idNumber}
             onChange={(e) => setIdNumber(e.target.value)}
             placeholder="e.g. 1042 or HKM-118"
-            className={`${inputClass} mt-1 w-full tabular-nums`}
+            className="tabular-nums"
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Phone (optional)
-          <input
+        </Field>
+        <Field label="Phone (optional)" htmlFor="preacher-phone">
+          <Input
+            id="preacher-phone"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
             inputMode="tel"
-            className={`${inputClass} mt-1 w-full tabular-nums`}
+            className="tabular-nums"
           />
-        </label>
+        </Field>
       </div>
 
-      <p className="mt-3 text-xs text-slate-500">
+      <p className="mt-3 text-xs text-ink-muted">
         The code has to match what your sheets put in the <strong>Enrolled By</strong> column — that is how an upload
         recognises them. The ID number is your own register&apos;s; DRM stores it and never makes one up.
       </p>
-
-      <div className="mt-5 flex justify-end gap-2">
-        <button onClick={onClose} className={buttonSecondary}>Cancel</button>
-        <button
-          disabled={busy || !code.trim()}
-          onClick={async () => {
-            setBusy(true);
-            setError(null);
-            try {
-              await api.post("/api/crm/preachers", {
-                code: code.trim(),
-                name: name.trim() || undefined,
-                id_number: idNumber.trim() || undefined,
-                phone: phone.trim() || undefined,
-              });
-              onDone();
-            } catch (e) {
-              setError(e instanceof Error ? e.message : "Could not save that preacher");
-              setBusy(false);
-            }
-          }}
-          className={buttonPrimary}
-        >
-          {busy ? "Saving…" : "Add them"}
-        </button>
-      </div>
     </Modal>
   );
 }
@@ -756,56 +831,59 @@ function LinksSection() {
   }
 
   return (
-    <Card padded={false}>
-      <div className="px-5 pt-5">
-        <CardHeader
-          title="Links callers can send"
-          subtitle="Picked on the calling screen and sent straight into the donor's WhatsApp. Editing one changes it for everybody."
-        />
-      </div>
+    <div>
+      <CardHeader
+        icon="link"
+        title="Links callers can send"
+        subtitle="Picked on the calling screen and sent straight into the donor's WhatsApp. Editing one changes it for everybody."
+      />
 
-      {error && <p className="px-5 pb-3 text-sm text-red-700">{error}</p>}
+      {error && <Alert tone="danger">{error}</Alert>}
 
       <TableShell>
-        <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
-          <tr>
-            <Th className="w-1/3">Name</Th>
-            <Th>Link</Th>
-            <Th align="right">Sent</Th>
-            <Th align="center">Shared</Th>
-            <Th align="center">In use</Th>
-            <Th align="right"><span className="sr-only">Actions</span></Th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {!links.length ? (
+        <Thead>
+          <Th className="w-1/3">Name</Th>
+          <Th>Link</Th>
+          <Th align="right">Sent</Th>
+          <Th align="center">Shared</Th>
+          <Th align="center">In use</Th>
+          <Th align="right"><span className="sr-only">Actions</span></Th>
+        </Thead>
+        {!links.length ? (
+          <tbody>
             <tr>
-              <td colSpan={6} className="px-4 py-8 text-center text-sm text-slate-400">
-                No links saved yet.
+              <td colSpan={6}>
+                <EmptyState
+                  icon="link"
+                  title="No links saved yet"
+                  message="Add the pages your callers should be sending and they appear in every caller's dropdown."
+                />
               </td>
             </tr>
-          ) : (
-            links.map((l) => (
+          </tbody>
+        ) : (
+          <Tbody>
+            {links.map((l) => (
               // A fragment, because a link in edit mode renders two <tr>s and
               // they cannot be wrapped in a <div> inside a <tbody>. The key
               // belongs on the fragment, not on the rows inside it.
               <Fragment key={l.id}>
-                <tr className="hover:bg-slate-50/60">
+                <tr>
                   <Td>
-                    <input
+                    <Input
                       defaultValue={l.label}
+                      aria-label={`Name of the ${l.label} link`}
                       onBlur={(e) => e.target.value !== l.label && void save(l.id, { label: e.target.value })}
-                      className="w-full bg-transparent font-medium text-slate-900 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] rounded px-1 -mx-1"
                     />
-                    {l.seva_name && <span className="text-[11px] text-slate-400">{l.seva_name}</span>}
+                    {l.seva_name && <span className="mt-1 block text-2xs text-ink-faint">{l.seva_name}</span>}
                   </Td>
                   <Td className="max-w-[16rem]">
-                    <span className="block truncate text-xs text-slate-500" title={l.url}>
+                    <span className="block truncate text-xs text-ink-muted" title={l.url}>
                       {l.url}
                     </span>
                   </Td>
-                  <Td align="right" className="tabular-nums text-sm text-slate-600">
-                    {l.use_count || <span className="text-slate-300">0</span>}
+                  <Td align="right" className="text-sm tabular-nums">
+                    {l.use_count || <span className="text-ink-faint">0</span>}
                   </Td>
                   <Td align="center">
                     {l.owner_user_id ? (
@@ -815,60 +893,66 @@ function LinksSection() {
                     )}
                   </Td>
                   <Td align="center">
-                    <Toggle on={l.active} onChange={(v) => void save(l.id, { active: v })} />
+                    <Toggle on={l.active} onChange={(v) => void save(l.id, { active: v })} label={`${l.label} in use`} />
                   </Td>
                   <Td align="right" className="whitespace-nowrap">
-                    <button
-                      onClick={() => setEditing(editing === l.id ? null : l.id)}
-                      className="text-xs text-[var(--accent)] hover:underline"
-                    >
-                      {editing === l.id ? "Close" : "Edit"}
-                    </button>
-                    <button
-                      onClick={() => void remove(l.id, l.label)}
-                      className="ml-3 text-xs text-red-600 hover:underline"
-                    >
-                      Delete
-                    </button>
+                    <div className="flex justify-end gap-1.5">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        icon={editing === l.id ? "chevronUp" : "edit"}
+                        onClick={() => setEditing(editing === l.id ? null : l.id)}
+                      >
+                        {editing === l.id ? "Close" : "Edit"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="dangerSoft"
+                        icon="trash"
+                        onClick={() => void remove(l.id, l.label)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
                   </Td>
                 </tr>
                 {editing === l.id && (
                   <tr>
-                    <td colSpan={6} className="bg-slate-50 px-4 py-3">
-                      <label className="block mb-2">
-                        <span className="block text-xs text-slate-500 mb-1">Link</span>
-                        <input
+                    <td colSpan={6} className="bg-sunken px-4 py-3">
+                      <Field label="Link" className="mb-2">
+                        <Input
                           defaultValue={l.url}
+                          aria-label={`Address of the ${l.label} link`}
                           onBlur={(e) => e.target.value !== l.url && void save(l.id, { url: e.target.value })}
-                          className={`${inputClass} w-full text-xs`}
                         />
-                      </label>
-                      <label className="block">
-                        <span className="block text-xs text-slate-500 mb-1">
-                          Message — {"{name}"} {"{seva}"} {"{link}"} {"{amount}"} are filled in for each donor
-                        </span>
-                        <textarea
+                      </Field>
+                      <Field
+                        label="Message"
+                        hint={`${"{name}"} ${"{seva}"} ${"{link}"} ${"{amount}"} are filled in for each donor`}
+                      >
+                        <Textarea
                           defaultValue={l.message ?? ""}
+                          aria-label={`Message sent with the ${l.label} link`}
                           onBlur={(e) => e.target.value !== (l.message ?? "") && void save(l.id, { message: e.target.value })}
                           rows={4}
-                          className={`${inputClass} w-full text-xs resize-y`}
+                          className="resize-y"
                         />
-                      </label>
+                      </Field>
                     </td>
                   </tr>
                 )}
               </Fragment>
-            ))
-          )}
-        </tbody>
+            ))}
+          </Tbody>
+        )}
       </TableShell>
 
-      <p className="px-5 py-4 text-xs text-slate-500 border-t border-[var(--line-soft)]">
+      <p className="mt-3 text-xs text-ink-muted">
         These go out from the caller&apos;s own WhatsApp, so there is no Meta template to approve and nothing to pay
         per message. DRM opens the chat with the text ready — the caller still presses send, which is why the
         history says &ldquo;opened WhatsApp&rdquo; rather than claiming it was delivered.
       </p>
-    </Card>
+    </div>
   );
 }
 
@@ -943,62 +1027,77 @@ function QrSection() {
   }
 
   return (
-    <Card padded={false}>
-      <div className="flex flex-wrap items-end justify-between gap-3 px-5 pt-5">
-        <CardHeader
-          title={`Razorpay QR codes${rows.length ? ` · ${rows.length}` : ""}`}
-          subtitle="Make them in the Razorpay dashboard, then paste each one's id here and say whose it is."
-        />
-        <button onClick={() => setAdding(true)} className={buttonPrimary}>
-          Add a QR
-        </button>
-      </div>
+    <div>
+      <CardHeader
+        icon="qr"
+        title={`Razorpay QR codes${rows.length ? ` · ${rows.length}` : ""}`}
+        subtitle="Make them in the Razorpay dashboard, then paste each one's id here and say whose it is."
+        action={
+          <Button icon="plus" onClick={() => setAdding(true)}>
+            Add a QR
+          </Button>
+        }
+      />
 
-      {error && <p className="px-5 pb-2 text-sm text-red-700">{error}</p>}
-      {notice && <p className="px-5 pb-2 text-sm text-amber-800">{notice}</p>}
+      {error && <Alert tone="danger">{error}</Alert>}
+      {notice && (
+        <Alert tone="warn" onDismiss={() => setNotice(null)}>
+          {notice}
+        </Alert>
+      )}
 
       <TableShell>
-        <thead className="bg-slate-50/80 border-b border-[var(--line-soft)]">
-          <tr>
-            <Th>Label</Th>
-            <Th>Razorpay id</Th>
-            <Th>Whose</Th>
-            <Th>Receipt from</Th>
-            <Th align="right">Sent</Th>
-            <Th align="right">Paid</Th>
-            <Th align="right">Raised</Th>
-            <Th align="right">Last paid</Th>
-            <Th align="center">In use</Th>
-            <Th align="right">Image</Th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {!rows.length ? (
+        <Thead>
+          <Th>Label</Th>
+          <Th>Razorpay id</Th>
+          <Th>Whose</Th>
+          <Th>Receipt from</Th>
+          <Th align="right">Sent</Th>
+          <Th align="right">Paid</Th>
+          <Th align="right">Raised</Th>
+          <Th align="right">Last paid</Th>
+          <Th align="center">In use</Th>
+          <Th align="right">Image</Th>
+        </Thead>
+        {!rows.length ? (
+          <tbody>
             <tr>
-              <td colSpan={10} className="px-4 py-8 text-center text-sm text-slate-400">
-                None yet. A caller sees no QR option until one is added here.
+              <td colSpan={10}>
+                <EmptyState
+                  icon="qr"
+                  title="No QR codes yet"
+                  message="A caller sees no QR option until one is added here."
+                  action={
+                    <Button icon="plus" onClick={() => setAdding(true)}>
+                      Add a QR
+                    </Button>
+                  }
+                />
               </td>
             </tr>
-          ) : (
-            rows.map((q) => (
-              <tr key={q.id} className={`hover:bg-slate-50/60 ${q.active ? "" : "opacity-60"}`}>
+          </tbody>
+        ) : (
+          <Tbody>
+            {rows.map((q) => (
+              <tr key={q.id} className={q.active ? "" : "opacity-60"}>
                 {/* The label is what a caller picks from mid-call, so it has
                     to be readable here — the column was being squeezed to
                     "Annac" by the dropdowns beside it. */}
                 <Td className="min-w-[11rem]">
-                  <input
+                  <Input
                     defaultValue={q.label}
+                    aria-label={`Label for ${q.qr_id}`}
                     onBlur={(e) => e.target.value.trim() && e.target.value !== q.label && void save(q.id, { label: e.target.value })}
-                    className="w-full bg-transparent font-medium text-slate-900 focus:outline-none focus:ring-1 focus:ring-[var(--accent)] rounded px-1 -mx-1"
                   />
-                  {q.purpose && <p className="text-[11px] text-slate-500">{q.purpose}</p>}
+                  {q.purpose && <p className="mt-1 text-2xs text-ink-muted">{q.purpose}</p>}
                 </Td>
-                <Td className="font-mono text-xs text-slate-500">{q.qr_id}</Td>
+                <Td className="font-mono text-xs text-ink-muted">{q.qr_id}</Td>
                 <Td>
                   <Select
                     value={q.owner_id ?? ""}
                     onChange={(v) => void save(q.id, { owner_id: v || null })}
                     className="min-w-[10rem]"
+                    ariaLabel={`Whose ${q.label} is`}
                     options={[
                       { value: "", label: "The temple's (everyone)" },
                       ...users.map((u) => ({ value: u.id, label: u.name })),
@@ -1013,6 +1112,7 @@ function QrSection() {
                     value={q.receipt_site ?? ""}
                     onChange={(v) => void save(q.id, { receipt_site: v || null })}
                     className="min-w-[9rem]"
+                    ariaLabel={`Which site issues the receipt for ${q.label}`}
                     options={[
                       { value: "", label: "None — no receipt" },
                       { value: "hkmv", label: "harekrishnavizag.org" },
@@ -1020,28 +1120,28 @@ function QrSection() {
                     ]}
                   />
                   {!q.receipt_site && (
-                    <p className="mt-0.5 text-[11px] text-amber-700">Donors get no receipt</p>
+                    <p className="mt-0.5 text-2xs text-warn">Donors get no receipt</p>
                   )}
                 </Td>
-                <Td align="right" className="tabular-nums text-slate-600">{number(q.shares)}</Td>
-                <Td align="right" className="tabular-nums text-slate-700">
-                  {q.matched ? number(q.matched) : <span className="text-slate-300">—</span>}
+                <Td align="right" className="tabular-nums">{number(q.shares)}</Td>
+                <Td align="right" className="tabular-nums">
+                  {q.matched ? number(q.matched) : <span className="text-ink-faint">—</span>}
                 </Td>
                 {/* Every rupee through this QR, not only the part DRM has
                     managed to tie to a donor. These QRs are shared on calls and
                     nowhere else, so all of it was raised by calling - and
                     counting only the attributed part understated each QR by
                     exactly the payments still needing attention. */}
-                <Td align="right" className="tabular-nums font-medium text-slate-900">
-                  {Number(q.raised) ? currency(Number(q.raised)) : <span className="text-slate-300">—</span>}
+                <Td align="right" className="font-medium tabular-nums text-ink">
+                  {Number(q.raised) ? currency(Number(q.raised)) : <span className="text-ink-faint">—</span>}
                   {q.unattributed > 0 && (
-                    <p className="text-[11px] font-normal text-amber-700">
+                    <p className="text-2xs font-normal text-warn">
                       {number(q.unattributed)} not matched
                     </p>
                   )}
                 </Td>
-                <Td align="right" className="text-[11px] text-slate-500">
-                  {q.last_payment_at ? relativeDate(q.last_payment_at) : <span className="text-slate-300">—</span>}
+                <Td align="right" className="text-2xs text-ink-muted">
+                  {q.last_payment_at ? relativeDate(q.last_payment_at) : <span className="text-ink-faint">—</span>}
                 </Td>
                 <Td align="center">
                   <Toggle on={q.active} onChange={(v) => void save(q.id, { active: v })} label={`${q.label} in use`} />
@@ -1050,13 +1150,13 @@ function QrSection() {
                   <QrImageButton qr={q} onDone={load} onError={setError} />
                 </Td>
               </tr>
-            ))
-          )}
-        </tbody>
+            ))}
+          </Tbody>
+        )}
       </TableShell>
 
-      <div className="border-t border-[var(--line-soft)] px-5 py-4">
-        <p className="text-xs text-slate-500">
+      <div className="mt-3">
+        <p className="text-xs text-ink-muted">
           When a caller shares a QR, DRM records who it went to. Razorpay then reports the payment to
           <span className="font-mono"> /api/razorpay/webhook</span>, and DRM matches it back to that lead by the QR,
           the timing and the amount. A payment it cannot place with confidence waits on the unmatched list rather
@@ -1067,7 +1167,7 @@ function QrSection() {
             it was paid into, and qr_code.credited is the only delivery that
             does. Subscribed to payment.captured alone, every QR donation
             arrives attached to nothing. */}
-        <p className="mt-2 text-xs text-slate-500">
+        <p className="mt-2 text-xs text-ink-muted">
           In Razorpay&apos;s webhook settings, tick <span className="font-mono">qr_code.credited</span>. That is the
           only event that tells DRM which QR the money went into — <span className="font-mono">payment.captured</span>{" "}
           on its own does not carry it, and every donation would land unmatched.
@@ -1085,7 +1185,7 @@ function QrSection() {
           }}
         />
       )}
-    </Card>
+    </div>
   );
 }
 
@@ -1123,53 +1223,102 @@ function AddQrDialog({
   }, [file]);
 
   return (
-    <Modal title="Add a Razorpay QR" onClose={onClose}>
-      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+    <Modal
+      title="Add a Razorpay QR"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            loading={busy}
+            disabled={!qrId.trim() || !label.trim()}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                const r = await api.post<{ warning: string | null; qr: { id: string } }>("/api/crm/qrs", {
+                  qr_id: qrId.trim(),
+                  label: label.trim(),
+                  image_url: imageUrl.trim() || undefined,
+                  purpose: purpose.trim() || undefined,
+                  owner_id: owner || undefined,
+                  receipt_site: site || undefined,
+                });
 
-      <p className="mb-4 text-sm text-slate-600">
+                // The picture, second, against the row that now exists. A failure
+                // here is reported as its own thing rather than rolled back: the
+                // QR is saved and usable, and losing the id and the label because
+                // an image would not upload would be the worse outcome.
+                let warning = r.warning ?? null;
+                if (file) {
+                  try {
+                    await api.post(`/api/crm/qrs/${r.qr.id}/image`, {
+                      filename: file.name,
+                      base64: toBase64(await file.arrayBuffer()),
+                    });
+                  } catch (e) {
+                    warning = `${label.trim()} is saved, but the picture did not upload: ${
+                      e instanceof Error ? e.message : "unknown error"
+                    } You can try again with Upload on its row.`;
+                  }
+                }
+                onDone(warning);
+              } catch (e) {
+                setError(e instanceof Error ? e.message : "Could not save that QR");
+                setBusy(false);
+              }
+            }}
+          >
+            Add it
+          </Button>
+        </>
+      }
+    >
+      {error && <Alert tone="danger">{error}</Alert>}
+
+      <p className="mb-4 text-sm text-ink-soft">
         In Razorpay, open the QR you want to use and copy its id. DRM never creates or changes a QR — it only needs
         to recognise payments that come through one.
       </p>
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="text-xs text-slate-500">
-          What the caller will see <span className="text-red-600">*</span>
-          <input
+        <Field label="What the caller will see" htmlFor="qr-label" required>
+          <Input
+            id="qr-label"
             value={label}
             onChange={(e) => setLabel(e.target.value)}
             placeholder="e.g. Annadan — Ravi"
-            className={`${inputClass} mt-1 w-full`}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Razorpay QR id <span className="text-red-600">*</span>
-          <input
+        </Field>
+        <Field label="Razorpay QR id" htmlFor="qr-id" required>
+          <Input
+            id="qr-id"
             value={qrId}
             onChange={(e) => setQrId(e.target.value.trim())}
             placeholder="qr_XXXXXXXXXXXX"
-            className={`${inputClass} mt-1 w-full font-mono`}
+            className="font-mono"
           />
-        </label>
+        </Field>
         {/* The picture. A file first, because that is what the temple
             actually has - the designed QR with the seva name and the deity on
             it, sitting in someone's Downloads folder. Pasting a link is still
             there underneath for the case where the image already lives
             somewhere public. */}
-        <div className="text-xs text-slate-500 sm:col-span-2">
-          The QR picture
-          <div className="mt-1 flex items-center gap-3">
+        <div className="sm:col-span-2">
+          <p className="mb-1 block text-xs font-medium text-ink-soft">The QR picture</p>
+          <div className="flex items-center gap-3">
             {preview ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={preview}
                 alt=""
-                className="h-16 w-16 rounded-lg border border-[var(--line)] object-contain bg-white"
+                className="h-16 w-16 rounded-control border border-line-soft bg-surface object-contain"
               />
             ) : (
-              <div className="grid h-16 w-16 place-items-center rounded-lg border border-dashed border-[var(--line)] text-slate-300">
-                <svg viewBox="0 0 24 24" className="h-6 w-6" fill="currentColor" aria-hidden>
-                  <path d="M3 11h8V3H3v8zm2-6h4v4H5V5zM3 21h8v-8H3v8zm2-6h4v4H5v-4zM13 3v8h8V3h-8zm6 6h-4V5h4v4zM13 13h2v2h-2zM17 13h2v2h-2zM15 15h2v2h-2zM13 17h2v2h-2zM17 17h2v2h-2zM19 15h2v2h-2zM19 19h2v2h-2z" />
-                </svg>
+              <div className="grid h-16 w-16 place-items-center rounded-control border border-dashed border-line-strong text-ink-faint">
+                <Icon name="qr" size={24} />
               </div>
             )}
             <div className="min-w-0">
@@ -1177,7 +1326,7 @@ function AddQrDialog({
                 ref={fileRef}
                 type="file"
                 accept="image/png,image/jpeg,image/webp"
-                className="hidden"
+                className="sr-only"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
                   if (!f) return;
@@ -1189,111 +1338,61 @@ function AddQrDialog({
                   setFile(f);
                 }}
               />
-              <button type="button" onClick={() => fileRef.current?.click()} className={buttonSecondary}>
+              <Button variant="secondary" icon="upload" onClick={() => fileRef.current?.click()}>
                 {file ? "Choose a different picture" : "Choose a picture"}
-              </button>
-              <p className="mt-1 truncate text-[11px] text-slate-400">
+              </Button>
+              <p className="mt-1 truncate text-2xs text-ink-faint">
                 {file ? file.name : "PNG or JPG, under 2 MB — this is what the donor receives on WhatsApp."}
               </p>
             </div>
           </div>
 
           {!file && (
-            <label className="mt-2 block text-xs text-slate-500">
-              Or paste a link to an image that is already online
-              <input
+            <Field label="Or paste a link to an image that is already online" htmlFor="qr-image-url" className="mt-2">
+              <Input
+                id="qr-image-url"
                 value={imageUrl}
                 onChange={(e) => setImageUrl(e.target.value.trim())}
                 placeholder="https://…"
-                className={`${inputClass} mt-1 w-full`}
               />
-            </label>
+            </Field>
           )}
         </div>
-        <label className="text-xs text-slate-500">
-          What it is for
-          <input
+        <Field label="What it is for" htmlFor="qr-purpose">
+          <Input
+            id="qr-purpose"
             value={purpose}
             onChange={(e) => setPurpose(e.target.value)}
             placeholder="e.g. Annadan Seva"
-            className={`${inputClass} mt-1 w-full`}
           />
-        </label>
-        <label className="text-xs text-slate-500">
-          Whose QR is it
+        </Field>
+        <Field label="Whose QR is it">
           <Select
             value={owner}
             onChange={setOwner}
-            className="mt-1 w-full"
+            ariaLabel="Whose QR is it"
             options={[
               { value: "", label: "The temple's (everyone)" },
               ...users.map((u) => ({ value: u.id, label: u.name })),
             ]}
           />
-        </label>
-        <label className="text-xs text-slate-500 sm:col-span-2">
-          Which site issues the 80G receipt
+        </Field>
+        <Field
+          label="Which site issues the 80G receipt"
+          className="sm:col-span-2"
+          hint="When a donor pays through this QR, DRM raises the receipt on that site from its own 80G series, the same way a cash donation is entered there."
+        >
           <Select
             value={site}
             onChange={setSite}
-            className="mt-1 w-full"
+            ariaLabel="Which site issues the 80G receipt"
             options={[
               { value: "hkmv", label: "harekrishnavizag.org" },
               { value: "annadan", label: "annadan" },
               { value: "", label: "None — record it, issue nothing" },
             ]}
           />
-          <span className="mt-0.5 block text-[11px] text-slate-400">
-            When a donor pays through this QR, DRM raises the receipt on that site from its own 80G series, the
-            same way a cash donation is entered there.
-          </span>
-        </label>
-      </div>
-
-      <div className="mt-5 flex justify-end gap-2">
-        <button onClick={onClose} className={buttonSecondary}>Cancel</button>
-        <button
-          disabled={busy || !qrId.trim() || !label.trim()}
-          onClick={async () => {
-            setBusy(true);
-            setError(null);
-            try {
-              const r = await api.post<{ warning: string | null; qr: { id: string } }>("/api/crm/qrs", {
-                qr_id: qrId.trim(),
-                label: label.trim(),
-                image_url: imageUrl.trim() || undefined,
-                purpose: purpose.trim() || undefined,
-                owner_id: owner || undefined,
-                receipt_site: site || undefined,
-              });
-
-              // The picture, second, against the row that now exists. A failure
-              // here is reported as its own thing rather than rolled back: the
-              // QR is saved and usable, and losing the id and the label because
-              // an image would not upload would be the worse outcome.
-              let warning = r.warning ?? null;
-              if (file) {
-                try {
-                  await api.post(`/api/crm/qrs/${r.qr.id}/image`, {
-                    filename: file.name,
-                    base64: toBase64(await file.arrayBuffer()),
-                  });
-                } catch (e) {
-                  warning = `${label.trim()} is saved, but the picture did not upload: ${
-                    e instanceof Error ? e.message : "unknown error"
-                  } You can try again with Upload on its row.`;
-                }
-              }
-              onDone(warning);
-            } catch (e) {
-              setError(e instanceof Error ? e.message : "Could not save that QR");
-              setBusy(false);
-            }
-          }}
-          className={buttonPrimary}
-        >
-          {busy ? "Saving…" : "Add it"}
-        </button>
+        </Field>
       </div>
     </Modal>
   );
@@ -1348,15 +1447,21 @@ function QrImageButton({
         className="sr-only"
         onChange={(e) => e.target.files?.[0] && void upload(e.target.files[0])}
       />
-      <button
+      <Button
+        size="sm"
+        variant="secondary"
+        icon="upload"
+        loading={busy}
         onClick={() => ref.current?.click()}
-        disabled={busy}
-        className="rounded-lg px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-50"
       >
-        {busy ? "…" : qr.image_key ? "Replace" : "Upload"}
-      </button>
+        {qr.image_key ? "Replace" : "Upload"}
+      </Button>
       {qr.image_key && (
-        <button
+        <IconButton
+          name="trash"
+          size="sm"
+          variant="dangerSoft"
+          label={`Remove the picture on ${qr.label}`}
           onClick={async () => {
             try {
               await api.delete(`/api/crm/qrs/${qr.id}/image`);
@@ -1365,10 +1470,7 @@ function QrImageButton({
               onError(e instanceof Error ? e.message : "Could not remove that image");
             }
           }}
-          className="rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-        >
-          Remove
-        </button>
+        />
       )}
     </div>
   );
@@ -1411,6 +1513,7 @@ function StorageSection() {
   return (
     <Card>
       <CardHeader
+        icon="box"
         title="File storage"
         subtitle={
           s.configured
@@ -1423,31 +1526,31 @@ function StorageSection() {
         <>
           <div className="grid gap-4 sm:grid-cols-3">
             <div>
-              <p className="text-2xl font-semibold tabular-nums text-slate-900">
+              <p className="text-2xl font-semibold tabular-nums text-ink">
                 {number(s.sheets_kept)}
-                <span className="text-base font-normal text-slate-400"> / {number(s.sheets_total)}</span>
+                <span className="text-base font-normal text-ink-faint"> / {number(s.sheets_total)}</span>
               </p>
-              <p className="text-xs text-slate-600">uploaded sheets kept as files</p>
+              <p className="text-xs text-ink-soft">uploaded sheets kept as files</p>
             </div>
             <div>
-              <p className="text-2xl font-semibold tabular-nums text-slate-900">{number(s.receipts_cached)}</p>
-              <p className="text-xs text-slate-600">receipts cached · {mb(s.receipt_bytes)}</p>
+              <p className="text-2xl font-semibold tabular-nums text-ink">{number(s.receipts_cached)}</p>
+              <p className="text-xs text-ink-soft">receipts cached · {mb(s.receipt_bytes)}</p>
             </div>
             <div>
-              <p className="text-2xl font-semibold tabular-nums text-slate-900">{number(s.qr_images)}</p>
-              <p className="text-xs text-slate-600">branded QR images</p>
+              <p className="text-2xl font-semibold tabular-nums text-ink">{number(s.qr_images)}</p>
+              <p className="text-xs text-ink-soft">branded QR images</p>
             </div>
           </div>
 
           {!s.public_urls && (
-            <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <Alert tone="warn" className="mt-3">
               The bucket has no public address set, so branded QR images cannot be uploaded — a donor&apos;s phone
               fetches that image straight from WhatsApp and could not load a private one. Set{" "}
               <span className="font-mono">R2_PUBLIC_BASE_URL</span> to enable it. Everything else works as it is.
-            </p>
+            </Alert>
           )}
 
-          <p className="mt-3 text-xs text-slate-500">
+          <p className="mt-3 text-xs text-ink-muted">
             A cached receipt can never go out of date: its stored name contains a fingerprint of what the receipt
             prints — its number, the amount, the donor&apos;s name and address. Correct any of those and the
             fingerprint changes, so DRM looks for a different file, doesn&apos;t find one, and fetches a fresh
@@ -1455,7 +1558,7 @@ function StorageSection() {
           </p>
         </>
       ) : (
-        <div className="text-sm text-slate-600">
+        <div className="text-sm text-ink-soft">
           <p>Without a bucket, three things are not happening:</p>
           <p className="mt-2">
             The original workbook the office sends is not kept — every row is still stored and searchable, but
@@ -1463,7 +1566,7 @@ function StorageSection() {
             rather than a branded image. And every receipt reprint calls the donation site afresh instead of
             being served from a copy.
           </p>
-          <p className="mt-2 text-xs text-slate-500">
+          <p className="mt-2 text-xs text-ink-muted">
             To turn it on, set <span className="font-mono">R2_ACCOUNT_ID</span>,{" "}
             <span className="font-mono">R2_ACCESS_KEY_ID</span>,{" "}
             <span className="font-mono">R2_SECRET_ACCESS_KEY</span> and{" "}

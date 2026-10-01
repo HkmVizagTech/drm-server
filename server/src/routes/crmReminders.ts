@@ -27,6 +27,13 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
+import { istMidnight, parseDate } from '../bootTimezone';
+import {
+  describeFilters,
+  sendExport,
+  EXPORT_ROW_CAP,
+  type ExportFormat,
+} from '../utils/export';
 
 const router = Router();
 router.use(authenticate);
@@ -36,11 +43,8 @@ const str = (v: unknown, max = 255): string | null => {
   return s ? s.slice(0, max) : null;
 };
 
-const asDate = (v: unknown): string | null => {
-  if (!v) return null;
-  const d = new Date(String(v));
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
-};
+// Bare dates resolve to midnight in India rather than UTC - see parseDate.
+const asDate = parseDate;
 
 // Minutes-before values, cleaned up. Sorted descending and de-duplicated so the
 // day-before alert always precedes the hour-before one, and a caller who types
@@ -85,9 +89,16 @@ const JOINS = `
  * it means there is no background job whose failure would leave the board
  * quietly lying about what is outstanding.
  */
-router.get('/reminders', async (req, res) => {
-  const scope = String(req.query.scope ?? 'open');
-  const mine = req.query.mine === 'true';
+// The WHERE for the board, built once and shared with the export below. A file
+// that quietly included a donor who has asked not to be called, because the
+// export grew its own copy of these conditions and missed one, is exactly the
+// kind of drift that makes a do-not-call flag worthless.
+function buildReminderFilters(
+  q: Record<string, unknown>,
+  userId?: string
+): { where: string; values: unknown[] } {
+  const scope = String(q.scope ?? 'open');
+  const mine = q.mine === 'true';
 
   const conditions: string[] = [];
   const values: unknown[] = [];
@@ -108,25 +119,35 @@ router.get('/reminders', async (req, res) => {
     // missed while sitting in plain sight on a board everybody filtered past.
     // Same rule the calling queue uses: mine, or going spare.
     conditions.push(`(COALESCE(r.assigned_to, l.assigned_to) = $${i} OR COALESCE(r.assigned_to, l.assigned_to) IS NULL)`);
-    values.push(req.user?.userId ?? null);
+    values.push(userId ?? null);
     i++;
   }
-  if (req.query.lead_id) {
+  if (q.lead_id) {
     conditions.push(`r.lead_id = $${i++}`);
-    values.push(req.query.lead_id);
+    values.push(q.lead_id);
   }
+
+  return { where: `WHERE ${conditions.join(' AND ')}`, values };
+}
+
+router.get('/reminders', async (req, res) => {
+  const f = buildReminderFilters(req.query as Record<string, unknown>, req.user?.userId);
 
   try {
     const rows = await pool.query(
       `SELECT ${SELECT} ${JOINS}
-       ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+       ${f.where}
        ORDER BY r.due_at ASC LIMIT 500`,
-      values
+      f.values
     );
 
     const now = Date.now();
-    const startOfTomorrow = new Date();
-    startOfTomorrow.setHours(24, 0, 0, 0);
+    // "Tomorrow" starts at midnight in India, not wherever the server happens
+    // to think midnight is. setHours(24,0,0,0) was the old form, and with the
+    // process on UTC it put the today/tomorrow line at 05:30 IST - so a
+    // reminder due at 3am tomorrow was listed under today, and anything a
+    // caller set for early morning appeared in the wrong section of the board.
+    const startOfTomorrow = istMidnight(1);
     const endOfTomorrow = new Date(startOfTomorrow.getTime() + 86_400_000);
     const endOfWeek = new Date(startOfTomorrow.getTime() + 7 * 86_400_000);
 
@@ -166,6 +187,70 @@ router.get('/reminders', async (req, res) => {
     res.status(500).json({ error: 'Could not load reminders' });
   }
 });
+
+/**
+ * The reminder board, as a file.
+ *
+ * Caller-reachable, like the board, and built from the same
+ * buildReminderFilters - so "mine" means the same set in the file as on the
+ * screen, do-not-call donors are absent from both, and neither can start
+ * including somebody the other leaves out.
+ *
+ * The board stops at 500 because it is read in buckets on a phone. A file is
+ * read by sorting, so it runs to the shared row cap instead and says on its
+ * first line when even that was not enough.
+ */
+async function exportRemindersFile(
+  req: import('express').Request,
+  res: import('express').Response,
+  format: ExportFormat
+) {
+  try {
+    const f = buildReminderFilters(req.query as Record<string, unknown>, req.user?.userId);
+    const rows = await pool.query(
+      // created_by is joined here and not in the shared SELECT because only the
+      // file needs it - the board shows who a reminder is FOR, which is already
+      // in assigned_to_name.
+      `SELECT ${SELECT}, cu.name AS created_by_name
+       ${JOINS}
+       LEFT JOIN users cu ON r.created_by = cu.id
+       ${f.where}
+       ORDER BY r.due_at ASC LIMIT ${EXPORT_ROW_CAP + 1}`,
+      f.values
+    );
+    const truncated = rows.rows.length > EXPORT_ROW_CAP;
+
+    await sendExport(res, format, {
+      name: 'reminders',
+      truncated,
+      rows: truncated ? rows.rows.slice(0, EXPORT_ROW_CAP) : rows.rows,
+      filterSummary: describeFilters(req.query as Record<string, unknown>, {
+        scope: 'Showing',
+        mine: 'Mine only',
+        lead_id: 'Lead',
+      }),
+      columns: [
+        { header: 'Due at', value: (r) => r.due_at, kind: 'datetime' },
+        { header: 'Status', value: (r) => r.status },
+        { header: 'Lead name', value: (r) => r.lead_name },
+        { header: 'Lead phone', value: (r) => r.lead_phone, kind: 'phone' },
+        { header: 'Note', value: (r) => r.note },
+        { header: 'Created by', value: (r) => r.created_by_name },
+        { header: 'Created at', value: (r) => r.created_at, kind: 'datetime' },
+        { header: 'Completed at', value: (r) => r.completed_at, kind: 'datetime' },
+      ],
+    });
+  } catch (err) {
+    console.error('crm.exportReminders error:', err);
+    res.status(500).json({ error: 'Could not build that export' });
+  }
+}
+
+// Above the '/reminders/:id' handlers further down. Express matches in order,
+// so registered after them "export.csv" would be read as a reminder id - the
+// same trap that once made /leads/sample.csv answer "Lead not found".
+router.get('/reminders/export.csv', (req, res) => exportRemindersFile(req, res, 'csv'));
+router.get('/reminders/export.xlsx', (req, res) => exportRemindersFile(req, res, 'xlsx'));
 
 /* ------------------------------------------------------------------- alerts */
 
