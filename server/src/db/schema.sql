@@ -1476,3 +1476,79 @@ CREATE TABLE IF NOT EXISTS receipt_cache (
 
 CREATE INDEX IF NOT EXISTS idx_receipt_cache_lookup
   ON receipt_cache(site, external_donation_id, fingerprint);
+
+
+-- ===========================================================================
+-- UNFINISHED DONATIONS, KEPT
+--
+-- Somebody filled in the form on one of the sites, reached the payment screen
+-- and never came back. Both sites can list those on demand, and the first
+-- version of this feature asked them on every page load: twenty HTTP round
+-- trips to two Mongo sites before a caller saw a single row, every time they
+-- opened the screen.
+--
+-- So they are kept here instead. The page reads Postgres and is instant; a
+-- refresh runs in the background when the copy is stale, and by hand whenever
+-- somebody presses the button.
+--
+-- WHAT THIS TABLE IS NOT
+-- It is not a second donations table. Nothing in here is money that arrived -
+-- every row is an attempt that failed or was abandoned, and the moment the
+-- person actually gives, the row stops being a call to make. That is computed
+-- at read time against DRM's own donations rather than stored, because the
+-- donation can arrive on either site, by cash, or through a QR, and a stored
+-- flag would be wrong until the next refresh.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS abandoned_attempts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  -- Which site, and that site's own id for the attempt. Together unique, so a
+  -- refresh updates rather than duplicates - the same attempt is returned by
+  -- the site on every sync until it ages out of their window.
+  source_site VARCHAR(20) NOT NULL,
+  external_id VARCHAR(80) NOT NULL,
+
+  phone VARCHAR(10) NOT NULL,
+  name VARCHAR(255),
+  email VARCHAR(255),
+  amount NUMERIC(12,2),
+  purpose VARCHAR(255),
+  source_page VARCHAR(255),
+
+  -- The site's own word for it: pending or failed on the main site, created on
+  -- annadan (which has no failure handler at all, so everything abandoned sits
+  -- as created there). Stored as given rather than normalised, because the two
+  -- vocabularies genuinely mean different things.
+  status VARCHAR(20),
+
+  attempted_at TIMESTAMPTZ NOT NULL,
+  -- How many times this person tried. Counted per phone at read time, but kept
+  -- here too so a row can say "third attempt" without a second query.
+  attempts INT NOT NULL DEFAULT 1,
+
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  -- Set when somebody decides this one is not worth a call. Survives refreshes,
+  -- which is the whole reason it is a column and not a filter.
+  dismissed_at TIMESTAMPTZ,
+  dismissed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+
+  UNIQUE (source_site, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_abandoned_phone ON abandoned_attempts(phone);
+CREATE INDEX IF NOT EXISTS idx_abandoned_when ON abandoned_attempts(attempted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_abandoned_live
+  ON abandoned_attempts(attempted_at DESC) WHERE dismissed_at IS NULL;
+
+-- When each site was last asked, and how it went. One row per site.
+CREATE TABLE IF NOT EXISTS abandoned_sync_state (
+  source_site VARCHAR(20) PRIMARY KEY,
+  last_synced_at TIMESTAMPTZ,
+  last_error TEXT,
+  rows_seen INT NOT NULL DEFAULT 0,
+  -- Set while a sync is running, so two page loads cannot start two of them.
+  running_since TIMESTAMPTZ
+);

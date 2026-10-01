@@ -33,23 +33,26 @@ import {
   Th,
   buttonPrimary,
   buttonSecondary,
+  inputClass,
 } from "@/components/ui";
 
 interface Row {
-  externalId: string;
+  id: string;
+  external_id: string;
   name: string | null;
   phone: string;
   email: string | null;
-  amount: number | null;
+  amount: string | null;
   purpose: string | null;
-  sourcePage: string | null;
+  source_page: string | null;
   status: string;
-  attemptedAt: string;
-  sourceSite: string;
+  attempted_at: string;
+  source_site: string;
   attempts: number;
   gave_anyway?: boolean;
   lead_id?: string | null;
   lead_status?: string | null;
+  assigned_to_name?: string | null;
 }
 
 interface Answer {
@@ -59,8 +62,8 @@ interface Answer {
   gave_anyway: number;
   already_leads: number;
   value_at_stake: number;
-  cached: boolean;
-  site_errors: { site: string; error: string }[];
+  /** Per site: when it was last asked, what went wrong, whether it is being asked now. */
+  sites: { site: string; last_synced_at: string | null; error: string | null; refreshing: boolean }[];
 }
 
 const SITE_LABELS: Record<string, string> = {
@@ -90,26 +93,60 @@ export default function PendingPaymentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [days, setDays] = useState("30");
   const [site, setSite] = useState("");
+  const [minAmount, setMinAmount] = useState("");
+  const [maxAmount, setMaxAmount] = useState("");
+  const [status, setStatus] = useState("");
+  const [sort, setSort] = useState("recent");
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const load = useCallback(
-    async (fresh = false) => {
-      setLoading(true);
-      try {
-        const q = new URLSearchParams({ days });
-        if (site) q.set("sites", site);
-        if (fresh) q.set("fresh", "true");
-        setData(await apiClient.get<Answer>(`/api/crm/leads/abandoned?${q}`));
-        setError(null);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Could not reach the sites");
-      } finally {
-        setLoading(false);
-      }
-    },
-    [days, site]
-  );
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const q = new URLSearchParams({ days, sort });
+      if (site) q.set("sites", site);
+      if (minAmount) q.set("min_amount", minAmount);
+      if (maxAmount) q.set("max_amount", maxAmount);
+      if (status) q.set("status", status);
+      if (debounced.trim()) q.set("search", debounced.trim());
+      setData(await apiClient.get<Answer>(`/api/crm/leads/abandoned?${q}`));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load the list");
+    } finally {
+      setLoading(false);
+    }
+  }, [days, site, minAmount, maxAmount, status, sort, debounced]);
+
+  /**
+   * Ask the sites now, and wait.
+   *
+   * Ordinary loads read DRM's stored copy and return immediately, refreshing
+   * in the background when it is more than half an hour old. This is the
+   * button for somebody who has just watched a donation fail and wants it on
+   * the screen this minute.
+   */
+  async function refreshNow() {
+    setRefreshing(true);
+    setNotice(null);
+    try {
+      await apiClient.post("/api/crm/leads/abandoned/refresh", { sites: site || undefined });
+      await load();
+      setNotice("Checked both sites just now.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not reach the sites");
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   useEffect(() => {
     void load();
@@ -125,11 +162,11 @@ export default function PendingPaymentsPage() {
           phone: r.phone,
           name: r.name,
           email: r.email,
-          amount: r.amount,
+          amount: r.amount ? Number(r.amount) : null,
           purpose: r.purpose,
-          source_page: r.sourcePage,
-          source_site: r.sourceSite,
-          attempted_at: r.attemptedAt,
+          source_page: r.source_page,
+          source_site: r.source_site,
+          attempted_at: r.attempted_at,
           attempts: r.attempts,
         }
       );
@@ -155,6 +192,18 @@ export default function PendingPaymentsPage() {
     }
   }
 
+  async function dismiss(r: Row) {
+    setBusy(r.phone);
+    try {
+      await apiClient.post(`/api/crm/leads/abandoned/${r.id}/dismiss`, {});
+      setData((d) => (d ? { ...d, rows: d.rows.filter((x) => x.id !== r.id), open: d.open - 1 } : d));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not set that aside");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const rows = data?.rows ?? [];
 
   return (
@@ -163,20 +212,24 @@ export default function PendingPaymentsPage() {
         title="Nearly gave"
         subtitle="Donations started on the websites and never completed — the warmest calls in DRM"
         actions={
-          <button onClick={() => void load(true)} disabled={loading} className={buttonSecondary}>
-            {loading ? "Checking…" : "Check the sites again"}
+          <button onClick={() => void refreshNow()} disabled={refreshing} className={buttonSecondary}>
+            {refreshing ? "Checking…" : "Check the sites now"}
           </button>
         }
       />
 
-      <div className="mb-5 flex flex-wrap items-end gap-2">
-        <label className="min-w-[9rem] text-xs text-slate-500">
+      {/* The filters a caller actually sorts by before a shift: the biggest
+          first when there is an hour, the freshest first when there is a
+          morning, and the repeat triers when neither is working. */}
+      <div className="mb-5 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <label className="text-xs text-slate-500">
           How far back
           <Select
             value={days}
             onChange={setDays}
             className="mt-1 w-full"
             options={[
+              { value: "1", label: "Today" },
               { value: "7", label: "Last 7 days" },
               { value: "30", label: "Last 30 days" },
               { value: "90", label: "Last 90 days" },
@@ -184,7 +237,7 @@ export default function PendingPaymentsPage() {
             ]}
           />
         </label>
-        <label className="min-w-[11rem] text-xs text-slate-500">
+        <label className="text-xs text-slate-500">
           Site
           <Select
             value={site}
@@ -197,6 +250,81 @@ export default function PendingPaymentsPage() {
             ]}
           />
         </label>
+        <label className="text-xs text-slate-500">
+          What happened
+          <Select
+            value={status}
+            onChange={setStatus}
+            className="mt-1 w-full"
+            options={[
+              { value: "", label: "Any outcome" },
+              { value: "failed", label: "Payment failed" },
+              { value: "pending,created", label: "Never completed" },
+            ]}
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          Order
+          <Select
+            value={sort}
+            onChange={setSort}
+            className="mt-1 w-full"
+            options={[
+              { value: "recent", label: "Most recent first" },
+              { value: "amount", label: "Biggest amount first" },
+              { value: "attempts", label: "Most attempts first" },
+              { value: "oldest", label: "Oldest first" },
+            ]}
+          />
+        </label>
+
+        <div className="text-xs text-slate-500">
+          Amount between
+          <div className="mt-1 flex items-center gap-1.5">
+            <input
+              value={minAmount}
+              onChange={(e) => setMinAmount(e.target.value.replace(/\D/g, ""))}
+              placeholder="any"
+              inputMode="numeric"
+              className={`${inputClass} w-full tabular-nums`}
+            />
+            <span className="text-slate-400">to</span>
+            <input
+              value={maxAmount}
+              onChange={(e) => setMaxAmount(e.target.value.replace(/\D/g, ""))}
+              placeholder="any"
+              inputMode="numeric"
+              className={`${inputClass} w-full tabular-nums`}
+            />
+          </div>
+        </div>
+
+        <label className="text-xs text-slate-500 lg:col-span-2">
+          Find
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Name, number or email"
+            className={`${inputClass} mt-1 w-full`}
+          />
+        </label>
+
+        {(minAmount || maxAmount || status || search || days !== "30" || site || sort !== "recent") && (
+          <button
+            onClick={() => {
+              setMinAmount("");
+              setMaxAmount("");
+              setStatus("");
+              setSearch("");
+              setDays("30");
+              setSite("");
+              setSort("recent");
+            }}
+            className="self-end rounded-lg px-3 py-2 text-xs text-slate-500 hover:bg-slate-100"
+          >
+            Clear filters
+          </button>
+        )}
       </div>
 
       {error && (
@@ -207,15 +335,33 @@ export default function PendingPaymentsPage() {
           {notice}
         </div>
       )}
-      {/* A site being unreachable must not look like a quiet week. */}
-      {data?.site_errors.map((e) => (
-        <div
-          key={e.site}
-          className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
-        >
-          {SITE_LABELS[e.site] ?? e.site} could not be reached, so nothing from it is listed here. {e.error}
-        </div>
+      {/* A site being unreachable, or never connected, must not look like a
+          quiet week. And the page now reads a stored copy, so when that copy
+          was last refreshed is part of what the number means. */}
+      {data?.sites.map((st) => (
+        st.error ? (
+          <div
+            key={st.site}
+            className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+          >
+            {SITE_LABELS[st.site] ?? st.site}: {st.error} Nothing from it is listed below.
+          </div>
+        ) : null
       ))}
+
+      {data && (
+        <p className="mb-4 text-xs text-slate-500">
+          {data.sites
+            .filter((st) => !st.error)
+            .map((st) =>
+              st.last_synced_at
+                ? `${SITE_LABELS[st.site] ?? st.site} last checked ${relativeDate(st.last_synced_at)}`
+                : `${SITE_LABELS[st.site] ?? st.site} not checked yet`
+            )
+            .join(" · ")}
+          {data.sites.some((st) => st.refreshing) && " · checking again now"}
+        </p>
+      )}
 
       <div className="mb-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatTile
@@ -282,21 +428,21 @@ export default function PendingPaymentsPage() {
               rows.map((r) => {
                 const word = STATUS_WORDS[r.status] ?? { label: r.status, tone: "info" as const };
                 return (
-                  <tr key={`${r.sourceSite}-${r.externalId}`} className="hover:bg-slate-50/60">
+                  <tr key={r.id} className="hover:bg-slate-50/60">
                     <Td>
                       <div className="font-medium text-slate-900">{r.name || "Name not given"}</div>
                       <div className="text-xs tabular-nums text-slate-500">{r.phone}</div>
                     </Td>
                     <Td align="right" className="tabular-nums font-medium text-slate-900">
-                      {r.amount ? currency(r.amount) : <span className="text-slate-300">—</span>}
+                      {r.amount ? currency(Number(r.amount)) : <span className="text-slate-300">—</span>}
                     </Td>
                     <Td className="text-sm text-slate-600">
                       {r.purpose || <span className="text-slate-300">—</span>}
-                      <div className="text-[11px] text-slate-400">{SITE_LABELS[r.sourceSite] ?? r.sourceSite}</div>
+                      <div className="text-[11px] text-slate-400">{SITE_LABELS[r.source_site] ?? r.source_site}</div>
                     </Td>
                     <Td className="text-xs text-slate-500">
-                      {shortDate(r.attemptedAt)}
-                      <div className="text-slate-400">{relativeDate(r.attemptedAt)}</div>
+                      {shortDate(r.attempted_at)}
+                      <div className="text-slate-400">{relativeDate(r.attempted_at)}</div>
                     </Td>
                     <Td>
                       <Badge tone={word.tone}>{word.label}</Badge>
@@ -312,6 +458,14 @@ export default function PendingPaymentsPage() {
                         >
                           Call
                         </a>
+                        <button
+                          onClick={() => void dismiss(r)}
+                          disabled={busy === r.phone}
+                          title="Not worth a call — hide them, and keep them hidden after the next refresh"
+                          className="rounded-lg px-2 py-1.5 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50"
+                        >
+                          Set aside
+                        </button>
                         {r.lead_id ? (
                           <Link
                             href={`/leads/${r.lead_id}`}
@@ -339,9 +493,11 @@ export default function PendingPaymentsPage() {
 
         <div className="border-t border-[var(--line-soft)] px-5 py-4">
           <p className="text-xs text-slate-500">
-            Read live from both sites, so this is what they hold right now rather than a copy taken at some point in
-            the past. Anyone who has since given — on either site, by any means — is removed before the list reaches
-            you, because chasing money that has already arrived is worse than not calling at all.
+            Kept in DRM and refreshed from both sites in the background, so this screen opens instantly instead of
+            waiting on two websites every time. Press <strong>Check the sites now</strong> if you have just watched a
+            donation fail. Anyone who has since given — on either site, by any means, including cash — is removed
+            before the list reaches you, because chasing money that has already arrived is worse than not calling at
+            all; that check runs on every load, not on the refresh, so it is never out of date.
           </p>
         </div>
       </Card>

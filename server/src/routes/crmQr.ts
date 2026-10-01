@@ -555,9 +555,26 @@ async function markLeadDonated(
   leadId: string,
   amount: number,
   note: string,
-  client?: { query: typeof pool.query }
+  client?: { query: typeof pool.query },
+  creditTo?: string | null
 ): Promise<void> {
   const db = client ?? pool;
+
+  // Credit the caller who actually did it.
+  //
+  // Every per-caller figure in DRM is keyed on who the lead is assigned to.
+  // A QR shared with somebody nobody owns - a walk-in, a number off a slip,
+  // an unassigned row in a sheet - converted into money that then belonged to
+  // no caller at all: it counted towards the temple's total and towards
+  // nobody's work. Only when the lead is going spare, so this can never take
+  // a colleague's lead away from them.
+  if (creditTo) {
+    await db.query(
+      `UPDATE leads SET assigned_to = $2::uuid, assigned_at = NOW()
+        WHERE id = $1 AND assigned_to IS NULL`,
+      [leadId, creditTo]
+    );
+  }
 
   await db.query(
     `UPDATE leads SET
@@ -766,7 +783,13 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
   // donor's own number. A QR payment matched on timing is a strong inference,
   // not an observation, and the reports must not present the two as equal.
   if (best.share.lead_id) {
-    await markLeadDonated(best.share.lead_id, Number(pay.amount), 'Paid by QR, matched automatically');
+    await markLeadDonated(
+      best.share.lead_id,
+      Number(pay.amount),
+      'Paid by QR, matched automatically',
+      undefined,
+      (best.share as ShareRow & { shared_by?: string | null }).shared_by ?? null
+    );
   }
 
   // The donor has paid and is owed a receipt. Not awaited: the webhook must
@@ -1136,10 +1159,18 @@ router.get('/qr/payments', authenticate, async (req, res) => {
       : scope === 'unmatched'
       ? 'p.share_id IS NULL'
       : "p.share_id IS NULL OR p.receipt_status IS NULL OR p.receipt_status IN ('failed','skipped','pending')";
-  // A caller sees the money that came through their own QRs, or through a
-  // QR they shared. Not the temple's whole ledger: `p.raw` carries Razorpay's
-  // entire event, and every other donor's payer name, number and VPA with it.
-  // An admin or accountant sees the lot, because reconciling it is their job.
+  // What a caller may see, and why it is wider than "mine".
+  //
+  // Scoped to their own QR or their own share, a caller could not see the
+  // payment they were waiting for: most temples hand out one shared QR, which
+  // has no owner, and an unmatched payment has no share yet either. So the one
+  // screen built for attributing a payment showed the caller nothing, and they
+  // could not attribute the money they had just raised.
+  //
+  // So: payments through a QR assigned to them, payments against a share they
+  // made, and unmatched payments on the temple's shared QRs - which is exactly
+  // the set that could plausibly be theirs. Somebody else's matched payment
+  // stays hidden, and so does the raw Razorpay event on every row.
   const me = req.user?.role === 'caller' ? req.user?.userId ?? null : null;
 
   try {
@@ -1156,7 +1187,11 @@ router.get('/qr/payments', authenticate, async (req, res) => {
          LEFT JOIN qr_shares s ON p.share_id = s.id
          LEFT JOIN leads l ON s.lead_id = l.id
         WHERE (${where})
-          AND ($1::uuid IS NULL OR q.owner_id = $1::uuid OR s.shared_by = $1::uuid)
+          AND ($1::uuid IS NULL
+               OR q.owner_id = $1::uuid
+               OR s.shared_by = $1::uuid
+               -- Unclaimed money on a QR anybody may use. Theirs to recognise.
+               OR (p.share_id IS NULL AND q.owner_id IS NULL))
         ORDER BY p.received_at DESC LIMIT 200`,
       [me]
     );
@@ -1179,7 +1214,7 @@ router.get('/qr/unmatched', authenticate, async (req, res) => {
          LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
          LEFT JOIN users u ON q.owner_id = u.id
         WHERE p.share_id IS NULL
-          AND ($1::uuid IS NULL OR q.owner_id = $1::uuid)
+          AND ($1::uuid IS NULL OR q.owner_id = $1::uuid OR q.owner_id IS NULL)
         ORDER BY p.received_at DESC LIMIT 200`,
       [me]
     );
@@ -1279,7 +1314,8 @@ router.post('/qr/payments/:id/attach', authenticate, async (req, res) => {
         share.rows[0].lead_id,
         Number(pay.rows[0].amount),
         'Paid by QR, linked by hand',
-        client
+        client,
+        share.rows[0].shared_by ?? null
       );
     }
 

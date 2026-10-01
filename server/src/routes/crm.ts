@@ -566,49 +566,318 @@ router.get('/leads/export.csv', (req, res) => exportLeadsCsv(req, res));
  */
 
 /**
+ * Bring DRM's copy of the sites' unfinished donations up to date.
+ *
+ * WHY THERE IS A COPY AT ALL
+ * The first version asked both sites on every page load - up to twenty HTTP
+ * round trips to two Mongo databases before a caller saw a single row. The
+ * data changes slowly (a donation is only "abandoned" after an hour) and is
+ * read constantly, which is exactly the shape that belongs in a table.
+ *
+ * Upserts on (site, external id), so a sync that returns the same attempt for
+ * the fiftieth day running updates one row rather than making a fifty-first.
+ * Nothing is ever deleted here: an attempt that drops out of the site's window
+ * still happened, and a row somebody dismissed must not come back next week
+ * because the site mentioned it again.
+ *
+ * Only one sync per site runs at a time. Two page loads a second apart would
+ * otherwise each start a full crawl of both sites.
+ */
+async function syncAbandoned(
+  sites: SiteKey[],
+  opts: { days?: number; minMinutes?: number } = {}
+): Promise<{ site: string; seen: number; error: string | null }[]> {
+  const days = Math.min(365, Math.max(1, opts.days ?? 90));
+  const since = new Date(Date.now() - days * 86_400_000).toISOString();
+  const minMinutes = Math.max(15, opts.minMinutes ?? 60);
+  const results: { site: string; seen: number; error: string | null }[] = [];
+
+  for (const site of sites) {
+    if (!isSiteConfigured(site)) {
+      const error = 'Not connected — its URL and internal secret are not set on DRM, so it was not asked.';
+      await pool.query(
+        `INSERT INTO abandoned_sync_state (source_site, last_error, last_synced_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (source_site) DO UPDATE SET last_error = $2, last_synced_at = NOW(), running_since = NULL`,
+        [site, error]
+      );
+      results.push({ site, seen: 0, error });
+      continue;
+    }
+
+    // Claim the sync. If another request claimed it less than five minutes
+    // ago, leave it alone - a crawl that has genuinely hung for longer than
+    // that is better retried than waited on for ever.
+    const claim = await pool.query(
+      `INSERT INTO abandoned_sync_state (source_site, running_since)
+       VALUES ($1, NOW())
+       ON CONFLICT (source_site) DO UPDATE SET running_since = NOW()
+         WHERE abandoned_sync_state.running_since IS NULL
+            OR abandoned_sync_state.running_since < NOW() - INTERVAL '5 minutes'
+       RETURNING source_site`,
+      [site]
+    );
+    if (!claim.rows.length) {
+      results.push({ site, seen: 0, error: null });
+      continue;
+    }
+
+    let seen = 0;
+    let error: string | null = null;
+    try {
+      for (let page = 1; page <= 10; page++) {
+        const result = await fetchAbandonedPage(site, { page, limit: 200, since, minMinutes });
+        for (const d of result.donations) {
+          const phone = normalizePhone(d.mobile);
+          if (!isDialable(phone)) continue;
+          seen++;
+          await pool.query(
+            `INSERT INTO abandoned_attempts
+               (source_site, external_id, phone, name, email, amount, purpose,
+                source_page, status, attempted_at, last_seen_at)
+             VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10::timestamptz, NOW())
+             ON CONFLICT (source_site, external_id) DO UPDATE SET
+               -- The site is authoritative on everything except what DRM has
+               -- decided about the row, so the dismissal is simply not touched.
+               phone        = EXCLUDED.phone,
+               name         = COALESCE(EXCLUDED.name, abandoned_attempts.name),
+               email        = COALESCE(EXCLUDED.email, abandoned_attempts.email),
+               amount       = COALESCE(EXCLUDED.amount, abandoned_attempts.amount),
+               purpose      = COALESCE(EXCLUDED.purpose, abandoned_attempts.purpose),
+               source_page  = COALESCE(EXCLUDED.source_page, abandoned_attempts.source_page),
+               status       = EXCLUDED.status,
+               attempted_at = EXCLUDED.attempted_at,
+               last_seen_at = NOW()`,
+            [
+              site,
+              String(d.externalId ?? ''),
+              phone,
+              d.name ?? null,
+              d.email ?? null,
+              d.amount ?? null,
+              d.purpose ?? null,
+              d.sourcePage ?? null,
+              d.status ?? null,
+              d.attemptedAt ?? new Date().toISOString(),
+            ]
+          );
+        }
+        if (!result.hasMore) break;
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'Unknown error';
+    }
+
+    // How many times each person tried, counted once per sync rather than on
+    // every read.
+    await pool.query(
+      `UPDATE abandoned_attempts a SET attempts = c.n
+         FROM (SELECT phone, COUNT(*)::int AS n FROM abandoned_attempts GROUP BY phone) c
+        WHERE a.phone = c.phone AND a.attempts <> c.n`
+    );
+
+    await pool.query(
+      `UPDATE abandoned_sync_state
+          SET last_synced_at = NOW(), last_error = $2, rows_seen = $3, running_since = NULL
+        WHERE source_site = $1`,
+      [site, error, seen]
+    );
+    results.push({ site, seen, error });
+  }
+
+  return results;
+}
+
+/** How stale the copy may get before a read quietly refreshes it. */
+const ABANDONED_STALE_MINUTES = 30;
+
+/**
  * GET /leads/abandoned - the list a caller works through.
+ *
+ * Reads the stored copy, so it answers immediately. If that copy is older than
+ * half an hour, a refresh is started in the background and the page still gets
+ * the rows it has now - a caller opening the screen should never wait on two
+ * Mongo sites to finish talking.
  *
  * Open to callers, unlike the bulk import below. The whole point is that a
  * caller can see who nearly gave and ring them; making them ask an admin to
  * run a sync first is how a list like this goes stale and stops being used.
  *
- * By default it hides the people who have since given and shows the ones who
- * have not. Both counts come back either way, so the screen can say "and 12
- * of these have since given" rather than silently dropping them.
+ * WHO IS HIDDEN, AND WHY IT IS COMPUTED HERE
+ * Anybody who has since given, on either site, by any means. Neither site can
+ * work that out - a donor who failed on annadan and retried on the main site
+ * looks abandoned to annadan for ever - and a stored flag would be wrong until
+ * the next refresh, so it is a join against DRM's own donations on every read.
+ * Ringing somebody to chase money they have already given is the one thing
+ * this feature must never do.
  */
 router.get('/leads/abandoned', async (req, res) => {
-  const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
-  const minMinutes = Math.max(15, Number(req.query.min_minutes) || 60);
-  const includeSettled = req.query.include_settled === 'true';
   const sites = (String(req.query.sites ?? '').split(',').filter(Boolean) as SiteKey[]);
+  const wanted = sites.length ? sites : (['hkmv', 'annadan'] as SiteKey[]);
 
   try {
-    const { rows, siteErrors, cached } = await loadAbandoned(
-      days,
-      minMinutes,
-      sites.length ? sites : (['hkmv', 'annadan'] as SiteKey[]),
-      req.query.fresh === 'true'
+    const state = await pool.query(
+      `SELECT source_site, last_synced_at, last_error, running_since FROM abandoned_sync_state`
+    );
+    const byState = new Map(state.rows.map((r) => [r.source_site, r]));
+
+    const stale = wanted.filter((site) => {
+      const r = byState.get(site);
+      if (!r || !r.last_synced_at) return true;
+      return Date.now() - new Date(r.last_synced_at).getTime() > ABANDONED_STALE_MINUTES * 60_000;
+    });
+
+    // Never awaited unless the caller asked for fresh data. The page is for
+    // reading, and reading must not block on somebody else's Mongo.
+    if (req.query.fresh === 'true') {
+      await syncAbandoned(wanted);
+      // Re-read, because the state above was captured before that ran. Without
+      // this the one request that definitely has fresh information reports the
+      // state from before it - including saying a site is fine when the sync
+      // just discovered it is not connected.
+      const after = await pool.query(
+        `SELECT source_site, last_synced_at, last_error, running_since FROM abandoned_sync_state`
+      );
+      byState.clear();
+      for (const row of after.rows) byState.set(row.source_site, row);
+    } else if (stale.length) {
+      void syncAbandoned(stale).catch((e) =>
+        console.error('crm.syncAbandoned background error:', (e as Error).message)
+      );
+    }
+
+    /* ------------------------------------------------------------ filters */
+    const conditions: string[] = ['a.dismissed_at IS NULL'];
+    const values: unknown[] = [];
+    let i = 1;
+
+    conditions.push(`a.source_site = ANY($${i++}::text[])`);
+    values.push(wanted);
+
+    // How long ago they tried. Days rather than a date range, because the
+    // question a caller asks is "who nearly gave this week".
+    const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+    conditions.push(`a.attempted_at >= NOW() - ($${i++} || ' days')::interval`);
+    values.push(String(days));
+
+    // Leave them alone until the attempt has had time to complete.
+    conditions.push(`a.attempted_at <= NOW() - INTERVAL '15 minutes'`);
+
+    if (req.query.min_amount) {
+      conditions.push(`a.amount >= $${i++}::numeric`);
+      values.push(Number(req.query.min_amount));
+    }
+    if (req.query.max_amount) {
+      conditions.push(`a.amount <= $${i++}::numeric`);
+      values.push(Number(req.query.max_amount));
+    }
+    if (req.query.status) {
+      conditions.push(`a.status = ANY($${i++}::text[])`);
+      values.push(String(req.query.status).split(',').filter(Boolean));
+    }
+    if (req.query.search) {
+      conditions.push(`(a.name ILIKE $${i} OR a.phone ILIKE $${i} OR a.email ILIKE $${i})`);
+      values.push(`%${String(req.query.search).trim()}%`);
+      i++;
+    }
+
+    // Aliased to the OUTER query, which selects from the CTE as `l`. Using
+    // `a.` here referenced the inner alias and failed with "missing FROM-clause
+    // entry" - a whitelisted ORDER BY is still SQL that has to parse.
+    const SORTS: Record<string, string> = {
+      recent: 'l.attempted_at DESC',
+      oldest: 'l.attempted_at ASC',
+      amount: 'l.amount DESC NULLS LAST',
+      attempts: 'l.attempts DESC, l.attempted_at DESC',
+    };
+    const order = SORTS[String(req.query.sort ?? '')] ?? SORTS.recent;
+
+    // One row per person: somebody who tried four times is one phone call.
+    // The row kept is their most recent attempt, which is the one worth
+    // mentioning when the phone is answered.
+    const rows = await pool.query(
+      `WITH latest AS (
+         SELECT DISTINCT ON (a.phone) a.*
+           FROM abandoned_attempts a
+          WHERE ${conditions.join(' AND ')}
+          ORDER BY a.phone, a.attempted_at DESC
+       )
+       SELECT l.*,
+              -- Did they give anyway? Any donation at or after the attempt,
+              -- from either site, by any means.
+              EXISTS (
+                SELECT 1 FROM people p JOIN donations d ON d.person_id = p.id
+                 WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = l.phone
+                   AND d.created_at >= l.attempted_at
+              ) AS gave_anyway,
+              ld.id AS lead_id,
+              ld.status AS lead_status,
+              u.name AS assigned_to_name
+         FROM latest l
+         LEFT JOIN leads ld ON ld.phone = l.phone
+         LEFT JOIN users u ON ld.assigned_to = u.id
+        ORDER BY ${order}
+        LIMIT 500`,
+      values
     );
 
-    const settled = rows.filter((r) => r.gave_anyway);
-    const open = rows.filter((r) => !r.gave_anyway);
-    const shown = includeSettled ? rows : open;
+    const all = rows.rows;
+    const open = all.filter((r) => !r.gave_anyway);
+    const shown = req.query.include_settled === 'true' ? all : open;
 
     res.json({
-      rows: shown.slice(0, 500),
-      total: rows.length,
+      rows: shown,
+      total: all.length,
       open: open.length,
-      gave_anyway: settled.length,
+      gave_anyway: all.length - open.length,
       already_leads: open.filter((r) => r.lead_id).length,
       // What walked away, over the people still worth ringing. This is the
       // number that decides whether the list is worth a shift.
-      value_at_stake: open.reduce((sum, r) => sum + (r.amount ?? 0), 0),
-      cached,
-      site_errors: siteErrors,
+      value_at_stake: open.reduce((sum, r) => sum + Number(r.amount ?? 0), 0),
+      sites: wanted.map((site) => {
+        const r = byState.get(site);
+        return {
+          site,
+          last_synced_at: r?.last_synced_at ?? null,
+          error: r?.last_error ?? null,
+          refreshing: !!r?.running_since || stale.includes(site),
+        };
+      }),
     });
   } catch (err) {
     console.error('crm.abandoned error:', err);
-    res.status(500).json({ error: 'Could not fetch unfinished donations from the sites' });
+    res.status(500).json({ error: 'Could not load the unfinished donations' });
+  }
+});
+
+/** POST /leads/abandoned/refresh - ask both sites now, and wait for them. */
+router.post('/leads/abandoned/refresh', async (req, res) => {
+  const sites = (String(req.body?.sites ?? '').split(',').filter(Boolean) as SiteKey[]);
+  try {
+    const results = await syncAbandoned(sites.length ? sites : (['hkmv', 'annadan'] as SiteKey[]), {
+      days: Number(req.body?.days) || 90,
+    });
+    res.json({ results });
+  } catch (err) {
+    console.error('crm.refreshAbandoned error:', err);
+    res.status(500).json({ error: 'Could not reach the sites' });
+  }
+});
+
+/** POST /leads/abandoned/:id/dismiss - not worth a call. Survives refreshes. */
+router.post('/leads/abandoned/:id/dismiss', async (req, res) => {
+  try {
+    const r = await pool.query(
+      `UPDATE abandoned_attempts
+          SET dismissed_at = NOW(), dismissed_by = $2::uuid
+        WHERE id = $1 AND dismissed_at IS NULL RETURNING id`,
+      [req.params.id, req.user?.userId ?? null]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'No such attempt' });
+    res.json({ dismissed: true });
+  } catch (err) {
+    console.error('crm.dismissAbandoned error:', err);
+    res.status(500).json({ error: 'Could not set that aside' });
   }
 });
 
@@ -2444,148 +2713,6 @@ router.post('/leads/sync-abandoned', authorize('admin', 'accountant'), async (re
     res.status(500).json({ error: 'Could not fetch unfinished donations from the sites' });
   }
 });
-
-/* ------------------------------------------------- unfinished donations */
-
-interface AbandonedRow {
-  externalId: string;
-  name: string | null;
-  phone: string;
-  email: string | null;
-  amount: number | null;
-  purpose: string | null;
-  sourcePage: string | null;
-  status: string;
-  attemptedAt: string;
-  sourceSite: string;
-  attempts: number;
-  /** Filled in below, from DRM's own records rather than the sites'. */
-  gave_anyway?: boolean;
-  lead_id?: string | null;
-  lead_status?: string | null;
-}
-
-/**
- * Everything both sites know about donations that were started and never
- * finished, with what DRM knows laid over the top.
- *
- * WHY DRM HAS TO BE THE ONE TO JUDGE
- * A site hands over its own failed attempts and will do so for ever - it has
- * no way of knowing the person retried successfully on the OTHER site, or gave
- * by cash a week later. DRM holds the completed donations from both, so it is
- * the only place that can say "this one is settled, leave them alone". Ringing
- * a donor to chase money they have already given is the single worst thing
- * this feature could do.
- *
- * Cached briefly. Each call is up to twenty HTTP round trips to two Mongo
- * sites, and a caller flicking between screens should not set that off again.
- */
-const abandonedCache = new Map<string, { at: number; rows: AbandonedRow[]; siteErrors: { site: string; error: string }[] }>();
-const ABANDONED_TTL = 3 * 60_000;
-
-async function loadAbandoned(
-  days: number,
-  minMinutes: number,
-  sites: SiteKey[],
-  fresh = false
-): Promise<{ rows: AbandonedRow[]; siteErrors: { site: string; error: string }[]; cached: boolean }> {
-  const key = `${days}:${minMinutes}:${sites.join(',')}`;
-  const hit = abandonedCache.get(key);
-  if (!fresh && hit && Date.now() - hit.at < ABANDONED_TTL) {
-    return { rows: hit.rows, siteErrors: hit.siteErrors, cached: true };
-  }
-
-  const since = new Date(Date.now() - days * 86_400_000).toISOString();
-  const found: Record<string, unknown>[] = [];
-  const siteErrors: { site: string; error: string }[] = [];
-
-  for (const site of sites) {
-    // A site with no credentials used to be skipped in silence, so the screen
-    // showed a confident zero that actually meant "DRM never asked". Said out
-    // loud instead - the difference between "nobody abandoned a donation" and
-    // "annadan is not connected" is the whole value of the page.
-    if (!isSiteConfigured(site)) {
-      siteErrors.push({
-        site,
-        error: 'Not connected — its URL and internal secret are not set on DRM, so it was not asked.',
-      });
-      continue;
-    }
-    try {
-      for (let page = 1; page <= 10; page++) {
-        const result = await fetchAbandonedPage(site, { page, limit: 200, since, minMinutes });
-        for (const d of result.donations) {
-          const phone = normalizePhone(d.mobile);
-          if (isDialable(phone)) found.push({ ...d, phone });
-        }
-        if (!result.hasMore) break;
-      }
-    } catch (err) {
-      siteErrors.push({ site, error: err instanceof Error ? err.message : 'Unknown error' });
-    }
-  }
-
-  // One row per person. Somebody who tried three times is one phone call, and
-  // the attempt worth mentioning on it is the most recent.
-  const byPhone = new Map<string, AbandonedRow>();
-  for (const d of found) {
-    const phone = String(d.phone);
-    const seen = byPhone.get(phone);
-    const row: AbandonedRow = {
-      externalId: String(d.externalId ?? ''),
-      name: (d.name as string) ?? null,
-      phone,
-      email: (d.email as string) ?? null,
-      amount: d.amount === null || d.amount === undefined ? null : Number(d.amount),
-      purpose: (d.purpose as string) ?? null,
-      sourcePage: (d.sourcePage as string) ?? null,
-      status: String(d.status ?? ''),
-      attemptedAt: String(d.attemptedAt ?? ''),
-      sourceSite: String(d.sourceSite ?? ''),
-      attempts: 1,
-    };
-    if (!seen) byPhone.set(phone, row);
-    else if (new Date(row.attemptedAt) > new Date(seen.attemptedAt)) {
-      byPhone.set(phone, { ...row, attempts: seen.attempts + 1 });
-    } else {
-      seen.attempts += 1;
-    }
-  }
-
-  const rows = [...byPhone.values()];
-  if (rows.length) {
-    const phones = rows.map((r) => r.phone);
-
-    const [gave, leads] = await Promise.all([
-      pool.query(
-        `SELECT right(regexp_replace(p.phone,'\\D','','g'), 10) AS phone10, MAX(d.created_at) AS last_gift
-           FROM people p JOIN donations d ON d.person_id = p.id
-          WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = ANY($1::text[])
-          GROUP BY 1`,
-        [phones]
-      ),
-      pool.query(`SELECT id, phone, status FROM leads WHERE phone = ANY($1::text[])`, [phones]),
-    ]);
-
-    const lastGift = new Map(gave.rows.map((r) => [r.phone10, new Date(r.last_gift)]));
-    const leadByPhone = new Map(leads.rows.map((r) => [r.phone, r]));
-
-    for (const r of rows) {
-      const last = lastGift.get(r.phone);
-      r.gave_anyway = last !== undefined && last >= new Date(r.attemptedAt);
-      const lead = leadByPhone.get(r.phone);
-      r.lead_id = lead?.id ?? null;
-      r.lead_status = lead?.status ?? null;
-    }
-  }
-
-  rows.sort((a, b) => new Date(b.attemptedAt).getTime() - new Date(a.attemptedAt).getTime());
-  // Only a clean answer is cached. Caching a failure would mean a site that
-  // was briefly down looked empty for three minutes after it came back, and
-  // "Check the sites again" would do nothing.
-  if (!siteErrors.length) abandonedCache.set(key, { at: Date.now(), rows, siteErrors });
-  return { rows, siteErrors, cached: false };
-}
 
 export default router;
 export { reconcileConversions, normalizePhone as normalizeLeadPhone, isDialable };

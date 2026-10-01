@@ -107,7 +107,7 @@ router.get('/dashboard', async (req, res) => {
     // conversion figures below are current rather than a day behind.
     await reconcileConversions();
 
-    const [leads, calls, pipeline, followUps, byStatus, bySource, callers, qr] = await Promise.all([
+    const [leads, money, calls, pipeline, followUps, byStatus, bySource, callers, qr] = await Promise.all([
       pool.query(
         // WHAT COUNTS AS A CONVERSION, AND WHY THIS CHANGED
         //
@@ -126,17 +126,33 @@ router.get('/dashboard', async (req, res) => {
         // receipted and DRM matched, 'manual' is a QR payment or a caller's
         // word. Both are real; only one is independently verifiable, and the
         // screen says which is which.
+        // The COHORT: leads created in this window, and how many of them have
+        // since given. This is the question "how well did the list we started
+        // in March do", and it must stay keyed on when the lead arrived.
         `SELECT COUNT(*)::int AS received,
-                COUNT(*) FILTER (WHERE converted_at IS NOT NULL)::int AS converted,
-                COALESCE(SUM(converted_amount) FILTER (WHERE converted_at IS NOT NULL), 0)::numeric AS raised,
-                COALESCE(SUM(converted_amount) FILTER (
-                  WHERE converted_at IS NOT NULL AND converted_donation_id IS NOT NULL
-                ), 0)::numeric AS raised_receipted,
-                COUNT(*) FILTER (
-                  WHERE converted_at IS NOT NULL AND converted_donation_id IS NULL
-                )::int AS converted_unreceipted
+                COUNT(*) FILTER (WHERE converted_at IS NOT NULL)::int AS converted
            FROM leads
           WHERE ${WINDOW('created_at', 1, 2)}
+            AND ($3::uuid IS NULL OR assigned_to = $3::uuid)`,
+        [from, to, me]
+      ),
+      pool.query(
+        // THE MONEY, on the day it actually arrived.
+        //
+        // This used to be part of the cohort query above, which meant "Raised"
+        // answered a question nobody asks: the money given by people who were
+        // ADDED in this window. A caller working a sheet uploaded in March
+        // took a QR payment today and saw today's raised figure read zero -
+        // and so did the admin looking at the same screen. The donation was
+        // recorded correctly all along; the tile was measuring the wrong date.
+        `SELECT COUNT(*)::int AS converted,
+                COALESCE(SUM(converted_amount), 0)::numeric AS raised,
+                COALESCE(SUM(converted_amount) FILTER (WHERE converted_donation_id IS NOT NULL), 0)::numeric
+                  AS raised_receipted,
+                COUNT(*) FILTER (WHERE converted_donation_id IS NULL)::int AS converted_unreceipted
+           FROM leads
+          WHERE converted_at IS NOT NULL
+            AND ${WINDOW('converted_at', 1, 2)}
             AND ($3::uuid IS NULL OR assigned_to = $3::uuid)`,
         [from, to, me]
       ),
@@ -225,6 +241,7 @@ router.get('/dashboard', async (req, res) => {
 
     const c = calls.rows[0];
     const l = leads.rows[0];
+    const m = money.rows[0];
 
     res.json({
       range: { from, to, label },
@@ -238,13 +255,14 @@ router.get('/dashboard', async (req, res) => {
         // Of the leads created in this window. A campaign's own conversion
         // rate, not diluted by every lead the temple has ever had.
         conversion_rate: l.received ? Math.round((l.converted / l.received) * 1000) / 10 : 0,
-        raised: Number(l.raised),
-        // Of that total, how much has a receipt behind it from one of the
-        // sites. The gap is QR payments and cash - real money, not yet tied to
-        // a receipt row - and naming it stops the total looking either
-        // overstated or mysteriously small.
-        raised_receipted: Number(l.raised_receipted),
-        converted_unreceipted: l.converted_unreceipted,
+        // Money that ARRIVED in this window, whoever it came from and
+        // whenever they were first added. Kept beside the cohort figures
+        // rather than mixed into them, because they answer different
+        // questions and a single "raised" number cannot mean both.
+        raised: Number(m.raised),
+        raised_receipted: Number(m.raised_receipted),
+        converted_unreceipted: m.converted_unreceipted,
+        donors_paid: m.converted,
       },
       calls: {
         made: c.made,

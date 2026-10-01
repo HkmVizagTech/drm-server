@@ -39,6 +39,8 @@ interface Dashboard {
     /** Of `raised`, how much has a receipt from one of the sites behind it. */
     raised_receipted: number;
     converted_unreceipted: number;
+    /** Donors whose money arrived in this window, however long ago they were added. */
+    donors_paid: number;
   };
   calls: {
     made: number;
@@ -211,11 +213,22 @@ export default function CallingDashboardPage() {
           accent="good"
           sub={c ? `${number(c.connected)} of ${number(c.made)} calls` : undefined}
         />
+        {/* Money that ARRIVED in this window. It used to be the money given by
+            people who were ADDED in this window, which is a different question
+            and read zero for any caller working an older list - a QR payment
+            taken today against a lead from a March sheet showed nothing at
+            all, on the caller's screen and the admin's alike. */}
         <StatTile
           label="Raised"
           value={loading ? "—" : currency(data?.leads.raised ?? 0)}
           accent="brand"
-          sub={data ? `${number(data.leads.converted)} gave after being called` : undefined}
+          sub={
+            data
+              ? `${number(data.leads.donors_paid)} ${
+                  data.leads.donors_paid === 1 ? "donor" : "donors"
+                } paid in this period`
+              : undefined
+          }
         />
       </div>
 
@@ -223,7 +236,11 @@ export default function CallingDashboardPage() {
         <StatTile
           label="Conversion"
           value={loading ? "—" : `${data?.leads.conversion_rate ?? 0}%`}
-          sub="of leads added in this period"
+          sub={
+            data
+              ? `${number(data.leads.converted)} of ${number(data.leads.received)} added in this period have given`
+              : "of leads added in this period"
+          }
         />
         <StatTile
           label="Average call"

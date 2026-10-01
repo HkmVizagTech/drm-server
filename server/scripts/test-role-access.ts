@@ -18,6 +18,7 @@ import peopleRoutes from '../src/routes/people';
 import donationsRoutes from '../src/routes/donations';
 import crmRoutes from '../src/routes/crm';
 import crmQrRoutes from '../src/routes/crmQr';
+import crmReportsRoutes from '../src/routes/crmReports';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
 if (!/_test$/.test(dbName)) {
@@ -33,6 +34,7 @@ app.use('/api/people', readOnlyFor('caller'), peopleRoutes);
 app.use('/api/donations', readOnlyFor('caller'), donationsRoutes);
 app.use('/api/crm', crmRoutes);
 app.use('/api/crm', crmQrRoutes);
+app.use('/api/crm', crmReportsRoutes);
 
 let base = '';
 const ADMIN = '11111111-1111-1111-1111-111111111111';
@@ -144,15 +146,16 @@ async function main() {
 
   console.log('\n4b. an unconfigured site is named, not silently counted as zero');
   r = await req('GET', '/api/crm/leads/abandoned?days=30&fresh=true', caller);
+  check('both sites are accounted for', (r.body.sites ?? []).length === 2, r.body.sites);
   check(
-    'both sites are accounted for',
-    (r.body.site_errors ?? []).length === 2,
-    r.body.site_errors
+    'and each says plainly that it is not connected',
+    (r.body.sites ?? []).every((st: any) => /not connected/i.test(st.error ?? '')),
+    r.body.sites
   );
   check(
-    'and the reason says they are not connected',
-    (r.body.site_errors ?? []).every((e: any) => /not connected/i.test(e.error)),
-    r.body.site_errors
+    'with a last-checked time, so the page can say how fresh it is',
+    (r.body.sites ?? []).every((st: any) => !!st.last_synced_at),
+    r.body.sites
   );
 
   console.log('\n5. a caller can raise and resend a receipt');
@@ -199,6 +202,114 @@ async function main() {
     share_id: other.rows[0].id,
   });
   check('attributing a colleague\'s share is refused', r.status === 404, r.status);
+
+  console.log('\n7. money is counted on the day it arrived, not the day the lead was added');
+  // The reported case: a caller works a sheet uploaded months ago and takes a
+  // QR payment today. Raised used to be windowed on the lead's created_at, so
+  // today read zero - on the caller's screen and the admin's.
+  await pool.query(`TRUNCATE leads RESTART IDENTITY CASCADE`);
+  await pool.query(
+    `INSERT INTO leads (phone, name, assigned_to, created_at, status, converted_at, converted_amount, converted_via)
+     VALUES ('9700000001','Old sheet donor',$1::uuid, NOW() - INTERVAL '120 days',
+             'converted', NOW(), 2500, 'manual')`,
+    [CALLER]
+  );
+  r = await req('GET', '/api/crm/dashboard?preset=today', caller);
+  check('the money shows for today', Number(r.body.leads?.raised) === 2500, r.body.leads);
+  check('and one donor paid', r.body.leads?.donors_paid === 1, r.body.leads);
+  check(
+    'while the cohort still reads honestly - nobody was ADDED today',
+    r.body.leads?.received === 0,
+    r.body.leads
+  );
+  r = await req('GET', '/api/crm/dashboard?preset=today', admin);
+  check('the admin sees the same money', Number(r.body.leads?.raised) === 2500, r.body.leads);
+
+  console.log('\n8. a QR payment on an unowned lead credits whoever shared it');
+  await pool.query(`TRUNCATE leads, qr_shares, qr_payments, razorpay_qrs RESTART IDENTITY CASCADE`);
+  const sharedQr = await pool.query(
+    `INSERT INTO razorpay_qrs (qr_id, label, active) VALUES ('qr_TEMPLE01','Temple QR',TRUE) RETURNING id`
+  );
+  const orphan = await pool.query(
+    `INSERT INTO leads (phone, name) VALUES ('9700000002','Nobody owns me') RETURNING id`
+  );
+  const sh = await pool.query(
+    `INSERT INTO qr_shares (qr_id, lead_id, shared_by, phone, channel)
+     VALUES ($1::uuid,$2::uuid,$3::uuid,'9700000002','whatsapp') RETURNING id`,
+    [sharedQr.rows[0].id, orphan.rows[0].id, CALLER]
+  );
+  const op = await pool.query(
+    `INSERT INTO qr_payments (payment_id, qr_id, amount, status, received_at)
+     VALUES ('pay_ORPHAN01','qr_TEMPLE01', 700, 'captured', NOW()) RETURNING id`
+  );
+
+  // A caller must be able to SEE it before they can attribute it.
+  r = await req('GET', '/api/crm/qr/payments?scope=unmatched', caller);
+  check(
+    'an unmatched payment on the temple QR is visible to a caller',
+    (r.body.payments ?? []).some((p: any) => p.payment_id === 'pay_ORPHAN01'),
+    (r.body.payments ?? []).length
+  );
+
+  r = await req('POST', `/api/crm/qr/payments/${op.rows[0].id}/attach`, caller, { share_id: sh.rows[0].id });
+  check('and they can attribute it', r.status === 200, r.body);
+  const credited = await pool.query(`SELECT assigned_to, converted_amount FROM leads WHERE id = $1`, [
+    orphan.rows[0].id,
+  ]);
+  check('the lead is now theirs', credited.rows[0].assigned_to === CALLER, credited.rows[0]);
+  check('with the money on it', Number(credited.rows[0].converted_amount) === 700, credited.rows[0]);
+  r = await req('GET', '/api/crm/dashboard?preset=today', caller);
+  check('so it reaches their overview', Number(r.body.leads?.raised) === 700, r.body.leads);
+
+  console.log('\n9. the unfinished attempts are stored, filtered and dismissible');
+  await pool.query(`TRUNCATE abandoned_attempts, abandoned_sync_state RESTART IDENTITY CASCADE`);
+  await pool.query(
+    `INSERT INTO abandoned_attempts (source_site, external_id, phone, name, amount, status, attempted_at)
+     VALUES ('hkmv','e1','9811000001','Big',  50000,'failed',  NOW() - INTERVAL '2 days'),
+            ('hkmv','e2','9811000002','Small',   500,'pending', NOW() - INTERVAL '3 days'),
+            ('annadan','e3','9811000003','Mid',  5000,'created', NOW() - INTERVAL '40 days')`
+  );
+  await pool.query(
+    `INSERT INTO abandoned_sync_state (source_site, last_synced_at) VALUES ('hkmv', NOW()), ('annadan', NOW())`
+  );
+
+  r = await req('GET', '/api/crm/leads/abandoned?days=30', caller);
+  check('only the last 30 days', (r.body.rows ?? []).length === 2, (r.body.rows ?? []).map((x: any) => x.name));
+  check('value at stake adds up', Number(r.body.value_at_stake) === 50500, r.body.value_at_stake);
+
+  r = await req('GET', '/api/crm/leads/abandoned?days=365&min_amount=1000', caller);
+  check('a minimum amount filters', (r.body.rows ?? []).length === 2, (r.body.rows ?? []).map((x: any) => x.name));
+  r = await req('GET', '/api/crm/leads/abandoned?days=365&min_amount=1000&max_amount=10000', caller);
+  check('a range filters', (r.body.rows ?? []).length === 1 && r.body.rows[0].name === 'Mid', r.body.rows);
+  r = await req('GET', '/api/crm/leads/abandoned?days=365&status=failed', caller);
+  check('by what happened', (r.body.rows ?? []).length === 1 && r.body.rows[0].name === 'Big', r.body.rows);
+  r = await req('GET', '/api/crm/leads/abandoned?days=365&sort=amount', caller);
+  check('biggest first', r.body.rows[0].name === 'Big', (r.body.rows ?? []).map((x: any) => x.name));
+  r = await req('GET', '/api/crm/leads/abandoned?days=365&search=Mid', caller);
+  check('and by name', (r.body.rows ?? []).length === 1, r.body.rows);
+
+  // Somebody who has since given is never shown.
+  const giver = await pool.query(
+    `INSERT INTO people (name, phone) VALUES ('Big','9811000001') RETURNING id`
+  );
+  await pool.query(
+    `INSERT INTO donations (person_id, amount, purpose, payment_mode, source_site, external_ref)
+     VALUES ($1::uuid, 50000, 'general', 'upi', 'hkmv', 'ext_big')`,
+    [giver.rows[0].id]
+  );
+  r = await req('GET', '/api/crm/leads/abandoned?days=365', caller);
+  check('somebody who has since given drops off', !(r.body.rows ?? []).some((x: any) => x.name === 'Big'), r.body.rows);
+  check('and is counted as settled', r.body.gave_anyway === 1, r.body);
+
+  const toDismiss = (r.body.rows ?? [])[0];
+  r = await req('POST', `/api/crm/leads/abandoned/${toDismiss.id}/dismiss`, caller);
+  check('setting one aside works', r.status === 200, r.body);
+  r = await req('GET', '/api/crm/leads/abandoned?days=365', caller);
+  check(
+    'and it stays aside',
+    !(r.body.rows ?? []).some((x: any) => x.id === toDismiss.id),
+    (r.body.rows ?? []).length
+  );
 
   console.log(failures ? `\n${failures} FAILURE(S)\n` : '\nall green\n');
   server.close();
