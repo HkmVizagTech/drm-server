@@ -1572,6 +1572,14 @@ ALTER TABLE abandoned_sync_state ADD COLUMN IF NOT EXISTS truncated BOOLEAN NOT 
 -- (site, external id), so every id-less row from a site would collide into one
 -- row and that site's whole list would collapse to a single person.
 ALTER TABLE abandoned_attempts DROP CONSTRAINT IF EXISTS abandoned_external_id_present;
+-- Clear any id-less row first, or the ADD CONSTRAINT below fails and takes
+-- every statement after it with it. The release before this one guarded only
+-- on the phone number, so an empty id could be stored: the unique key is
+-- (site, id), and all of a site's id-less rows would have collapsed into one
+-- row, standing for one person instead of all of them. Nothing is lost - a row
+-- with no id is not something anybody can ring or attribute, which is why the
+-- sync now skips and counts them. No-op on any database without such a row.
+DELETE FROM abandoned_attempts WHERE external_id = '';
 ALTER TABLE abandoned_attempts ADD CONSTRAINT abandoned_external_id_present
   CHECK (external_id <> '');
 
