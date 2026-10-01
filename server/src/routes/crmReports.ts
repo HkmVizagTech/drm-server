@@ -18,7 +18,18 @@
 //   Conversions         leads whose linked person actually gave AFTER the lead
 //                       was created, matched to the donation. Not a caller
 //                       ticking "donated"; money that arrived.
-//   Amount raised       the sum of those donations. Never the pipeline.
+//   Amount raised       the sum of this caller's CREDITS in the period - one
+//                       immutable row per amount attributed to them, written
+//                       when the attribution was decided. Not a live sum over
+//                       whoever a lead happens to be assigned to today, which
+//                       is what it used to be and which meant reassigning a
+//                       lead rewrote two people's past months. Never the
+//                       pipeline.
+//   Verified / awaiting money the system watched arrive, versus money a caller
+//                       reported collecting offline and nobody has yet checked
+//                       against the statement. Both are counted; the screen
+//                       says which is which, because "awaiting" means not
+//                       checked yet, not wrong.
 //   Pipeline            expected_amount on open leads. A hope, labelled as one,
 //                       and never added to amount raised.
 //   Overdue             a follow-up date in the past. Yesterday's promise.
@@ -42,6 +53,11 @@ import {
   EXPORT_ROW_CAP,
   type ExportFormat,
 } from '../utils/export';
+// Every "raised" figure below reads caller_credits through this one window
+// fragment. Three screens here used to each sum a different table - leads,
+// qr_shares, qr_payments - and gave three different answers to one question.
+// See the header of services/credits.ts and of caller_credits in schema.sql.
+import { CREDIT_WINDOW, totalsFor } from '../services/credits';
 
 const router = Router();
 router.use(authenticate);
@@ -135,7 +151,7 @@ router.get('/dashboard', async (req, res) => {
     // conversion figures below are current rather than a day behind.
     await reconcileConversions();
 
-    const [leads, money, calls, pipeline, followUps, byStatus, bySource, callers, qr, byQr] = await Promise.all([
+    const [leads, conv, credits, calls, pipeline, followUps, byStatus, bySource, callers, qr, byQr] = await Promise.all([
       pool.query(
         // WHAT COUNTS AS A CONVERSION, AND WHY THIS CHANGED
         //
@@ -165,7 +181,7 @@ router.get('/dashboard', async (req, res) => {
         [from, to, me]
       ),
       pool.query(
-        // THE MONEY, on the day it actually arrived.
+        // THE CONVERSION COUNTS, on the day the money actually arrived.
         //
         // This used to be part of the cohort query above, which meant "Raised"
         // answered a question nobody asks: the money given by people who were
@@ -173,10 +189,15 @@ router.get('/dashboard', async (req, res) => {
         // took a QR payment today and saw today's raised figure read zero -
         // and so did the admin looking at the same screen. The donation was
         // recorded correctly all along; the tile was measuring the wrong date.
+        //
+        // COUNTS ONLY NOW. The rupee figures that used to live in this query
+        // moved to caller_credits below. They stayed here as long as they did
+        // because leads.converted_amount was the only record of them; it is
+        // not any more, and a sum grouped by leads.assigned_to is a statement
+        // about who owns the lead today rather than about who raised the money.
+        // The counts are a different question - how many leads converted in
+        // this window - and that question is still correctly asked of leads.
         `SELECT COUNT(*)::int AS converted,
-                COALESCE(SUM(converted_amount), 0)::numeric AS raised,
-                COALESCE(SUM(converted_amount) FILTER (WHERE converted_donation_id IS NOT NULL), 0)::numeric
-                  AS raised_receipted,
                 COUNT(*) FILTER (WHERE converted_donation_id IS NULL)::int AS converted_unreceipted
            FROM leads
           WHERE converted_at IS NOT NULL
@@ -184,6 +205,21 @@ router.get('/dashboard', async (req, res) => {
             AND ($3::uuid IS NULL OR assigned_to = $3::uuid)`,
         [from, to, me]
       ),
+      // THE MONEY. Every rupee on this screen - the headline, the QR tile and
+      // the per-kind breakdown - comes out of this one call, rather than from
+      // three queries that could disagree with each other by a day or a join.
+      //
+      // totalsFor() rather than a query written here, because the aggregate
+      // itself is part of what has to stay identical between screens: the
+      // verified/awaiting split and the per-kind split are decisions about
+      // what the words mean, and a second copy of them here is how the next
+      // divergence starts. The service owns them; this file asks for them.
+      //
+      // Broken down by kind because "you raised ₹40,000" is not actionable and
+      // "₹31,000 of it came through your QR, ₹9,000 was cash you banked" is.
+      // The old model could not express this at all: it had one column on
+      // leads and no record of where the money had come from.
+      totalsFor(me, from, to),
       pool.query(
         `SELECT COUNT(*)::int AS made,
                 COUNT(*) FILTER (WHERE connected)::int AS connected,
@@ -253,10 +289,18 @@ router.get('/dashboard', async (req, res) => {
       // QR codes shared and what came back. On a caller's own screen this is
       // the answer to "did that QR I sent this morning ever get paid", which
       // was previously only findable by scrolling the payments list.
+      //
+      // COUNTS ONLY. This query used to also report SUM(s.matched_amount) as
+      // the QR tile's "raised", which is the second of the three rival
+      // definitions this change exists to end: it summed a different column,
+      // of a different table, over a different window (when the QR was SHARED,
+      // not when the money arrived), and so disagreed with the headline figure
+      // on the very same screen. The tile's rupee figure now comes from the
+      // credits row above, like every other rupee here. These three counts are
+      // genuinely about shares, so they stay keyed on when the share was sent.
       pool.query(
         `SELECT COUNT(*)::int AS shared,
                 COUNT(*) FILTER (WHERE s.matched_at IS NOT NULL)::int AS paid,
-                COALESCE(SUM(s.matched_amount), 0)::numeric AS raised,
                 COUNT(*) FILTER (
                   WHERE s.matched_at IS NULL AND s.created_at > NOW() - INTERVAL '7 days'
                 )::int AS awaiting
@@ -296,7 +340,16 @@ router.get('/dashboard', async (req, res) => {
 
     const c = calls.rows[0];
     const l = leads.rows[0];
-    const m = money.rows[0];
+    const v = conv.rows[0];
+    // Every rupee on this screen, from the one call above. Named here so the
+    // headline tile, the QR tile and the breakdown are literally the same
+    // numbers and cannot be edited apart by somebody touching one of them.
+    const money = credits;
+
+    // Money through QRs, attributed or not. See the query's own comment: this
+    // is deliberately a wider set than the credits, and the two overlap, so
+    // the difference is named rather than left for a reader to work out.
+    const throughQrs = byQr.rows.reduce((t, r) => t + Number(r.raised), 0);
 
     res.json({
       range: { from, to, label },
@@ -304,20 +357,29 @@ router.get('/dashboard', async (req, res) => {
       // to assume. A caller reading temple-wide totals as their own, or the
       // reverse, is the failure this one field prevents.
       scope: me ? 'mine' : 'team',
+      // THE MONEY, as its own block rather than a field on `leads`.
+      //
+      // It sits apart because it is no longer a fact about leads: a caller's
+      // QR payment, a link donation and cash they banked are all credits and
+      // none of them need a lead to exist. Leaving "raised" inside the leads
+      // block is what let the old code reach for leads.converted_amount every
+      // time somebody added a tile.
+      money,
       leads: {
         received: l.received,
         converted: l.converted,
         // Of the leads created in this window. A campaign's own conversion
         // rate, not diluted by every lead the temple has ever had.
         conversion_rate: l.received ? Math.round((l.converted / l.received) * 1000) / 10 : 0,
-        // Money that ARRIVED in this window, whoever it came from and
-        // whenever they were first added. Kept beside the cohort figures
-        // rather than mixed into them, because they answer different
-        // questions and a single "raised" number cannot mean both.
-        raised: Number(m.raised),
-        raised_receipted: Number(m.raised_receipted),
-        converted_unreceipted: m.converted_unreceipted,
-        donors_paid: m.converted,
+        // Literally money.raised, not a second query that could come to a
+        // different answer. Kept here only so the existing dashboard keeps
+        // rendering while the client moves onto `money`; delete it once it has.
+        raised: money.raised,
+        // Counts, unchanged, and still correctly asked of leads: how many
+        // leads converted in this window and how many of those have no
+        // donation row to point at yet.
+        converted_unreceipted: v.converted_unreceipted,
+        donors_paid: v.converted,
       },
       calls: {
         made: c.made,
@@ -341,12 +403,26 @@ router.get('/dashboard', async (req, res) => {
       qr: {
         shared: qr.rows[0].shared,
         paid: qr.rows[0].paid,
-        raised: Number(qr.rows[0].raised),
         awaiting: qr.rows[0].awaiting,
+        // QR money that has actually been credited to a caller - the same
+        // figure as money.by_kind.qr, and part of money.raised.
+        credited: money.by_kind.qr,
         // Every rupee through a QR in this window, attributed or not. Larger
-        // than `raised` above whenever payments are waiting to be attributed,
-        // and that difference is the point of showing both.
-        through_qrs: byQr.rows.reduce((t, r) => t + Number(r.raised), 0),
+        // than `credited` whenever payments are waiting to be attributed, and
+        // that difference is the point of showing both.
+        //
+        // THIS IS A SUPERSET OF `credited`, NOT A SEPARATE PILE OF MONEY.
+        // Adding through_qrs to money.raised counts the credited QR payments
+        // twice. The two figures answer different questions - "what did
+        // calling bring in, whoever ends up credited" and "what has been
+        // attributed to a named caller" - and both belong on the screen, so
+        // the gap between them is given a name of its own below rather than
+        // being left for whoever reads the tile to subtract in their head.
+        through_qrs: throughQrs,
+        // The gap: money through the QRs that no caller has been credited
+        // with yet. This is the work queue, and it is the honest reason the
+        // two totals on this screen are not the same number.
+        not_credited: Math.round((throughQrs - money.by_kind.qr) * 100) / 100,
         unattributed: byQr.rows.reduce((t, r) => t + Number(r.unattributed), 0),
       },
       by_qr: byQr.rows.map((r) => ({
@@ -366,6 +442,292 @@ router.get('/dashboard', async (req, res) => {
   }
 });
 
+/* --------------------------------------------------------------- credits */
+
+/**
+ * A CALLER'S OWN LEDGER, AND WHY IT IS REGISTERED HERE AND NOT BELOW.
+ *
+ * These two routes sit at /reports/credits but are deliberately declared
+ * ABOVE router.use('/reports', authorize('admin','accountant')) a few lines
+ * down, so that blanket refusal never reaches them.
+ *
+ * The blanket guard exists to stop a caller seeing a caller-versus-caller
+ * table - see its own comment. That reason does not apply to this list: it is
+ * one person's own credits, narrowed server-side by scopeOf before the query
+ * runs, which is exactly the thing a caller most needs to check ("the ₹5,000
+ * I took this morning - is it on my name?"). Sending them to an admin to find
+ * out is how a team stops believing the figure on their dashboard.
+ *
+ * It is NOT left unguarded. A guard of its own names the roles that may in -
+ * including caller, which the blanket one refuses - so volunteer_coordinator,
+ * who the blanket guard would also have refused, is still refused here. This
+ * is a narrower guard, not a redundant one, and without it a role nobody
+ * thought about would read the whole temple's attribution.
+ */
+const CREDIT_READERS = authorize('admin', 'accountant', 'caller');
+
+const CREDIT_KINDS = ['qr', 'link', 'lead', 'offline', 'manual'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The filters, resolved once and shared by the list, its totals and the file.
+ *
+ * Built in one place so the three cannot drift: an export whose filters differ
+ * from the screen it was downloaded from is worse than no export, because the
+ * person sends the file to somebody who then acts on it.
+ */
+function creditFilters(
+  req: { user?: { role?: string; userId?: string }; query: Record<string, unknown> },
+  from: string,
+  to: string
+) {
+  const me = scopeOf(req);
+  const asked = String(req.query.user_id ?? '');
+  // A caller's own id WINS over anything in the query string. Honouring
+  // ?user_id= for a caller would turn a personal ledger into a way of reading
+  // a colleague's month by editing the URL, which is the same hole the
+  // dashboard had before scopeOf existed.
+  const who = me ?? (UUID_RE.test(asked) ? asked : null);
+
+  const values: unknown[] = [from, to, who];
+  const where = [CREDIT_WINDOW(1, 2), `($3::uuid IS NULL OR c.user_id = $3::uuid)`];
+
+  const kind = String(req.query.kind ?? '');
+  if (CREDIT_KINDS.includes(kind)) {
+    values.push(kind);
+    where.push(`c.kind = $${values.length}`);
+  }
+
+  // Not a boolean: "verified" and "awaiting" are both real answers and the
+  // absence of the filter means both, so a tri-state string says what a
+  // missing-or-false boolean could not.
+  const verified = String(req.query.verified ?? '');
+  if (verified === 'yes') where.push('c.verified_at IS NOT NULL');
+  else if (verified === 'no') where.push('c.verified_at IS NULL');
+
+  return { me, who, kind: CREDIT_KINDS.includes(kind) ? kind : null, verified, where: where.join(' AND '), values };
+}
+
+/**
+ * The rows, with their evidence.
+ *
+ * Every credit carries at least one evidence id; which one depends on kind. A
+ * figure nobody can trace back to a payment is a figure nobody will believe,
+ * so the thing a human would quote on the phone - the Razorpay reference, the
+ * 80G receipt number, the donor's name, the link that was sent - is joined in
+ * rather than leaving the reader with a UUID.
+ *
+ * Ordered by occurred_at with the id as a tiebreak: two credits written in the
+ * same second would otherwise come back in an arbitrary order that changes
+ * between calls, which makes page 2 of a paged list drop and repeat rows.
+ */
+const CREDIT_ROWS_SQL = (where: string) => `
+  SELECT c.id, c.amount, c.kind, c.occurred_at, c.note,
+         c.verified_at, c.user_id,
+         u.name AS caller_name,
+         p.payment_id    AS payment_reference,
+         d.receipt_number,
+         l.name          AS lead_name,
+         k.label         AS link_label
+    FROM caller_credits c
+    JOIN users u ON u.id = c.user_id
+    LEFT JOIN qr_payments p ON p.id = c.qr_payment_id
+    LEFT JOIN donations   d ON d.id = c.donation_id
+    LEFT JOIN leads       l ON l.id = c.lead_id
+    LEFT JOIN crm_links   k ON k.id = c.link_id
+   WHERE ${where}
+   ORDER BY c.occurred_at DESC, c.id DESC`;
+
+/**
+ * The totals, computed in SQL over the WHOLE filtered set.
+ *
+ * Never by adding up the page above. That bug is already written up at length
+ * in crm.ts over the abandoned-attempts list: the totals were summed in
+ * JavaScript over a capped query, so "value at stake" quietly reported the
+ * first five hundred rows and nothing else, and a twelve-lakh figure read as
+ * seven with the money still exactly where it had always been. A total and a
+ * page are different questions, and only one of them is allowed a LIMIT.
+ *
+ * Needs none of the evidence joins - every predicate is on c - so it is a
+ * cheap index scan rather than a second copy of the list query.
+ */
+const CREDIT_TOTALS_SQL = (where: string) => `
+  SELECT COUNT(*)::int                                AS credits,
+         COALESCE(SUM(c.amount), 0)::numeric          AS raised,
+         COALESCE(SUM(c.amount) FILTER (WHERE c.verified_at IS NOT NULL), 0)::numeric
+                                                      AS verified,
+         COALESCE(SUM(c.amount) FILTER (WHERE c.verified_at IS NULL), 0)::numeric
+                                                      AS awaiting_verification,
+         COALESCE(SUM(c.amount) FILTER (WHERE c.kind = 'qr'), 0)::numeric      AS qr,
+         COALESCE(SUM(c.amount) FILTER (WHERE c.kind = 'link'), 0)::numeric    AS link,
+         COALESCE(SUM(c.amount) FILTER (WHERE c.kind = 'lead'), 0)::numeric    AS lead,
+         COALESCE(SUM(c.amount) FILTER (WHERE c.kind = 'offline'), 0)::numeric AS offline,
+         COALESCE(SUM(c.amount) FILTER (WHERE c.kind = 'manual'), 0)::numeric  AS manual
+    FROM caller_credits c
+   WHERE ${where}`;
+
+/** One credit as the screen and the file both see it. */
+function creditRow(r: Record<string, unknown>) {
+  return {
+    id: r.id,
+    amount: Number(r.amount),
+    kind: r.kind,
+    occurred_at: r.occurred_at,
+    note: r.note,
+    verified_at: r.verified_at,
+    // The screen asks "is this checked yet" far more often than it asks when,
+    // and a null timestamp is an awkward thing to render a tick from.
+    verified: r.verified_at !== null,
+    user_id: r.user_id,
+    caller_name: r.caller_name,
+    // Whichever of these is set is the evidence for this credit; the rest are
+    // null because this kind of money does not have one.
+    payment_reference: r.payment_reference ?? null,
+    receipt_number: r.receipt_number ?? null,
+    lead_name: r.lead_name ?? null,
+    link_label: r.link_label ?? null,
+  };
+}
+
+/**
+ * Shaped field-for-field like the CreditTotals the dashboard sends, so the two
+ * screens can share one component and one reading of the words. The aggregate
+ * is written out here rather than delegated to totalsFor() only because this
+ * list carries filters - kind, verified, a chosen caller - that the service's
+ * fixed signature does not take.
+ */
+function creditTotals(r: Record<string, unknown>) {
+  return {
+    raised: Number(r.raised),
+    credits: r.credits,
+    verified: Number(r.verified),
+    awaiting_verification: Number(r.awaiting_verification),
+    by_kind: {
+      qr: Number(r.qr),
+      link: Number(r.link),
+      lead: Number(r.lead),
+      offline: Number(r.offline),
+      manual: Number(r.manual),
+    },
+  };
+}
+
+router.get('/reports/credits', CREDIT_READERS, async (req, res) => {
+  const { from, to, label } = range(req.query as Record<string, unknown>);
+  const f = creditFilters(req, from, to);
+  // Capped because nobody scrolls two hundred credit rows, and an uncapped
+  // list over "All time" is the whole table. The totals beside it are not
+  // capped, which is the only reason capping this is safe.
+  const limit = Math.min(200, Number(req.query.limit) || 50);
+  const page = Math.max(1, Number(req.query.page) || 1);
+
+  try {
+    // Same reason the dashboard and the caller export do it: a caller opening
+    // this list straight after a payment lands is the commonest way it gets
+    // read, and without this their newest money is missing from the one screen
+    // that exists to tell them it arrived.
+    await reconcileConversions();
+
+    const [rows, totals] = await Promise.all([
+      pool.query(
+        `${CREDIT_ROWS_SQL(f.where)} LIMIT $${f.values.length + 1} OFFSET $${f.values.length + 2}`,
+        [...f.values, limit, (page - 1) * limit]
+      ),
+      pool.query(CREDIT_TOTALS_SQL(f.where), f.values),
+    ]);
+    const t = creditTotals(totals.rows[0]);
+
+    res.json({
+      range: { from, to, label },
+      // Says whose ledger this is, for the same reason the dashboard does: a
+      // caller reading the temple's credits as their own, or the reverse, is
+      // the misunderstanding this one field prevents.
+      scope: f.me ? 'mine' : 'team',
+      filters: { user_id: f.who, kind: f.kind, verified: f.verified || null },
+      totals: t,
+      credits: rows.rows.map(creditRow),
+      // The pager's row count is the totals' own COUNT(*), not a third query
+      // over the same predicate. Two counts of one set is two things that can
+      // disagree, and a pager that promises more pages than the totals admit
+      // rows is the kind of small contradiction that makes somebody doubt the
+      // money beside it.
+      total: t.credits,
+      page,
+      limit,
+    });
+  } catch (err) {
+    console.error('crm.reportCredits error:', err);
+    res.status(500).json({ error: 'Could not load the credit list' });
+  }
+});
+
+/**
+ * The same rows as a file.
+ *
+ * Same filters and the same scope as the list above, by construction - both
+ * call creditFilters - so a caller cannot download what the screen would not
+ * show them, and an admin's file matches the screen it was taken from.
+ */
+async function exportCreditsFile(
+  req: import('express').Request,
+  res: import('express').Response,
+  format: ExportFormat
+) {
+  try {
+    const { from, to, label } = range(req.query as Record<string, unknown>);
+    const f = creditFilters(req, from, to);
+    // Reconciled first, exactly as the screen does, so the file and the screen
+    // it was downloaded from cannot show different money.
+    await reconcileConversions();
+    const rows = await pool.query(
+      `${CREDIT_ROWS_SQL(f.where)} LIMIT ${EXPORT_ROW_CAP + 1}`,
+      f.values
+    );
+    const truncated = rows.rows.length > EXPORT_ROW_CAP;
+
+    await sendExport(res, format, {
+      name: 'caller-credits',
+      truncated,
+      rows: (truncated ? rows.rows.slice(0, EXPORT_ROW_CAP) : rows.rows).map(creditRow),
+      // Spelled out rather than left to describeFilters alone: the default
+      // preset sends no query string at all, and "No filters applied" on a
+      // file that silently covers the last 30 days - of one caller's credits -
+      // is a lie the file tells to whoever opens it next.
+      filterSummary:
+        `${describeFilters(req.query as Record<string, unknown>, {
+          kind: 'Kind',
+          verified: 'Verification',
+        })} | ${label} (${from} to ${to}) | ${f.me ? 'Own credits only' : f.who ? 'One caller' : 'All callers'}`,
+      columns: [
+        { header: 'Date', value: (r) => r.occurred_at, kind: 'datetime' },
+        { header: 'Caller', value: (r) => r.caller_name },
+        { header: 'Amount', value: (r) => r.amount, kind: 'money' },
+        { header: 'Kind', value: (r) => r.kind },
+        // Verified as its own column rather than folded into the amount: a
+        // file that totals one "raised" column lets the office book a
+        // caller's unreconciled cash claim as settled.
+        { header: 'Verified', value: (r) => (r.verified ? 'Yes' : 'Awaiting') },
+        { header: 'Verified at', value: (r) => r.verified_at, kind: 'datetime' },
+        { header: 'Payment reference', value: (r) => r.payment_reference },
+        { header: 'Receipt number', value: (r) => r.receipt_number },
+        { header: 'Lead', value: (r) => r.lead_name },
+        { header: 'Link', value: (r) => r.link_label },
+        { header: 'Note', value: (r) => r.note },
+      ],
+    });
+  } catch (err) {
+    console.error('crm.exportCredits error:', err);
+    res.status(500).json({ error: 'Could not build that export' });
+  }
+}
+
+router.get('/reports/credits/export.csv', CREDIT_READERS, (req, res) =>
+  exportCreditsFile(req, res, 'csv')
+);
+router.get('/reports/credits/export.xlsx', CREDIT_READERS, (req, res) =>
+  exportCreditsFile(req, res, 'xlsx')
+);
+
 /* ----------------------------------------------------------------- reports */
 
 /**
@@ -377,6 +739,13 @@ router.get('/dashboard', async (req, res) => {
  * something; a caller-versus-caller table cannot. So this is a refusal rather
  * than a scope, and it sits here, in front of all of them, rather than being
  * remembered separately on each new report somebody adds later.
+ *
+ * ONE EXCEPTION, AND IT IS ABOVE THIS LINE, NOT BELOW IT. /reports/credits and
+ * its two exports are declared before this guard on purpose, because they are
+ * a caller's own ledger rather than a comparison, and they carry their own
+ * narrower guard. Anything added BELOW this line is covered and needs no guard
+ * of its own; if you ever need another exception, put it above here with the
+ * others so that "declared below the guard" keeps meaning "guarded".
  */
 router.use('/reports', authorize('admin', 'accountant'));
 
@@ -400,14 +769,13 @@ const CALLER_REPORT_SQL = `WITH calls AS (
           WHERE a.kind = 'call' AND ${WINDOW('a.occurred_at', 1, 2)}
           GROUP BY a.user_id
        ),
-       wins AS (
-         -- Attributed to whoever the lead was ASSIGNED to when it converted.
-         -- Imperfect where a lead changed hands, and deliberately not split
-         -- between callers: a made-up share is worse than a simple rule
-         -- everybody understands.
+       conversions AS (
+         -- THE COUNT of leads that converted, attributed to whoever the lead
+         -- was ASSIGNED to when it converted. Imperfect where a lead changed
+         -- hands, and deliberately not split between callers: a made-up share
+         -- is worse than a simple rule everybody understands.
          SELECT l.assigned_to AS user_id,
-                COUNT(*)::int AS conversions,
-                COALESCE(SUM(l.converted_amount),0)::numeric AS raised
+                COUNT(*)::int AS conversions
            FROM leads l
           -- converted_at, not converted_donation_id. See the dashboard's own
           -- note: a QR payment and a cash donation recorded by hand both
@@ -416,6 +784,37 @@ const CALLER_REPORT_SQL = `WITH calls AS (
           -- and zero rupees on the very report a supervisor judges them by.
           WHERE l.converted_at IS NOT NULL AND ${WINDOW('l.converted_at', 1, 2)}
           GROUP BY l.assigned_to
+       ),
+       wins AS (
+         -- THE MONEY, from caller_credits and nowhere else.
+         --
+         -- This used to be SUM(leads.converted_amount) GROUP BY assigned_to,
+         -- in the same CTE as the count above. That is a live join, so this
+         -- report was never a record of what a caller raised in March - it
+         -- was a statement about who owns those leads at the moment the page
+         -- is loaded. A bulk reassignment moved money out of one caller's
+         -- past months and into another's, retroactively, with nothing
+         -- recording that it had happened, and a supervisor comparing this
+         -- report against a printout from last quarter found two different
+         -- numbers and no explanation. A credit is written once and does not
+         -- move.
+         --
+         -- It also only ever saw lead conversions. A caller whose whole month
+         -- was QR payments and banked cash scored zero rupees here.
+         SELECT c.user_id,
+                COUNT(*)::int AS credits,
+                COALESCE(SUM(c.amount),0)::numeric AS raised,
+                -- Split out rather than merged: an offline credit is the
+                -- caller's own word until somebody reconciles it, and a
+                -- supervisor running a review needs to see which part of a
+                -- total that is before quoting it at somebody.
+                COALESCE(SUM(c.amount) FILTER (WHERE c.verified_at IS NOT NULL),0)::numeric
+                  AS raised_verified,
+                COALESCE(SUM(c.amount) FILTER (WHERE c.verified_at IS NULL),0)::numeric
+                  AS raised_awaiting
+           FROM caller_credits c
+          WHERE ${CREDIT_WINDOW(1, 2)}
+          GROUP BY c.user_id
        )
        SELECT u.id, u.name, u.email,
               COALESCE(c.calls,0) AS calls,
@@ -426,12 +825,23 @@ const CALLER_REPORT_SQL = `WITH calls AS (
               COALESCE(c.with_duration,0) AS with_duration,
               COALESCE(c.measured,0) AS measured,
               COALESCE(c.active_days,0) AS active_days,
-              COALESCE(w.conversions,0) AS conversions,
-              COALESCE(w.raised,0) AS raised
+              COALESCE(v.conversions,0) AS conversions,
+              COALESCE(w.credits,0) AS credits,
+              COALESCE(w.raised,0) AS raised,
+              COALESCE(w.raised_verified,0) AS raised_verified,
+              COALESCE(w.raised_awaiting,0) AS raised_awaiting
          FROM users u
          LEFT JOIN calls c ON c.user_id = u.id
+         LEFT JOIN conversions v ON v.user_id = u.id
          LEFT JOIN wins  w ON w.user_id = u.id
-        WHERE COALESCE(c.calls,0) > 0 OR COALESCE(w.conversions,0) > 0
+        -- credits > 0 is in this test deliberately. Money no longer has to
+        -- arrive through a lead, so a caller whose month was offline cash and
+        -- claimed QR payments has conversions of zero and would have dropped
+        -- off the report entirely - showing a supervisor nothing at all for
+        -- somebody who raised real money.
+        WHERE COALESCE(c.calls,0) > 0
+           OR COALESCE(v.conversions,0) > 0
+           OR COALESCE(w.credits,0) > 0
 
         UNION ALL
 
@@ -439,16 +849,24 @@ const CALLER_REPORT_SQL = `WITH calls AS (
        -- conversions on leads that were never assigned. Shown as its own row
        -- rather than dropped, because a report whose column total is quietly
        -- smaller than the dashboard's is how people stop trusting both.
+       --
+       -- Its raised columns are structurally zero and that is not a bug:
+       -- caller_credits.user_id is NOT NULL, so money with no caller has no
+       -- credit row to find. Unattributed money is not hidden, it is just
+       -- counted somewhere honest about what it is - qr.not_credited and the
+       -- per-QR breakdown on the dashboard.
        SELECT NULL::uuid, 'Unassigned', NULL,
               COALESCE(c.calls,0), COALESCE(c.connected,0),
               COALESCE(c.calls,0) - COALESCE(c.connected,0),
               COALESCE(c.leads_touched,0), COALESCE(c.total_seconds,0),
               COALESCE(c.with_duration,0), COALESCE(c.measured,0),
-              COALESCE(c.active_days,0), COALESCE(w.conversions,0), COALESCE(w.raised,0)
+              COALESCE(c.active_days,0), COALESCE(v.conversions,0),
+              0, 0, 0, 0
          FROM (SELECT 1) one
          LEFT JOIN calls c ON c.user_id IS NULL
-         LEFT JOIN wins  w ON w.user_id IS NULL
-        WHERE COALESCE(c.calls,0) > 0 OR COALESCE(w.conversions,0) > 0
+         LEFT JOIN conversions v ON v.user_id IS NULL
+
+        WHERE COALESCE(c.calls,0) > 0 OR COALESCE(v.conversions,0) > 0
 
         ORDER BY calls DESC, raised DESC`;
 
@@ -506,6 +924,11 @@ async function exportCallerReportFile(
         { header: 'Active days', value: (r) => r.active_days, kind: 'number' },
         { header: 'Leads converted', value: (r) => r.conversions, kind: 'number' },
         { header: 'Amount raised', value: (r) => r.raised, kind: 'money' },
+        // Both halves of the total, because this file is quoted at people in
+        // review conversations. A single "raised" column invites a supervisor
+        // to treat a caller's unreconciled cash claim as settled fact.
+        { header: 'Verified', value: (r) => r.raised_verified, kind: 'money' },
+        { header: 'Awaiting verification', value: (r) => r.raised_awaiting, kind: 'money' },
       ],
     });
   } catch (err) {
@@ -532,7 +955,9 @@ router.get('/reports/timeline', async (req, res) => {
               COALESCE(c.connected,0)  AS connected,
               COALESCE(n.new_leads,0)  AS new_leads,
               COALESCE(v.conversions,0) AS conversions,
-              COALESCE(v.raised,0)     AS raised
+              COALESCE(cr.raised,0)    AS raised,
+              COALESCE(cr.raised_verified,0) AS raised_verified,
+              COALESCE(cr.raised_awaiting,0) AS raised_awaiting
          FROM days d
          LEFT JOIN (
            SELECT date_trunc($3, occurred_at) AS b,
@@ -547,13 +972,29 @@ router.get('/reports/timeline', async (req, res) => {
          ) n ON n.b = d.bucket
          LEFT JOIN (
            SELECT date_trunc($3, converted_at) AS b,
-                  COUNT(*)::int AS conversions,
-                  COALESCE(SUM(converted_amount),0)::numeric AS raised
+                  COUNT(*)::int AS conversions
              -- Same rule as everywhere else: a conversion is a conversion,
              -- whether or not a receipt row exists for it yet.
              FROM leads WHERE converted_at IS NOT NULL AND ${WINDOW('converted_at', 1, 2)}
             GROUP BY 1
          ) v ON v.b = d.bucket
+         -- The money line, from credits, bucketed on the day the money landed.
+         -- It was SUM(leads.converted_amount) in the join above, which put the
+         -- chart on a different source from the caller table printed directly
+         -- beneath it on the same page: the chart's area and the table's
+         -- "Amount raised" column added up to two different totals for the
+         -- same week, and neither screen admitted it.
+         LEFT JOIN (
+           SELECT date_trunc($3, c.occurred_at) AS b,
+                  COALESCE(SUM(c.amount),0)::numeric AS raised,
+                  COALESCE(SUM(c.amount) FILTER (WHERE c.verified_at IS NOT NULL),0)::numeric
+                    AS raised_verified,
+                  COALESCE(SUM(c.amount) FILTER (WHERE c.verified_at IS NULL),0)::numeric
+                    AS raised_awaiting
+             FROM caller_credits c
+            WHERE ${CREDIT_WINDOW(1, 2)}
+            GROUP BY 1
+         ) cr ON cr.b = d.bucket
         ORDER BY d.bucket`,
       [from, to, grain]
     );
@@ -643,6 +1084,19 @@ router.get('/reports/conversion', async (req, res) => {
               -- count of zero and a rate of 0% at once - and still carry the
               -- converted lead's expectation in pipeline as if outstanding.
               COUNT(*) FILTER (WHERE l.converted_at IS NOT NULL)::int AS conversions,
+              -- STILL leads.converted_amount, and knowingly so. This report
+              -- groups by an attribute of the lead - which list it came from,
+              -- which status it reached - and a credit does not carry one: QR,
+              -- link and offline credits often have no lead at all, so reading
+              -- this from caller_credits would silently drop them and make the
+              -- "Unspecified" bucket the biggest one on the page. It therefore
+              -- answers a narrower question than the dashboard's "raised" and
+              -- will not tie out against it. Do not reconcile the two by
+              -- changing this; the honest fix is to decide what a
+              -- source-attributed figure should mean when the money arrived
+              -- without a lead. by=assigned_to is the worst of it: that is
+              -- SUM(money) GROUP BY a user column, the exact live-join shape
+              -- caller_credits exists to retire.
               COALESCE(SUM(l.converted_amount),0)::numeric AS raised,
               COALESCE(SUM(l.expected_amount) FILTER (WHERE l.converted_at IS NULL),0)::numeric AS pipeline,
               COALESCE(AVG(l.call_attempts),0)::numeric(10,1) AS avg_attempts

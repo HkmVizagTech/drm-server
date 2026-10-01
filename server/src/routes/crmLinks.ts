@@ -17,16 +17,31 @@
 // the caller could close the window. So what is logged below is honestly
 // recorded as "opened WhatsApp to send X", never as "sent".
 //
-// THE PLACEHOLDERS EARN THEIR KEEP
-// A link carrying utm_source=call&utm_content=<lead> arrives back on the site
-// tagged, and donations already store utm_source/medium/campaign - so a
-// donation that a phone call produced stops looking identical to one that
-// arrived on its own. That is the difference between the conversion report
-// being evidence and being a guess.
+// WHAT ACTUALLY COMES BACK, AND WHAT DOES NOT
+// This header used to claim that a link carrying utm_content=<lead> "arrives
+// back on the site tagged". It never did. Nothing was ever built to carry a
+// lead id home, there is no utm_content column on donations, and HKMV drops
+// its own utm.content before the snapshot reaches DRM. Anyone reading that
+// sentence would have gone looking for per-lead attribution that does not
+// exist, so it is written down here instead of quietly deleted.
+//
+// What DOES survive the round trip is utm_source, utm_medium and utm_campaign
+// - both sites forward those three untouched, and donations store all three.
+// So utm_source=call still does the one job it was put on the seeded links to
+// do: a donation that a phone call produced stops looking identical to one
+// that arrived on its own.
+//
+// CREDITING A CALLER rides on the same three fields. A link assigned to a
+// caller gets a credit_token, the token is appended to the outgoing URL as
+// utm_campaign (see send-link below), and services/hkmvSync.ts matches it back
+// when the donation syncs. utm_campaign is used because it is the only field
+// of the three that is per-link rather than per-channel, and because it needs
+// no change to either website.
 
 import { Router } from 'express';
+import { randomBytes } from 'crypto';
 import pool from '../db/pool';
-import { authenticate } from '../middleware/auth';
+import { authenticate, authorize } from '../middleware/auth';
 
 const router = Router();
 router.use(authenticate);
@@ -62,9 +77,13 @@ function fill(template: string, vars: Record<string, string>): string {
 router.get('/links', async (req, res) => {
   try {
     const rows = await pool.query(
-      `SELECT l.*, u.name AS owner_name
+      `SELECT l.*, u.name AS owner_name, cu.name AS credit_user_name
          FROM crm_links l
          LEFT JOIN users u ON l.owner_user_id = u.id
+         -- Who the money goes to, which is a different person from the owner
+         -- often enough to be worth naming: a link sits in the shared list for
+         -- everyone to send and still credits one caller.
+         LEFT JOIN users cu ON l.credit_user_id = cu.id
         WHERE l.active
           AND (l.owner_user_id IS NULL OR l.owner_user_id = $1::uuid)
         -- A caller's OWN presets first, then the temple's shared ones. They
@@ -85,8 +104,10 @@ router.get('/links', async (req, res) => {
 router.get('/links/all', async (_req, res) => {
   try {
     const rows = await pool.query(
-      `SELECT l.*, u.name AS owner_name
-         FROM crm_links l LEFT JOIN users u ON l.owner_user_id = u.id
+      `SELECT l.*, u.name AS owner_name, cu.name AS credit_user_name
+         FROM crm_links l
+         LEFT JOIN users u ON l.owner_user_id = u.id
+         LEFT JOIN users cu ON l.credit_user_id = cu.id
         ORDER BY l.sort_order, lower(l.label)`
     );
     res.json({ links: rows.rows });
@@ -110,7 +131,10 @@ router.post('/links', async (req, res) => {
     const result = await pool.query(
       `INSERT INTO crm_links (label, url, site, seva_name, message, owner_user_id, sort_order, created_by)
        VALUES ($1,$2,$3,$4,$5,$6::uuid,COALESCE($7::int, 500),$8::uuid)
-       RETURNING *`,
+       -- Null rather than absent, so every response that carries a link has the
+       -- same shape and a screen reading credit_user_name does not have to tell
+       -- "nobody is assigned" apart from "this endpoint forgot to say".
+       RETURNING *, NULL::text AS credit_user_name`,
       [
         label,
         url,
@@ -139,16 +163,20 @@ router.put('/links/:id', async (req, res) => {
     if (refusal) return res.status(refusal === 'Link not found' ? 404 : 403).json({ error: refusal });
 
     const result = await pool.query(
-      `UPDATE crm_links SET
-         label      = COALESCE($1, label),
-         url        = COALESCE($2, url),
-         site       = COALESCE($3, site),
-         seva_name  = COALESCE($4, seva_name),
-         message    = COALESCE($5, message),
-         sort_order = COALESCE($6::int, sort_order),
-         active     = COALESCE($7::boolean, active),
-         updated_at = NOW()
-       WHERE id = $8 RETURNING *`,
+      `WITH upd AS (
+         UPDATE crm_links SET
+           label      = COALESCE($1, label),
+           url        = COALESCE($2, url),
+           site       = COALESCE($3, site),
+           seva_name  = COALESCE($4, seva_name),
+           message    = COALESCE($5, message),
+           sort_order = COALESCE($6::int, sort_order),
+           active     = COALESCE($7::boolean, active),
+           updated_at = NOW()
+         WHERE id = $8 RETURNING *
+       )
+       SELECT upd.*, cu.name AS credit_user_name
+         FROM upd LEFT JOIN users cu ON cu.id = upd.credit_user_id`,
       [
         str(b.label, 80),
         str(b.url, 2000),
@@ -202,7 +230,160 @@ async function assertMayEdit(id: string, userId: string | null): Promise<string 
   return null;
 }
 
+/* --------------------------------------------------------- crediting one */
+
+/**
+ * The token a donation comes home carrying.
+ *
+ * Short, because a caller reads it off a WhatsApp message and an admin has to
+ * be able to say it down a phone line; a 32-character hex string invites
+ * transcription errors in exactly the place a mistake is silent - the money
+ * just lands unattributed.
+ *
+ * Prefixed "drm-" so it is obviously ours. This value is visible to the donor
+ * as utm_campaign in the address bar, and without the prefix it is a short
+ * nonsense word sitting where a campaign name belongs - which is how somebody
+ * "tidying up" a link ends up deleting the only thing attributing the money.
+ * The prefix also makes the token greppable in a server log and tells anybody
+ * reading the site's analytics that this is not a campaign they should expect
+ * to find in a report.
+ *
+ * The alphabet omits 0/1/i/l/o: those are the pairs that get misread when a
+ * token is read aloud or retyped from a screenshot. Ten characters of 31 is
+ * about 49 bits; against a table of a few hundred links a collision is not
+ * something that happens, and if it somehow did the unique index turns it into
+ * a failed assignment the admin can see and retry rather than two links
+ * quietly sending one caller's money to another.
+ */
+const TOKEN_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz';
+
+function mintCreditToken(): string {
+  const bytes = randomBytes(10);
+  let out = '';
+  for (let i = 0; i < 10; i++) out += TOKEN_ALPHABET[bytes[i] % TOKEN_ALPHABET.length];
+  return `drm-${out}`;
+}
+
+/**
+ * PUT /links/:id/credit - say whose money this link raises.
+ *
+ * Body { user_id } to assign, { user_id: null } to unassign.
+ *
+ * WHY THIS DOES NOT GO THROUGH assertMayEdit
+ * That check exists so a preset one caller tuned for the campaign they are
+ * working cannot change under them mid-shift, and it refuses everybody but the
+ * owner - correctly, for editing a link's wording or its URL. Assigning credit
+ * is the opposite kind of act: it decides who gets paid attention for the money
+ * a link brings in, which is an admin's call about somebody else by definition.
+ * Routing it through assertMayEdit would mean an admin could never assign a
+ * caller's own preset to that caller, which is the common case.
+ *
+ * So the guard here is role, not ownership: admin only. Nothing else in this
+ * file is admin-gated because nothing else in this file moves money.
+ */
+router.put('/links/:id/credit', authorize('admin'), async (req, res) => {
+  const raw = req.body?.user_id;
+  // Distinguish "unassign" from "you forgot the field". An absent user_id
+  // silently clearing an assignment would quietly stop crediting a caller with
+  // nothing on screen to show it had happened.
+  if (raw === undefined) {
+    return res.status(400).json({ error: 'Send user_id to assign, or user_id: null to unassign' });
+  }
+  const userId = raw === null || raw === '' ? null : String(raw);
+
+  try {
+    const existing = await pool.query(
+      `SELECT id, credit_token FROM crm_links WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!existing.rows.length) return res.status(404).json({ error: 'Link not found' });
+
+    if (userId) {
+      const user = await pool.query(`SELECT id FROM users WHERE id = $1::uuid`, [userId]);
+      if (!user.rows.length) return res.status(404).json({ error: 'That caller no longer exists' });
+    }
+
+    // THE TOKEN IS MINTED ONCE AND NEVER REISSUED.
+    //
+    // Every link already sent sits in some donor's WhatsApp history, and they
+    // open those weeks later - that is most of what a saved link is for.
+    // Changing the token would orphan all of them: the donation still arrives,
+    // but its utm_campaign matches nothing and the money goes uncredited with
+    // no error anywhere. So reassigning only moves credit_user_id, and a token
+    // minted for the previous assignee keeps working for the new one.
+    //
+    // Unassigning leaves the token in place for the same reason: if the link is
+    // assigned again later, the links already in the wild start crediting
+    // again instead of being dead.
+    const token = (existing.rows[0].credit_token as string | null) ?? (userId ? mintCreditToken() : null);
+
+    const result = await pool.query(
+      `WITH upd AS (
+         UPDATE crm_links SET
+           credit_user_id     = $2::uuid,
+           credit_token       = COALESCE($3::varchar, credit_token),
+           -- Only stamped when somebody is actually assigned, so these two
+           -- keep answering "who assigned this, and when" rather than being
+           -- overwritten by the unassignment that ended it.
+           credit_assigned_at = CASE WHEN $2::uuid IS NULL THEN credit_assigned_at ELSE NOW() END,
+           credit_assigned_by = CASE WHEN $2::uuid IS NULL THEN credit_assigned_by ELSE $4::uuid END,
+           updated_at         = NOW()
+         WHERE id = $1 RETURNING *
+       )
+       SELECT upd.*, cu.name AS credit_user_name
+         FROM upd LEFT JOIN users cu ON cu.id = upd.credit_user_id`,
+      [req.params.id, userId, token, req.user?.userId ?? null]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('crm.setLinkCredit error:', err);
+    res.status(500).json({ error: 'Could not change who this link credits' });
+  }
+});
+
 /* ---------------------------------------------------------- sending one */
+
+/**
+ * Put the link's credit token on the outgoing URL, as utm_campaign.
+ *
+ * This is the whole mechanism by which a donation finds its way back to a
+ * caller. utm_campaign is used because it is one of the three fields both
+ * websites forward to DRM untouched, so this works today with no change to
+ * either site - see the header of this file for what does NOT come back.
+ *
+ * Built with the URL API rather than by appending "&utm_campaign=...", because
+ * the saved links are typed by hand in Calling settings and several of the
+ * seeded ones already carry a query string. String concatenation gets the
+ * first "?" versus "&" wrong on a link that has no params yet, and silently
+ * buries the token inside the fragment on a link that ends in "#donate" - and
+ * both failures look like a working link right up until nobody is credited.
+ *
+ * AN EXISTING utm_campaign IS OVERWRITTEN, deliberately. Every seeded link
+ * carries utm_campaign=calling, which is a channel label the reports do not
+ * read and nothing is attributed by. Keeping it would mean assigning a link to
+ * a caller appears to work on screen and then credits nobody, which is the
+ * worst of the available outcomes: the old value is a label, the token is the
+ * money. The link's own campaign is still recoverable from utm_source and
+ * utm_medium, which are left alone.
+ *
+ * A URL this cannot parse is returned exactly as it came in. POST /links
+ * requires an http(s) scheme, but the url a caller can type into the send box
+ * is only length-checked, and rows seeded or edited before that check existed
+ * are not revalidated - so "harekrishnavizag.org/gau-seva" does reach here.
+ * That send must still go out: losing the donation to save the bookkeeping is
+ * the wrong way round.
+ */
+function withCreditToken(url: string, token: string | null): string {
+  if (!token) return url;
+  try {
+    const u = new URL(url);
+    u.searchParams.set('utm_campaign', token);
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
 
 /**
  * POST /leads/:id/send-link - work out the WhatsApp link, and record it.
@@ -242,11 +423,14 @@ router.post('/leads/:id/send-link', async (req, res) => {
     const caller = String(L.caller_name ?? '').trim();
     const amount = b.amount ?? L.expected_amount ?? null;
 
-    const url = fill(rawUrl, {
-      phone: L.phone,
-      lead: String(L.id).slice(0, 8),
-      caller: caller.replace(/\s+/g, '-').toLowerCase(),
-    });
+    const url = withCreditToken(
+      fill(rawUrl, {
+        phone: L.phone,
+        lead: String(L.id).slice(0, 8),
+        caller: caller.replace(/\s+/g, '-').toLowerCase(),
+      }),
+      (link?.credit_token as string | null) ?? null
+    );
 
     // A caller who edited the text in the box gets exactly what they typed.
     const rawMessage =
@@ -307,10 +491,16 @@ router.post('/leads/:id/send-link', async (req, res) => {
 router.post('/links/:id/copy', async (req, res) => {
   try {
     const result = await pool.query(
+      // The credit columns are deliberately not among the ones copied. A
+      // credit_token is unique and identifies ONE link, so duplicating it would
+      // be refused by the index anyway - but the assignment must not come along
+      // either: copying a link assigned to Ana would otherwise hand her the
+      // money from every link anybody made out of hers. A copy starts
+      // unassigned, and an admin assigns it on purpose.
       `INSERT INTO crm_links (label, url, site, seva_name, message, owner_user_id, sort_order, created_by)
        SELECT COALESCE($2, label || ' (mine)'), url, site, seva_name, message, $3::uuid, 0, $3::uuid
          FROM crm_links WHERE id = $1
-       RETURNING *`,
+       RETURNING *, NULL::text AS credit_user_name`,
       [req.params.id, str(req.body?.label, 80), req.user?.userId ?? null]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Link not found' });

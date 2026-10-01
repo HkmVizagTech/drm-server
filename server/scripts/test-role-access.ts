@@ -214,14 +214,21 @@ async function main() {
   // QR payment today. Raised used to be windowed on the lead's created_at, so
   // today read zero - on the caller's screen and the admin's.
   await pool.query(`TRUNCATE leads RESTART IDENTITY CASCADE`);
-  await pool.query(
+  const oldLead = await pool.query(
     `INSERT INTO leads (phone, name, assigned_to, created_at, status, converted_at, converted_amount, converted_via)
      VALUES ('9700000001','Old sheet donor',$1::uuid, NOW() - INTERVAL '120 days',
-             'converted', NOW(), 2500, 'manual')`,
+             'converted', NOW(), 2500, 'manual') RETURNING id`,
     [CALLER]
   );
+  // Credited on the day the money arrived, which is the thing being tested -
+  // the lead itself is four months old.
+  await pool.query(
+    `INSERT INTO caller_credits (user_id, amount, kind, occurred_at, lead_id)
+     VALUES ($1::uuid, 2500, 'lead', NOW(), $2::uuid)`,
+    [CALLER, oldLead.rows[0].id]
+  );
   r = await req('GET', '/api/crm/dashboard?preset=today', caller);
-  check('the money shows for today', Number(r.body.leads?.raised) === 2500, r.body.leads);
+  check('the money shows for today', Number(r.body.money?.raised) === 2500, r.body.money);
   check('and one donor paid', r.body.leads?.donors_paid === 1, r.body.leads);
   check(
     'while the cohort still reads honestly - nobody was ADDED today',
@@ -229,7 +236,7 @@ async function main() {
     r.body.leads
   );
   r = await req('GET', '/api/crm/dashboard?preset=today', admin);
-  check('the admin sees the same money', Number(r.body.leads?.raised) === 2500, r.body.leads);
+  check('the admin sees the same money', Number(r.body.money?.raised) === 2500, r.body.money);
 
   console.log('\n8. a QR payment on an unowned lead credits whoever shared it');
   await pool.query(`TRUNCATE leads, qr_shares, qr_payments, razorpay_qrs RESTART IDENTITY CASCADE`);

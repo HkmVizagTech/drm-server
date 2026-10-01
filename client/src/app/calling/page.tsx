@@ -40,6 +40,8 @@ import {
   buttonSecondary,
 } from "@/components/ui";
 
+type CreditKind = "qr" | "link" | "lead" | "offline" | "manual";
+
 interface Dashboard {
   range: { from: string; to: string; label: string };
   /**
@@ -50,13 +52,31 @@ interface Dashboard {
    * other.
    */
   scope: "mine" | "team";
+  /**
+   * EVERY RUPEE ON THIS SCREEN COMES FROM HERE, and nothing else may be summed
+   * into a money figure.
+   *
+   * It sits apart from `leads` because it is no longer a fact about leads: a
+   * QR payment, a link donation and cash a caller banked are all credits and
+   * none of them need a lead to exist. `leads.raised` is still sent as a
+   * mirror of `money.raised` for anything that has not moved over yet - this
+   * screen has, so it reads `money`.
+   */
+  money: {
+    raised: number;
+    credits: number;
+    /** Watched by a system, or ticked off against the bank statement by a person. */
+    verified: number;
+    /** Reported by a caller and not yet reconciled. Counted, and said so. */
+    awaiting_verification: number;
+    by_kind: Record<CreditKind, number>;
+  };
   leads: {
     received: number;
     converted: number;
     conversion_rate: number;
+    /** A temporary mirror of money.raised. Do not read it; read money.raised. */
     raised: number;
-    /** Of `raised`, how much has a receipt from one of the sites behind it. */
-    raised_receipted: number;
     converted_unreceipted: number;
     /** Donors whose money arrived in this window, however long ago they were added. */
     donors_paid: number;
@@ -80,10 +100,13 @@ interface Dashboard {
   qr: {
     shared: number;
     paid: number;
-    raised: number;
     awaiting: number;
-    /** Every rupee through a QR in this period, attributed or not. */
+    /** QR money credited to a named caller — the same figure as money.by_kind.qr. */
+    credited: number;
+    /** Every rupee through a QR in this period, attributed or not. A SUPERSET of `credited`. */
     through_qrs: number;
+    /** through_qrs minus credited: QR money nobody has been credited with yet. */
+    not_credited: number;
     unattributed: number;
   };
   by_qr: {
@@ -105,6 +128,22 @@ const PRESETS = [
   { key: "quarter", label: "90 days" },
   { key: "year", label: "This year" },
   { key: "all", label: "All time" },
+];
+
+// What each kind of credit actually is, in the words a caller would use.
+// "You raised ₹40,000" is not actionable; "₹31,000 through your QR, ₹9,000 you
+// banked yourself" is, and the old model could not express it at all - it had
+// one column on leads and no record of where the money had come from.
+//
+// Duplicated from the earnings screen rather than shared, because a page
+// module is not a place to import constants from; if a third screen needs
+// these they belong in lib.
+const CREDIT_KINDS: { key: CreditKind; label: string }[] = [
+  { key: "qr", label: "QR payments" },
+  { key: "link", label: "Donation links" },
+  { key: "lead", label: "After a call" },
+  { key: "offline", label: "Collected by PhonePe" },
+  { key: "manual", label: "Credited by hand" },
 ];
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -263,10 +302,13 @@ export default function CallingDashboardPage() {
             people who were ADDED in this window, which is a different question
             and read zero for any caller working an older list - a QR payment
             taken today against a lead from a March sheet showed nothing at
-            all, on the caller's screen and the admin's alike. */}
+            all, on the caller's screen and the admin's alike.
+            Read from `money`, not from leads.raised: that field is a mirror
+            kept only until every screen has moved over, and reaching for it is
+            how the next tile ends up summing a different table again. */}
         <StatTile
           label="Raised"
-          value={currency(data?.leads.raised ?? 0)}
+          value={currency(data?.money.raised ?? 0)}
           loading={loading}
           accent="brand"
           icon="rupee"
@@ -321,20 +363,71 @@ export default function CallingDashboardPage() {
         />
       </div>
 
-      {/* WHERE THE MONEY CAME FROM, AND HOW WELL IT IS EVIDENCED
-          Raised counts every conversion — a donation the site receipted, a QR
-          payment Razorpay confirmed, and cash a caller recorded at the
-          counter. Only the first has a receipt row behind it in DRM. Saying so
-          is better than the alternative this replaced, which was to count only
-          the receipted ones and show every caller who had taken QR payments or
-          cash a total of zero. */}
-      {data && data.leads.raised > 0 && data.leads.raised_receipted < data.leads.raised && (
-        <Alert tone="info" title="About the money">
-          {currency(data.leads.raised_receipted)} of that has a receipt behind it from one of the sites. The rest —{" "}
-          {currency(data.leads.raised - data.leads.raised_receipted)} across{" "}
-          {number(data.leads.converted_unreceipted)}{" "}
-          {data.leads.converted_unreceipted === 1 ? "donor" : "donors"} — is QR payments and cash recorded by hand.
-          Real money, and it links itself to a receipt as soon as the site&apos;s own entry syncs across.
+      {/* WHERE THE MONEY CAME FROM
+          One total answers "how much" and nothing else. This answers the
+          question the person reading it actually has next, which is "through
+          what" - and it is only possible at all because every rupee is now a
+          credit row carrying its own kind. The figure this card replaced split
+          the money by whether a receipt had synced across yet, which is a fact
+          about the websites rather than about the calling. */}
+      {data && data.money.raised > 0 && (
+        <Card className="mb-6">
+          <CardHeader
+            title="How that was raised"
+            icon="rupee"
+            subtitle={mine ? "Every rupee credited to you in this period" : "Every rupee credited in this period"}
+            action={
+              <Link
+                href="/calling/earnings"
+                className="inline-flex items-center gap-1 text-xs font-medium text-brand-700 hover:underline"
+              >
+                Every credit
+                <Icon name="arrowRight" size={12} />
+              </Link>
+            }
+          />
+          <ul className="grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            {CREDIT_KINDS.map((k) => (
+              <li key={k.key} className="rounded-control bg-sunken px-3 py-2.5">
+                <span className="block text-2xs font-medium uppercase tracking-wide text-ink-muted">{k.label}</span>
+                <span className="mt-0.5 block truncate text-base font-semibold tabular-nums text-ink">
+                  {currency(data.money.by_kind[k.key])}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 border-t border-line-soft pt-3 text-xs text-ink-muted">
+            {currency(data.money.verified)} confirmed
+            {data.money.awaiting_verification > 0 && (
+              <>
+                {" · "}
+                <span className="font-medium text-warn">
+                  {currency(data.money.awaiting_verification)} awaiting a check
+                </span>
+              </>
+            )}
+            {" — across "}
+            {number(data.money.credits)} credit{data.money.credits === 1 ? "" : "s"}
+          </p>
+        </Card>
+      )}
+
+      {/* WHY THIS IS NOT FOLDED INTO THE TOTAL
+          Offline money is a caller's own report: it went to a PhonePe or UPI
+          number, so nothing observed it and nobody can tell from one "raised"
+          figure which part of it a machine saw arrive. It is counted either
+          way - the alternative this replaced showed every caller who worked
+          that way a total of zero - but the screen says which part is which,
+          in words, because "awaiting" looks like an accusation to the person
+          whose money it is and it is not one. */}
+      {data && data.money.awaiting_verification > 0 && (
+        <Alert tone="info" title="About the money awaiting a check">
+          {currency(data.money.awaiting_verification)} of that was collected directly on a PhonePe or UPI number.
+          Nothing watched it arrive, so it counts on {mine ? "your" : "the caller's"} word until an admin finds it
+          on the bank statement and ticks it off. Awaiting a check means nobody has looked yet.{" "}
+          <Link href="/calling/collected" className="font-medium text-brand-700 hover:underline">
+            {mine ? "Your collections" : "The verification queue"}
+          </Link>
         </Alert>
       )}
 
@@ -461,11 +554,24 @@ export default function CallingDashboardPage() {
                   </li>
                 ))}
             </ul>
+            {/* through_qrs is a SUPERSET of the credited figure, not a second
+                pile of money — adding the two would count the same payments
+                twice. The gap between them has a name on the server
+                (`not_credited`) and is printed here rather than left for the
+                reader to subtract in their head and wonder which is wrong. */}
             <p className="mt-3 border-t border-line-soft pt-3 text-xs text-ink-muted">
-              {currency(data.qr.through_qrs)} through QRs in this period
+              {currency(data.qr.through_qrs)} through QRs in this period, of which{" "}
+              {currency(data.qr.credited)} has been credited to a caller
+              {data.qr.not_credited > 0 && (
+                <>
+                  {" "}
+                  and <span className="text-warn">{currency(data.qr.not_credited)}</span> has not
+                </>
+              )}
+              .
               {data.qr.unattributed > 0 && (
                 <>
-                  {" — "}
+                  {" "}
                   {number(data.qr.unattributed)} payment{data.qr.unattributed === 1 ? " is" : "s are"} still
                   waiting to be matched to a donor, which is the only part of this the reports above cannot see.
                 </>
@@ -502,12 +608,15 @@ export default function CallingDashboardPage() {
           ) : (
             <div className="grid gap-4 sm:grid-cols-3">
               <StatTile label="Sent" value={number(data.qr.shared)} icon="upload" sub="during calls in this period" />
+              {/* `credited`, not a second sum of its own: this is literally
+                  money.by_kind.qr, so the tile and the breakdown above cannot
+                  come to different answers about the same QR payments. */}
               <StatTile
                 label="Paid"
                 value={number(data.qr.paid)}
                 accent="good"
                 icon="rupee"
-                sub={`${currency(data.qr.raised)} in all`}
+                sub={`${currency(data.qr.credited)} credited`}
               />
               <StatTile
                 label="Still waiting"

@@ -88,6 +88,19 @@ export const navGroups: NavGroup[] = [
       // nobody finds is a list nobody rings.
       { href: "/calling/pending", label: "Nearly gave", icon: "inbox" },
       { href: "/calling/payments", label: "QR payments", icon: "qr" },
+      // The two money screens, under Calling rather than under Donors: the
+      // question they answer is "what came in under this caller", which is a
+      // fact about the phone work and not about the donor.
+      //
+      // Shown to callers as well as admins. Both endpoints scope themselves by
+      // role server-side, so a caller opening either sees their own money and
+      // nothing else - which is the thing they most need to be able to check
+      // without asking an admin.
+      // "Money raised" rather than "What I raised": one label has to serve a
+      // caller reading their own ledger and an admin reading the team's, and
+      // it is also what the breadcrumb prints at the top of the page.
+      { href: "/calling/earnings", label: "Money raised", icon: "trendUp" },
+      { href: "/calling/collected", label: "Collected by PhonePe", icon: "rupee" },
       { href: "/calling/uploads", label: "Uploaded sheets", icon: "upload" },
     ],
   },

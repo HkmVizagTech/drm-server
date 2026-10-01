@@ -364,17 +364,42 @@ async function main() {
      VALUES ('9811100000','A',$1::uuid,'converted', NOW(), 2000, $2::uuid, 'auto', $3::uuid)`,
     [ANA, d1.rows[0].id, p1.rows[0].id]
   );
-  await pool.query(
+  const leadB = await pool.query(
     `INSERT INTO leads (phone, name, assigned_to, status, converted_at, converted_amount, converted_via)
-     VALUES ('9822200000','B',$1::uuid,'converted', NOW(), 1, 'manual')`,
+     VALUES ('9822200000','B',$1::uuid,'converted', NOW(), 1, 'manual') RETURNING id`,
     [ANA]
+  );
+
+  // MONEY IS CREDITED NOW, NOT DERIVED FROM leads.assigned_to.
+  //
+  // This block used to end here: the two leads above were inserted straight
+  // into the table and the dashboard read SUM(converted_amount) back out of
+  // them. That is the behaviour that let a reassignment rewrite history, so
+  // the reports read caller_credits instead and the rows the application
+  // would have written have to be written here too.
+  const leadA = await pool.query(`SELECT id FROM leads WHERE phone = '9811100000'`);
+  await pool.query(
+    `INSERT INTO caller_credits (user_id, amount, kind, occurred_at, lead_id, donation_id)
+     VALUES ($1::uuid, 2000, 'lead', NOW(), $2::uuid, $3::uuid),
+            ($1::uuid, 1,    'qr',   NOW(), $4::uuid, NULL)`,
+    [ANA, leadA.rows[0].id, d1.rows[0].id, leadB.rows[0].id]
   );
 
   r = await call('GET', '/api/crm/dashboard?preset=today');
   check('both conversions counted', r.body.leads.converted === 2, r.body.leads);
-  check('the QR rupee is in the total', Number(r.body.leads.raised) === 2001, r.body.leads.raised);
-  check('and the receipted part is named separately', Number(r.body.leads.raised_receipted) === 2000, r.body.leads);
+  check('the QR rupee is in the total', Number(r.body.money.raised) === 2001, r.body.money);
+  check('and it is broken down by how it was raised',
+    Number(r.body.money.by_kind.lead) === 2000 && Number(r.body.money.by_kind.qr) === 1, r.body.money.by_kind);
   check('with one conversion having no receipt yet', r.body.leads.converted_unreceipted === 1, r.body.leads);
+
+  console.log('\n11. reassigning a lead does not move money that was already raised');
+  // The whole reason credit became a written row rather than a live join.
+  // Under the old model this reassignment silently moved 2,000 rupees out of
+  // Ana's past month and into somebody else's, retroactively, for every
+  // report anybody had ever run.
+  await pool.query(`UPDATE leads SET assigned_to = $1::uuid WHERE id = $2::uuid`, [ADMIN, leadA.rows[0].id]);
+  r = await call('GET', '/api/crm/dashboard?preset=today');
+  check("the money is still on the caller who raised it", Number(r.body.money.raised) === 2001, r.body.money);
 
   console.log(failures ? `\n${failures} FAILURE(S)\n` : '\nall green\n');
   server.close();

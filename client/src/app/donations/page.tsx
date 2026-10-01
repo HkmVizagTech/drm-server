@@ -4,7 +4,7 @@ import { Fragment, useCallback, useEffect, useRef, useState, FormEvent } from "r
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { currency, number, shortDate, titleCase } from "@/lib/format";
+import { clockTime, currency, dateTime, number, shortDate, titleCase } from "@/lib/format";
 import { SourceCell, siteLabel } from "@/components/source";
 import { ExportButton } from "@/components/export-button";
 import {
@@ -83,6 +83,38 @@ interface DonationsResponse {
 // filter most real rows.
 const purposes = ["annadan", "temple_maintenance", "festival", "general"];
 
+/**
+ * The named date windows the server resolves, in the order the office thinks
+ * in. These values are exactly what GET /api/donations and both export routes
+ * accept; the arithmetic behind each one lives in resolvePeriod() on the
+ * server and is deliberately not repeated here.
+ *
+ * A FINANCIAL YEAR HERE IS THE INDIAN ONE, 1 April to 31 March. This temple
+ * issues 80G receipts, so that is the only year its accountants and its donors
+ * ever mean - which is why the calendar year is labelled as the calendar year
+ * rather than left as "This year" for someone to mistake for the other one.
+ */
+const PERIODS = [
+  { value: "today", label: "Today" },
+  { value: "yesterday", label: "Yesterday" },
+  { value: "this_week", label: "This week" },
+  { value: "last_7", label: "Last 7 days" },
+  { value: "this_month", label: "This month" },
+  { value: "last_month", label: "Last month" },
+  { value: "this_quarter", label: "This quarter" },
+  { value: "this_fy", label: "This financial year" },
+  { value: "last_fy", label: "Last financial year" },
+  { value: "this_year", label: "This calendar year" },
+  { value: "all", label: "All time" },
+];
+
+// The four the office reaches for without thinking: today's takings, the month
+// being reconciled, and the two financial years every 80G question is about.
+// The rest are one click further away in the dropdown beside them.
+const QUICK_PERIODS = PERIODS.filter((p) =>
+  ["today", "this_month", "this_fy", "last_fy"].includes(p.value)
+);
+
 // Mirrors GROUP_LABELS in server/src/utils/pageGroups.ts - shown when the list
 // arrives filtered to a whole bucket from the Donation pages screen.
 const GROUP_FILTER_LABELS: Record<string, string> = {
@@ -131,6 +163,9 @@ export default function DonationsPage() {
   const [receipt, setReceipt] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  // Empty means no preset, which the server reads as an open window - the same
+  // list this screen has always opened on.
+  const [period, setPeriod] = useState("");
   const [page, setPage] = useState(1);
   const [showModal, setShowModal] = useState(false);
   const [showOffline, setShowOffline] = useState(false);
@@ -140,7 +175,7 @@ export default function DonationsPage() {
     return () => clearTimeout(t);
   }, [search]);
 
-  useEffect(() => setPage(1), [debouncedSearch, purpose, receipt, fromDate, toDate, siteFilter, pageFilter, groupFilter]);
+  useEffect(() => setPage(1), [debouncedSearch, purpose, receipt, period, fromDate, toDate, siteFilter, pageFilter, groupFilter]);
   // Changing site invalidates a page or group filter that belongs to the other
   // site. Skipped on the very first run: this effect and the deep-link seeding
   // effect both fire on mount, and without the guard this one would wipe the
@@ -170,13 +205,51 @@ export default function DonationsPage() {
     if (debouncedSearch) params.set("search", debouncedSearch);
     if (purpose) params.set("purpose", purpose);
     if (receipt) params.set("receipt_generated", receipt);
+    // The preset rides in the same object as everything else, so the download
+    // covers the period on screen rather than whatever the export route would
+    // have defaulted to. The two are never both set - see choosePeriod below -
+    // but the server would ignore this one if they were.
+    if (period) params.set("period", period);
     if (fromDate) params.set("from_date", fromDate);
     if (toDate) params.set("to_date", toDate);
     if (siteFilter) params.set("source_site", siteFilter);
     if (pageFilter) params.set("source_page", pageFilter);
     if (groupFilter) params.set("group", groupFilter);
     return params;
-  }, [page, debouncedSearch, purpose, receipt, fromDate, toDate, siteFilter, pageFilter, groupFilter]);
+  }, [page, debouncedSearch, purpose, receipt, period, fromDate, toDate, siteFilter, pageFilter, groupFilter]);
+
+  /**
+   * Picking a preset clears the custom range, and typing a custom date clears
+   * the preset.
+   *
+   * AN EXPLICIT from_date/to_date BEATS period on the server (resolveDateWindow
+   * in routes/donations.ts), so a screen holding both would show "This
+   * financial year" selected while the list - and the file downloaded from it -
+   * covered the two dates in the boxes instead. The office reconciles those
+   * files against a bank statement and sends them to auditors, so a spreadsheet
+   * whose period is not the one the person picked is wrong in somebody else's
+   * hands. Only one of the two can be on screen at a time.
+   */
+  const choosePeriod = (next: string) => {
+    setPeriod(next);
+    // Not when the preset is being cleared: "no preset" while a range is typed
+    // is the normal state of this control, and wiping the range there would
+    // throw away dates nobody asked to lose.
+    if (next) {
+      setFromDate("");
+      setToDate("");
+    }
+  };
+
+  const chooseFrom = (value: string) => {
+    setFromDate(value);
+    if (value) setPeriod("");
+  };
+
+  const chooseTo = (value: string) => {
+    setToDate(value);
+    if (value) setPeriod("");
+  };
 
   const fetchDonations = useCallback(() => {
     setLoading(true);
@@ -211,6 +284,7 @@ export default function DonationsPage() {
     setSearch("");
     setPurpose("");
     setReceipt("");
+    setPeriod("");
     setFromDate("");
     setToDate("");
     setSiteFilter("");
@@ -223,6 +297,7 @@ export default function DonationsPage() {
     debouncedSearch,
     purpose,
     receipt,
+    period,
     fromDate,
     toDate,
     siteFilter,
@@ -230,6 +305,19 @@ export default function DonationsPage() {
     groupFilter,
   ].filter(Boolean).length;
   const hasFilters = activeFilters > 0;
+  const customRange = Boolean(fromDate || toDate);
+  /**
+   * What the list on screen covers, in words.
+   *
+   * A preset is NAMED rather than resolved into two dates. Working out what
+   * "this financial year" means is resolvePeriod()'s job on the server, and a
+   * second copy of that arithmetic here would eventually disagree with the file
+   * people download - and a date range is the one claim about an export that
+   * gets forwarded to an auditor without the screen it came from.
+   */
+  const windowLabel = customRange
+    ? `${fromDate ? shortDate(fromDate) : "the first donation"} to ${toDate ? shortDate(toDate) : "today"}`
+    : PERIODS.find((p) => p.value === period)?.label ?? "All time";
   // Only offer pages belonging to the selected site - a /janmashtami filter
   // combined with the annadan site returns nothing and looks broken.
   const visiblePages = siteFilter ? sources.pages.filter((p) => p.site === siteFilter) : sources.pages;
@@ -254,7 +342,10 @@ export default function DonationsPage() {
                 path="/api/donations/export"
                 params={filterParams()}
                 filename="donations"
-                hint={data ? `${number(data.total)} donations match these filters` : undefined}
+                // The period is named on the button itself: this file gets
+                // emailed on, and by then nobody can see which dates were
+                // selected when it was taken.
+                hint={data ? `${number(data.total)} donations · ${windowLabel}` : undefined}
               />
             )}
             <Button icon="plus" onClick={() => setShowModal(true)}>
@@ -270,10 +361,12 @@ export default function DonationsPage() {
           purpose or date - without it the page shows rows but never a total. */}
       {data && (
         <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+          {/* The period sits under the money, which is where the eye already
+              is - the number and what it covers should never be read apart. */}
           <StatTile
             label={hasFilters ? "Filtered total" : "All-time total"}
             value={currency(data.filteredAmount)}
-            sub={`${number(data.total)} donations`}
+            sub={`${number(data.total)} donations · ${windowLabel}`}
             accent="brand"
           />
           <StatTile
@@ -285,6 +378,65 @@ export default function DonationsPage() {
       )}
 
       <Toolbar onClear={clearFilters} activeCount={activeFilters}>
+        {/* The date comes first and takes the whole row. Every question this
+            screen is opened with starts with a period - the day's takings, the
+            month being reconciled, the financial year on an 80G query - and
+            everything below only narrows it. */}
+        <div className="w-full">
+          <div className="flex flex-wrap items-end gap-2.5">
+            <Field label="Period">
+              <div className="flex flex-wrap items-center gap-2">
+                {/* A segmented control rather than buttons, because these show
+                    which filter is on rather than offering an action. */}
+                <SegmentedControl
+                  options={QUICK_PERIODS}
+                  value={period}
+                  onChange={choosePeriod}
+                  size="sm"
+                />
+                <Select
+                  value={period}
+                  onChange={choosePeriod}
+                  className="min-w-[13rem]"
+                  ariaLabel="Date period"
+                  options={[
+                    // The empty value is both "no preset" and what a typed
+                    // range leaves behind, so it says which of the two is in
+                    // force - a dropdown reading "All time" over a list
+                    // showing one week is the thing this screen must not do.
+                    { value: "", label: customRange ? "Custom range" : "No preset" },
+                    ...PERIODS,
+                  ]}
+                />
+              </div>
+            </Field>
+            {/* A bare YYYY-MM-DD is what the server wants and what the date
+                input gives, so these two never go near new Date() on the way
+                out. */}
+            <Field label="From" htmlFor="donations-from" className="w-40">
+              <Input
+                id="donations-from"
+                type="date"
+                value={fromDate}
+                onChange={(e) => chooseFrom(e.target.value)}
+              />
+            </Field>
+            <Field label="To" htmlFor="donations-to" className="w-40">
+              <Input
+                id="donations-to"
+                type="date"
+                value={toDate}
+                onChange={(e) => chooseTo(e.target.value)}
+              />
+            </Field>
+          </div>
+          <p className="mt-1.5 text-xs text-ink-faint">
+            A financial year here is the Indian one, 1 April to 31 March — the year an 80G receipt is counted
+            in. Picking a preset clears the dates, and typing a date clears the preset: sent both, the server
+            uses the dates and ignores the preset, so only one of the two is ever on screen.
+          </p>
+        </div>
+
         <Field label="Search" htmlFor="donations-search" className="flex-1 min-w-[15rem]">
           <SearchInput
             id="donations-search"
@@ -331,25 +483,6 @@ export default function DonationsPage() {
             ))}
           </Select>
         </Field>
-        {/* A bare YYYY-MM-DD is what the server wants and what the date input
-            gives, so these two never go near new Date() on the way out. */}
-        <Field label="From" htmlFor="donations-from" className="w-40">
-          <Input
-            id="donations-from"
-            type="date"
-            value={fromDate}
-            onChange={(e) => setFromDate(e.target.value)}
-          />
-        </Field>
-        <Field label="To" htmlFor="donations-to" className="w-40">
-          <Input
-            id="donations-to"
-            type="date"
-            value={toDate}
-            onChange={(e) => setToDate(e.target.value)}
-          />
-        </Field>
-
         {/* A group filter arrives from a link and has no dropdown of its own,
             so say so plainly - otherwise the list looks mysteriously short. */}
         {groupFilter && (
@@ -422,6 +555,11 @@ export default function DonationsPage() {
                   </Td>
                   <Td align="right" className="whitespace-nowrap text-xs text-ink-muted">
                     {shortDate(d.created_at)}
+                    {/* The hour matters here: the office reconciles this list
+                        against a bank statement, and two donations from the
+                        same donor on the same day are told apart by nothing
+                        else. All times are IST. */}
+                    <div className="text-ink-faint">{clockTime(d.created_at)}</div>
                   </Td>
                   <Td align="right">
                     <Icon
@@ -582,8 +720,8 @@ function DonationDetail({ donation, onChanged }: { donation: Donation; onChanged
         <DetailField label="Payment ref" value={donation.payment_ref} mono />
 
         <DetailField label="Receipt no." value={donation.receipt_number} mono />
-        <DetailField label="Receipt issued" value={donation.receipt_issued_at ? shortDate(donation.receipt_issued_at) : null} />
-        <DetailField label="Received on" value={shortDate(donation.created_at)} />
+        <DetailField label="Receipt issued" value={donation.receipt_issued_at ? dateTime(donation.receipt_issued_at) : null} />
+        <DetailField label="Received on" value={dateTime(donation.created_at)} />
         <DetailField label="UTM source" value={donation.utm_source} />
         <DetailField label="UTM campaign" value={donation.utm_campaign} />
       </dl>

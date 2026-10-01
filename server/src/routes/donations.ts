@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import pool from '../db/pool';
+import { istDate } from '../bootTimezone';
 import { normalizeAddress, type Address } from '../utils/address';
 import { getReceipt, receiptSourceForDonation } from '../services/receipts';
 import { authenticate, authorize } from '../middleware/auth';
@@ -31,6 +32,114 @@ interface DonationFilters {
   next: number;
 }
 
+/** Inclusive YYYY-MM-DD bounds. A null is an open end, not "today". */
+interface DateWindow {
+  from: string | null;
+  to: string | null;
+}
+
+export type DonationPeriod =
+  | 'today'
+  | 'yesterday'
+  | 'this_week'
+  | 'last_7'
+  | 'this_month'
+  | 'last_month'
+  | 'this_quarter'
+  | 'this_fy'
+  | 'last_fy'
+  | 'this_year'
+  | 'all';
+
+/** Calendar arithmetic on a YYYY-MM-DD string, with no timezone in play.
+ *
+ * toISOString is safe here and only here: the probe is built with Date.UTC
+ * from parts that are already the Indian calendar date, so rendering it back
+ * in UTC returns exactly those parts. That is a different thing from
+ * `new Date().toISOString()`, which asks a clock what day it is and gets the
+ * answer in UTC - the mistake bootTimezone exists to stop. */
+function shiftDays(day: string, delta: number): string {
+  const [y, m, d] = day.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + delta)).toISOString().slice(0, 10);
+}
+
+/** The first of a month, with the month number allowed to run out of range:
+ *  month 0 is December of the year before, month 13 January of the next. That
+ *  is what makes "last month" on the 1st of January land in the right year. */
+function monthStart(year: number, month: number): string {
+  return new Date(Date.UTC(year, month - 1, 1)).toISOString().slice(0, 10);
+}
+
+/**
+ * Turn a named period into a date window.
+ *
+ * RESOLVED ON THE INDIAN CALENDAR, by way of istDate(). The idiom this avoids
+ * is `new Date().toISOString().slice(0, 10)`, which renders UTC however the
+ * process is configured: between midnight and 05:30 IST it names yesterday, so
+ * "Today" would list yesterday's donations for the first five and a half hours
+ * of every day and "This month" would start on the wrong day every 1st.
+ *
+ * THE FINANCIAL YEAR HERE IS THE INDIAN ONE, 1 April to 31 March. This temple
+ * issues 80G certificates, and the only year its accountants, its auditors and
+ * its donors ever mean is that one. Resolving this_fy as a calendar year would
+ * hand somebody reconciling 80G totals a figure that looks plausible and is
+ * three months wrong in both directions.
+ *
+ * An unrecognised value yields an open window rather than an error, so a stale
+ * bookmark or a typo shows the unfiltered list instead of a 400. Nothing from
+ * `period` ever reaches SQL - it only chooses which computed dates get bound.
+ */
+function resolvePeriod(period: string, today: string = istDate()): DateWindow {
+  const [year, month] = today.split('-').map(Number);
+
+  // The financial year is named by the April it opened in, so anything from
+  // January to March still belongs to the year before.
+  const fyYear = month >= 4 ? year : year - 1;
+  // 1, 4, 7 or 10 - the first month of the calendar quarter today sits in.
+  const quarterStartMonth = month - ((month - 1) % 3);
+  // getUTCDay is Sunday-based, and this week starts on Monday, so Sunday has
+  // to count as six days into the week rather than none.
+  const dayOfWeek = new Date(Date.UTC(year, month - 1, Number(today.slice(8)))).getUTCDay();
+  const mondayOffset = (dayOfWeek + 6) % 7;
+
+  // The ongoing periods end today rather than at the period's own end date: a
+  // window running to 31 March in October would read as a range the office had
+  // chosen, and an export stamped with it would look like it covered months
+  // that have not happened.
+  switch (period) {
+    case 'today':        return { from: today, to: today };
+    case 'yesterday':    return { from: shiftDays(today, -1), to: shiftDays(today, -1) };
+    case 'this_week':    return { from: shiftDays(today, -mondayOffset), to: today };
+    case 'last_7':       return { from: shiftDays(today, -6), to: today };
+    case 'this_month':   return { from: monthStart(year, month), to: today };
+    case 'last_month':   return { from: monthStart(year, month - 1), to: shiftDays(monthStart(year, month), -1) };
+    case 'this_quarter': return { from: monthStart(year, quarterStartMonth), to: today };
+    case 'this_fy':      return { from: monthStart(fyYear, 4), to: today };
+    case 'last_fy':      return { from: monthStart(fyYear - 1, 4), to: shiftDays(monthStart(fyYear, 4), -1) };
+    case 'this_year':    return { from: monthStart(year, 1), to: today };
+    case 'all':          return { from: null, to: null };
+    default:             return { from: null, to: null };
+  }
+}
+
+/**
+ * The date window the list and the export both run on.
+ *
+ * AN EXPLICIT from_date/to_date WINS OVER period. Someone who saved or shared
+ * a link with a range in it picked those two dates deliberately, and a `period`
+ * riding along in the same URL - left over from the preset they clicked before
+ * typing the range, or added later as a default - must not quietly replace
+ * them. Either bound on its own is enough to count as a choice; the preset is
+ * then ignored entirely rather than half-applied, so the open end stays open
+ * instead of being clamped to a date the person never named.
+ */
+function resolveDateWindow(q: Record<string, unknown>): DateWindow {
+  const from = q.from_date ? String(q.from_date) : null;
+  const to = q.to_date ? String(q.to_date) : null;
+  if (from || to) return { from, to };
+  return resolvePeriod(String(q.period ?? ''));
+}
+
 // The WHERE for the donations list, built once.
 //
 // Shared with the export below rather than written out twice. The office sends
@@ -39,7 +148,13 @@ interface DonationFilters {
 // somebody else's hands - and that is exactly what happens to a second copy of
 // this code the next time a filter is added to only one of them.
 function buildDonationFilters(q: Record<string, unknown>): DonationFilters {
-  const { purpose, source, from_date, to_date, receipt_generated, search, source_site, source_page, campaign, group } = q;
+  const { purpose, source, receipt_generated, search, source_site, source_page, campaign, group } = q;
+
+  // One window for both ends of this. The list and the export resolve the
+  // dates through the same call, so a download cannot cover a different period
+  // than the screen it was taken from - which is precisely what a second copy
+  // of this resolution would produce the first time one of them was corrected.
+  const { from: from_date, to: to_date } = resolveDateWindow(q);
 
   const conditions: string[] = [];
   const values: unknown[] = [];
@@ -231,6 +346,11 @@ async function exportDonationsFile(
         search: 'Search',
         purpose: 'Purpose',
         receipt_generated: 'Receipt issued',
+        // The preset is recorded alongside the dates because the file outlives
+        // the screen: an auditor holding a spreadsheet headed "Period: this_fy"
+        // can tell what was asked for, where bare dates leave them guessing
+        // whether a range stopping in October was deliberate or a mistake.
+        period: 'Period',
         from_date: 'From',
         to_date: 'To',
         source_site: 'Site',
@@ -321,6 +441,8 @@ router.post('/offline', async (req, res) => {
     want_certificate,
     want_prasadam,
     prasadam_address,
+    sevak_name,
+    sevak_phone,
     note,
   } = req.body ?? {};
 
@@ -351,6 +473,17 @@ router.post('/offline', async (req, res) => {
 
   const siteKey = site as SiteKey;
 
+  // "On the name of" - who the donation is offered for, which is what both
+  // sites' receipts print and what annadan's birthday wish is addressed to.
+  //
+  // Cut to the width of the columns that hold them (sevak_name VARCHAR(160),
+  // sevak_phone VARCHAR(15)) rather than sent whole: a Telugu honorific run
+  // long, or a number pasted with spaces and a country code, would otherwise
+  // fail the UPDATE below and lose the whole sync-back for a field nobody
+  // would think to blame.
+  const sevakName = String(sevak_name || '').trim().slice(0, 160) || null;
+  const sevakMobile = String(sevak_phone || '').trim().slice(0, 15) || null;
+
   // Who is recording this, for the audit trail and for the note that shows on
   // the source site's own record.
   let enteredByName: string | null = null;
@@ -379,6 +512,8 @@ router.post('/offline', async (req, res) => {
       // the form did not supply them.
       prasadamParts: normalizeAddress(req.body?.prasadam_parts as Partial<Address>),
       billingParts: normalizeAddress(req.body?.address_parts as Partial<Address>),
+      sevakName,
+      sevakMobile,
       note: note ? String(note).trim() : null,
       enteredByName,
     });
@@ -412,12 +547,21 @@ router.post('/offline', async (req, res) => {
         // by cheque or over a bank transfer, and staff need to see that. The
         // reference number goes into payment_ref for the same reason: it is
         // how this donation is traced back to the bank statement or receipt book.
+        //
+        // The sevak goes on the row here for the same reason it goes on the
+        // site: the import that refreshes this donation later knows nothing
+        // about it, so without this write the name shows on the receipt and
+        // nowhere in DRM, and the first person asked who a receipt was raised
+        // for has to open the other system to find out. COALESCE so a re-entry
+        // that omits it cannot blank a name already recorded.
         const marked = await pool.query(
           `UPDATE donations SET
              entered_by   = $1,
              source       = 'offline',
              payment_mode = $4,
-             payment_ref  = COALESCE(payment_ref, $5)
+             payment_ref  = COALESCE(payment_ref, $5),
+             sevak_name   = COALESCE($6, sevak_name),
+             sevak_phone  = COALESCE($7, sevak_phone)
            WHERE external_ref = $2 AND person_id = $3
            RETURNING id`,
           [
@@ -426,6 +570,8 @@ router.post('/offline', async (req, res) => {
             result.personId,
             String(payment_mode),
             String(reference_no).trim(),
+            sevakName,
+            sevakMobile,
           ]
         );
         synced = (marked.rowCount ?? 0) > 0;

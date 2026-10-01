@@ -38,6 +38,7 @@ import {
   EXPORT_ROW_CAP,
   type ExportFormat,
 } from '../utils/export';
+import { recordCredit, reverseCreditFor } from '../services/credits';
 
 const router = Router();
 
@@ -637,7 +638,13 @@ async function markLeadDonated(
   amount: number,
   note: string,
   client?: { query: typeof pool.query },
-  creditTo?: string | null
+  creditTo?: string | null,
+  /**
+   * What this money was, for the ledger. Passed in rather than inferred,
+   * because the caller of this function is the only thing that knows whether
+   * it watched a QR get paid or is taking somebody's word for it.
+   */
+  evidence?: { qrPaymentId?: string; shareId?: string; personId?: string; occurredAt?: string | Date }
 ): Promise<void> {
   const db = client ?? pool;
 
@@ -692,6 +699,48 @@ async function markLeadDonated(
      VALUES ($1::uuid, 'status_change', 'converted', $2)`,
     [leadId, note]
   );
+
+  /* AND THE CREDIT, which is the part that survives a reassignment.
+   *
+   * The UPDATE above still writes leads.converted_amount, because the lead's
+   * own record should say what it was worth. But no report reads that column
+   * for money any more - they read caller_credits. The difference matters the
+   * day somebody bulk-reassigns two thousand leads: the leads move, and last
+   * quarter's figures for both callers stay exactly as they were.
+   *
+   * recordCredit returns null when this evidence has already been credited,
+   * which is the ordinary outcome of a re-delivered webhook, not a problem.
+   *
+   * NOTE THE CHANGE IN WHO GETS IT. The assigned_to update above still only
+   * claims a lead nobody owns, because taking a colleague's lead off them
+   * would be wrong. But the CREDIT goes to whoever actually shared the QR,
+   * every time - including on a colleague's lead. Under the old model those
+   * were the same decision, so a caller who rang somebody else's lead and got
+   * them to pay credited the colleague and showed nothing for their own
+   * shift. Separating the two is the point of having a ledger.
+   */
+  if (creditTo) {
+    await recordCredit(
+      {
+        userId: creditTo,
+        amount,
+        kind: 'qr',
+        occurredAt: evidence?.occurredAt ?? new Date(),
+        leadId,
+        qrPaymentId: evidence?.qrPaymentId ?? null,
+        shareId: evidence?.shareId ?? null,
+        personId: evidence?.personId ?? null,
+        note,
+      },
+      client as never
+    ).catch((e) => {
+      // Never let bookkeeping take the money down with it. The conversion is
+      // already written; a missing credit is a figure to repair, a failed
+      // transaction here would be a donation DRM forgot.
+      console.error('crmQr.markLeadDonated credit failed:', (e as Error).message);
+      return null;
+    });
+  }
 }
 
 /** A lead's name for a note, or their number when they have no name yet. */
@@ -863,14 +912,36 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
   // means a donation that arrived through a site and was matched on the
   // donor's own number. A QR payment matched on timing is a strong inference,
   // not an observation, and the reports must not present the two as equal.
+  const sharedBy = (best.share as ShareRow & { shared_by?: string | null }).shared_by ?? null;
   if (best.share.lead_id) {
     await markLeadDonated(
       best.share.lead_id,
       Number(pay.amount),
       'Paid by QR, matched automatically',
       undefined,
-      (best.share as ShareRow & { shared_by?: string | null }).shared_by ?? null
+      sharedBy,
+      { qrPaymentId: pay.id, shareId: best.share.id, occurredAt: pay.received_at }
     );
+  } else if (sharedBy) {
+    // A SHARE WITH NO LEAD STILL EARNED SOMEBODY THE MONEY.
+    //
+    // qr/share-to sends a QR straight to a number with no lead behind it - a
+    // walk-in, a number read out on a call, somebody a preacher passed on.
+    // Credit used to live entirely inside markLeadDonated, so every one of
+    // those payments counted for the temple and for nobody, and a caller
+    // working the phone that way showed a zero at the end of the day.
+    await recordCredit({
+      userId: sharedBy,
+      amount: Number(pay.amount),
+      kind: 'qr',
+      occurredAt: pay.received_at,
+      qrPaymentId: pay.id,
+      shareId: best.share.id,
+      note: 'Paid by QR, matched automatically',
+    }).catch((e) => {
+      console.error('crmQr.credit (no lead) failed:', (e as Error).message);
+      return null;
+    });
   }
 
   // The donor has paid and is owed a receipt. Not awaited: the webhook must
@@ -904,9 +975,31 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
  * attempt cannot raise a second receipt for the same money.
  */
 export async function issueReceiptForPayment(paymentRowId: string): Promise<void> {
+  /* EVERY JOIN HERE IS A LEFT JOIN, AND THAT IS THE FIX.
+   *
+   * This query used to begin `JOIN qr_shares s ON p.share_id = s.id`. A QR
+   * payment that DRM could not match to a share therefore produced no row at
+   * all, the function returned silently two lines later, and the donor got no
+   * receipt - with nothing written down to say why. Those are precisely the
+   * payments somebody is standing at a desk asking about: the money is in the
+   * temple's account, Razorpay has it, DRM can see it on screen, and the one
+   * thing nobody could do was give the donor their 80G certificate.
+   *
+   * The QR now comes from the payment's own qr_id as well as through a share,
+   * so a payment into a known QR is receiptable whether or not DRM ever
+   * worked out who sent it. What was missing instead is the donor's name and
+   * address, and those are now typed in and stored on the payment - see the
+   * donor_* columns and POST /qr/payments/:id/receipt.
+   */
   const r = await pool.query(
     `SELECT p.*, s.lead_id, s.person_id, s.phone AS share_phone,
-            q.receipt_site, q.purpose, q.label AS qr_label,
+            -- Aliased away from "receipt_site" on purpose: qr_payments has a
+            -- column of that name too (the site a receipt was actually raised
+            -- against), and two output columns sharing a name means the later
+            -- one silently wins and the stored choice is lost.
+            COALESCE(q_share.receipt_site, q_direct.receipt_site) AS qr_receipt_site,
+            COALESCE(q_share.purpose, q_direct.purpose)           AS qr_purpose,
+            COALESCE(q_share.label, q_direct.label, 'no QR')      AS qr_label,
             -- The preacher who brought this donor in, from the lead or from
             -- the donor record, so DCC records the receipt as enrolled by
             -- them rather than under the site's generic default.
@@ -917,10 +1010,13 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
             pe.address_city, pe.address_state, pe.address_pincode, pe.address_country,
             pe.address AS address_text
        FROM qr_payments p
-       JOIN qr_shares s ON p.share_id = s.id
-       JOIN razorpay_qrs q ON s.qr_id = q.id
+       LEFT JOIN qr_shares s ON p.share_id = s.id
+       LEFT JOIN razorpay_qrs q_share ON s.qr_id = q_share.id
+       -- The QR the money was actually paid into, which Razorpay tells us on
+       -- qr_code.credited even when no share matches.
+       LEFT JOIN razorpay_qrs q_direct ON q_direct.qr_id = p.qr_id
        LEFT JOIN leads l ON s.lead_id = l.id
-       LEFT JOIN people pe ON s.person_id = pe.id
+       LEFT JOIN people pe ON COALESCE(p.person_id, s.person_id) = pe.id
        LEFT JOIN preachers pr_lead ON l.preacher_id = pr_lead.id
        LEFT JOIN preachers pr_person ON pe.preacher_id = pr_person.id
       WHERE p.id = $1`,
@@ -933,10 +1029,30 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
   // racing the first attempt into two receipts.
   if (p.receipt_status === 'issued' || p.receipt_status === 'pending') return;
 
-  if (!p.receipt_site) {
+  // Which 80G series the number comes out of. Falls back to whatever was
+  // chosen when the receipt was raised by hand, for a payment with no QR at
+  // all behind it.
+  const site = (p.receipt_site || p.qr_receipt_site) as SiteKey | null;
+  if (!site) {
     await pool.query(
       `UPDATE qr_payments SET receipt_status = 'skipped',
          receipt_error = 'No site is set on this QR, so DRM does not know which 80G series to use.'
+       WHERE id = $1`,
+      [paymentRowId]
+    );
+    return;
+  }
+
+  // A receipt needs somebody's name on it. For a matched payment that is the
+  // donor DRM already knows; for an unmatched one it is whatever was typed in
+  // when the receipt was raised. Razorpay's payer_name is a last resort - it
+  // is often a VPA handle rather than a person.
+  const donorName = p.donor_name || p.person_name || p.lead_name || p.payer_name || null;
+  const donorPhone = p.donor_phone || p.share_phone || p.payer_phone || null;
+  if (!donorName || !donorPhone) {
+    await pool.query(
+      `UPDATE qr_payments SET receipt_status = 'needs_donor',
+         receipt_error = 'Add the donor''s name and number before raising this receipt.'
        WHERE id = $1`,
       [paymentRowId]
     );
@@ -948,24 +1064,28 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
   ]);
 
   try {
-    const name = p.person_name || p.lead_name || p.payer_name || `Donor ${p.share_phone}`;
-    const result = await createOfflineDonation(p.receipt_site as SiteKey, {
-      donorName: name,
-      donorMobile: p.share_phone,
-      donorEmail: p.person_email || p.lead_email || null,
+    const result = await createOfflineDonation(site, {
+      donorName,
+      donorMobile: donorPhone,
+      donorEmail: p.donor_email || p.person_email || p.lead_email || null,
       amount: Number(p.amount),
       // It arrived by UPI through a Razorpay QR. Saying so keeps the site's own
       // books honest about how the money came in.
       paymentMode: 'upi',
       referenceNo: p.payment_id,
       paymentDate: new Date(p.received_at).toISOString(),
-      sevaName: p.purpose || undefined,
-      panNumber: p.pan || undefined,
+      sevaName: p.purpose || p.qr_purpose || undefined,
+      panNumber: p.donor_pan || p.pan || undefined,
       // Only where there is a PAN to put on it; a certificate without one is
       // no use to the donor.
-      wantCertificate: !!p.pan,
+      wantCertificate: !!(p.donor_pan || p.pan),
       wantPrasadam: false,
-      prasadamAddress: p.address_text || undefined,
+      prasadamAddress: p.donor_address || p.address_text || undefined,
+      // "On the name of" - who the donation is offered for. Rendered on both
+      // sites' receipts and never once filled by DRM until now, so every
+      // receipt DRM raised printed "---" where the donor expected a name.
+      sevakName: p.sevak_name || undefined,
+      sevakMobile: p.sevak_phone || undefined,
       billingParts: {
         door: p.address_door, house: p.address_house, street: p.address_street, area: p.address_area,
         city: p.address_city, state: p.address_state, pincode: p.address_pincode, country: p.address_country,
@@ -983,7 +1103,7 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
          receipt_site = $4,
          receipt_error = NULL
        WHERE id = $1`,
-      [paymentRowId, result.receiptNumber, result.externalId, p.receipt_site]
+      [paymentRowId, result.receiptNumber, result.externalId, site]
     );
   } catch (e) {
     const err = e as Error & { status?: number };
@@ -1266,7 +1386,12 @@ function qrPaymentScope(
         ? 'TRUE'
         : scope === 'unmatched'
         ? 'p.share_id IS NULL'
-        : "p.share_id IS NULL OR p.receipt_status IS NULL OR p.receipt_status IN ('failed','skipped','pending')",
+        : // 'needs_donor' belongs here, and leaving it out hid the exact rows
+          // this screen exists to surface: a payment that reached the receipt
+          // step and stopped because nobody had typed the donor's name in.
+          // Those sat under "Everything" only, which is the one view nobody
+          // opens when they are working through what needs doing.
+          "p.share_id IS NULL OR p.receipt_status IS NULL OR p.receipt_status IN ('failed','skipped','pending','needs_donor')",
     me: user?.role === 'caller' ? user?.userId ?? null : null,
   };
 }
@@ -1275,7 +1400,13 @@ const QR_PAYMENT_FROM = `FROM qr_payments p
          LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
          LEFT JOIN users u ON q.owner_id = u.id
          LEFT JOIN qr_shares s ON p.share_id = s.id
-         LEFT JOIN leads l ON s.lead_id = l.id`;
+         LEFT JOIN leads l ON s.lead_id = l.id
+         -- Who the money is already counted for. On the list, not just the
+         -- detail view: without it the screen cannot tell "nobody has this"
+         -- from "nobody has looked", and the difference decides whether it is
+         -- safe to press claim.
+         LEFT JOIN caller_credits cc ON cc.qr_payment_id = p.id AND cc.status = 'active'
+         LEFT JOIN users cu ON cc.user_id = cu.id`;
 
 /** Spelled out once so the screen and the file cannot disagree about who is in. */
 const QR_PAYMENT_VISIBLE = `($1::uuid IS NULL
@@ -1294,7 +1425,8 @@ router.get('/qr/payments', authenticate, async (req, res) => {
               p.receipt_status, p.receipt_error, p.receipt_number, p.receipt_site,
               p.match_basis, p.match_score, p.match_note, p.last_event,
               q.label AS qr_label, q.receipt_site AS qr_receipt_site,
-              u.name AS qr_owner, l.name AS lead_name, l.id AS lead_id
+              u.name AS qr_owner, l.name AS lead_name, l.id AS lead_id,
+              cc.user_id AS credit_user_id, cu.name AS credit_user_name
          ${QR_PAYMENT_FROM}
         WHERE (${where})
           AND ${QR_PAYMENT_VISIBLE}
@@ -1330,9 +1462,12 @@ async function exportQrPaymentsFile(
       `SELECT p.payment_id, p.amount, p.payer_name, p.payer_phone, p.status,
               p.received_at, p.receipt_number, p.match_basis, p.match_score,
               q.label AS qr_label, l.name AS lead_name,
-              -- The caller who shared the QR this money came back through, which
-              -- is who the conversion was credited to.
-              su.name AS shared_by_name
+              -- The caller who shared the QR this money came back through, and
+              -- separately who the money is actually counted for - those are
+              -- usually the same person and the cases where they are not are
+              -- exactly the ones somebody is trying to find in the file.
+              su.name AS shared_by_name,
+              cu.name AS credit_user_name
          ${QR_PAYMENT_FROM}
          LEFT JOIN users su ON s.shared_by = su.id
         WHERE (${where})
@@ -1355,6 +1490,7 @@ async function exportQrPaymentsFile(
         { header: 'QR', value: (r) => r.qr_label },
         { header: 'Matched lead', value: (r) => r.lead_name },
         { header: 'Matched to caller', value: (r) => r.shared_by_name },
+        { header: 'Counted for', value: (r) => r.credit_user_name },
         { header: 'Match basis', value: (r) => r.match_basis },
         { header: 'Match score', value: (r) => r.match_score, kind: 'number' },
         { header: 'Status', value: (r) => r.status },
@@ -1400,6 +1536,300 @@ router.get('/qr/unmatched', authenticate, async (req, res) => {
   } catch (err) {
     console.error('crm.qrUnmatched error:', err);
     res.status(500).json({ error: 'Could not load the unmatched payments' });
+  }
+});
+
+/* =========================================================================
+   RAISING A RECEIPT FOR A QR PAYMENT, AND SAYING WHO RAISED IT
+   ========================================================================= */
+
+/**
+ * GET /qr/payments/:id - everything about one payment.
+ *
+ * REGISTERED AFTER THE LITERAL /qr/payments/... ROUTES ABOVE, and it has to
+ * stay there. Express matches in registration order, so a ":id" route placed
+ * above /qr/payments/export.csv swallows "export.csv" as an id - which 404s
+ * with "No such payment" and reads as a broken download button rather than a
+ * routing mistake. There is a comment saying this on the leads routes too,
+ * because it has already happened once.
+ *
+ * Exists because the receipt dialog needs to show what DRM already knows
+ * about the donor before asking anybody to type it in again.
+ */
+router.get('/qr/payments/:id', authenticate, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.*,
+              COALESCE(q_share.label, q_direct.label)               AS qr_label,
+              COALESCE(q_share.purpose, q_direct.purpose)           AS qr_purpose,
+              COALESCE(p.receipt_site, q_share.receipt_site, q_direct.receipt_site) AS site_for_receipt,
+              s.shared_by, s.phone AS share_phone, s.lead_id,
+              su.name AS shared_by_name,
+              l.name AS lead_name, l.email AS lead_email, l.assigned_to AS lead_assigned_to,
+              pe.name AS person_name, pe.email AS person_email, pe.pan AS person_pan,
+              pe.address AS person_address,
+              -- Who, if anyone, this money is already counted for. The dialog
+              -- must not offer to credit a payment that is already credited,
+              -- and an admin untangling one needs to see who has it.
+              cc.id AS credit_id, cc.user_id AS credit_user_id, cu.name AS credit_user_name
+         FROM qr_payments p
+         LEFT JOIN qr_shares s ON p.share_id = s.id
+         LEFT JOIN users su ON s.shared_by = su.id
+         LEFT JOIN razorpay_qrs q_share ON s.qr_id = q_share.id
+         LEFT JOIN razorpay_qrs q_direct ON q_direct.qr_id = p.qr_id
+         LEFT JOIN leads l ON s.lead_id = l.id
+         LEFT JOIN people pe ON COALESCE(p.person_id, s.person_id) = pe.id
+         LEFT JOIN caller_credits cc ON cc.qr_payment_id = p.id AND cc.status = 'active'
+         LEFT JOIN users cu ON cc.user_id = cu.id
+        WHERE p.id = $1
+          -- A caller sees their own QRs' money and their own shares, same as
+          -- the list does. Without this the detail route would be a way round
+          -- the scoping on the screen it is opened from.
+          AND ($2::uuid IS NULL OR s.shared_by = $2::uuid
+               OR q_share.owner_id = $2::uuid OR q_direct.owner_id = $2::uuid)`,
+      [req.params.id, req.user?.role === 'caller' ? req.user?.userId ?? null : null]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'No such payment' });
+    res.json({ payment: rows[0] });
+  } catch (err) {
+    console.error('crm.qrPayment error:', err);
+    res.status(500).json({ error: 'Could not load that payment' });
+  }
+});
+
+/**
+ * POST /qr/payments/:id/receipt - raise the 80G receipt, with the donor's
+ * details and who the donation is offered for.
+ *
+ * WHY THIS IS SEPARATE FROM /issue-receipt
+ * That one is a retry: it re-runs what DRM already knows. This one is the
+ * first run for a payment DRM knows almost nothing about - money that came
+ * into a QR with no share behind it, where there is no lead, no person record
+ * and therefore no name to put on a certificate. Those payments could not be
+ * receipted at all before, which is the complaint this answers.
+ *
+ * WHY CREDIT AND RECEIPT ARE DECIDED IN THE SAME CALL BUT NOT WELDED TOGETHER
+ * They were welded together: attributing a payment both credited a caller and
+ * fired a real 80G number in one action. That is a dangerous pairing, because
+ * a mis-credited figure can be corrected and a duplicate receipt cannot be
+ * withdrawn. Here the two are separate writes: `credit_me` decides only
+ * whether a credit row is written, and the receipt is raised either way. A
+ * caller helping with a donor who is not theirs gets the receipt out and
+ * takes no credit for it - which is exactly what was asked for.
+ */
+router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
+  const b = req.body ?? {};
+  const donorName = str(b.donor_name, 160);
+  const donorPhone = (str(b.donor_phone, 15) ?? '').replace(/\D/g, '').slice(-10) || null;
+  const site = str(b.site, 20);
+
+  if (!donorName) return res.status(400).json({ error: "The donor's name is needed for a receipt" });
+  if (!donorPhone || donorPhone.length !== 10) {
+    return res.status(400).json({ error: "A ten-digit mobile number is needed for a receipt" });
+  }
+
+  try {
+    // Same visibility rule as the detail route: a caller acts on their own
+    // QRs and shares, nobody else's.
+    const me = req.user?.role === 'caller' ? req.user?.userId ?? null : null;
+    const found = await pool.query(
+      `SELECT p.id, p.amount, p.received_at, p.receipt_status, s.shared_by, s.lead_id,
+              l.assigned_to AS lead_assigned_to
+         FROM qr_payments p
+         LEFT JOIN qr_shares s ON p.share_id = s.id
+         LEFT JOIN razorpay_qrs q_share ON s.qr_id = q_share.id
+         LEFT JOIN razorpay_qrs q_direct ON q_direct.qr_id = p.qr_id
+         LEFT JOIN leads l ON s.lead_id = l.id
+        WHERE p.id = $1
+          AND ($2::uuid IS NULL OR s.shared_by = $2::uuid
+               OR q_share.owner_id = $2::uuid OR q_direct.owner_id = $2::uuid)`,
+      [req.params.id, me]
+    );
+    if (!found.rows.length) return res.status(404).json({ error: 'No such payment' });
+    const pay = found.rows[0];
+
+    if (pay.receipt_status === 'issued') {
+      return res.status(409).json({ error: 'A receipt has already been raised for this payment' });
+    }
+
+    // Stored on the payment, not just passed through, so a reprint months
+    // later says exactly what the original said.
+    await pool.query(
+      `UPDATE qr_payments SET
+         donor_name = $2, donor_phone = $3, donor_email = $4, donor_pan = $5,
+         donor_address = $6, purpose = COALESCE($7, purpose),
+         sevak_name = $8, sevak_phone = $9,
+         receipt_site = COALESCE($10, receipt_site),
+         receipt_by = $11, receipt_status = NULL, receipt_error = NULL
+       WHERE id = $1`,
+      [
+        req.params.id,
+        donorName,
+        donorPhone,
+        str(b.donor_email, 160),
+        (str(b.donor_pan, 12) ?? '').toUpperCase() || null,
+        str(b.donor_address, 400),
+        str(b.purpose, 120),
+        // "On the name of" - the person the donation is offered for. This is
+        // what prints in the sevak field on both sites' receipts, and on
+        // annadan it is also who gets the birthday message.
+        str(b.sevak_name, 160),
+        (str(b.sevak_phone, 15) ?? '').replace(/\D/g, '').slice(-10) || null,
+        site,
+        req.user?.userId ?? null,
+      ]
+    );
+
+    await issueReceiptForPayment(String(req.params.id));
+
+    const after = await pool.query(
+      `SELECT receipt_status, receipt_error, receipt_number, external_donation_id
+         FROM qr_payments WHERE id = $1`,
+      [req.params.id]
+    );
+    const outcome = after.rows[0];
+
+    /* THE CREDIT, DECIDED SEPARATELY AND ONLY ON A SUCCESSFUL RECEIPT.
+     *
+     * "Is this your lead?" in the dialog is this flag. Yes credits the caller;
+     * no raises the receipt and credits nobody, which is the case where a
+     * caller is simply helping a donor who belongs to somebody else.
+     *
+     * Not credited when the receipt failed: a credit for money whose receipt
+     * the site rejected would be a figure with nothing behind it, and the
+     * retry will come back through here anyway.
+     */
+    let credited = null;
+    if (b.credit_me === true && outcome?.receipt_status === 'issued') {
+      const creditTo = req.user?.userId ?? null;
+      if (creditTo) {
+        credited = await recordCredit({
+          userId: creditTo,
+          amount: Number(pay.amount),
+          kind: 'qr',
+          occurredAt: pay.received_at,
+          qrPaymentId: pay.id,
+          leadId: pay.lead_id ?? null,
+          note: `Receipt raised for a QR payment${donorName ? ` from ${donorName}` : ''}`,
+          createdBy: creditTo,
+        }).catch((e) => {
+          console.error('crm.qrReceipt credit failed:', (e as Error).message);
+          return null;
+        });
+      }
+    }
+
+    res.json({
+      receipt_status: outcome?.receipt_status ?? null,
+      receipt_error: outcome?.receipt_error ?? null,
+      receipt_number: outcome?.receipt_number ?? null,
+      external_donation_id: outcome?.external_donation_id ?? null,
+      // null means "already credited to somebody" as well as "not asked for",
+      // so the screen says what happened rather than implying a silent success.
+      credited: !!credited,
+    });
+  } catch (err) {
+    console.error('crm.qrReceipt error:', err);
+    res.status(500).json({ error: 'Could not raise that receipt' });
+  }
+});
+
+/**
+ * POST /qr/payments/:id/claim - "that one was mine".
+ *
+ * The case this exists for: a donor pays into the temple's shared QR after a
+ * call, and DRM cannot prove which call. The payment arrives attributed to
+ * nobody, sits on the unmatched list, and the caller who actually earned it
+ * has no way to say so. Over a month that is a real part of somebody's work
+ * missing from their figures.
+ *
+ * This is weaker evidence than a matched share and the ledger says so: the
+ * credit is written with kind 'qr' but a note recording that a person claimed
+ * it, and an admin can see every claim and reverse one. The database decides
+ * races, not this handler - a partial unique index means the second of two
+ * simultaneous claims gets `null` back and is told the money is already
+ * attributed, rather than both callers counting it.
+ *
+ * Deliberately does NOT raise a receipt. Attribution and a legal document
+ * with the temple's name on it should not be one button; a mis-claim is
+ * reversible and a duplicate 80G number is not.
+ */
+router.post('/qr/payments/:id/claim', authenticate, async (req, res) => {
+  const me = req.user?.userId;
+  if (!me) return res.status(401).json({ error: 'Sign in again' });
+
+  // An admin may claim on somebody else's behalf - reconciling a shift after
+  // the fact is their job. A caller may only claim for themselves.
+  const forUser =
+    req.user?.role === 'caller' ? me : str(req.body?.user_id, 36) ?? me;
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.id, p.amount, p.received_at, p.payer_name,
+              q.label AS qr_label,
+              cc.id AS credit_id, cu.name AS credit_user_name
+         FROM qr_payments p
+         LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
+         LEFT JOIN caller_credits cc ON cc.qr_payment_id = p.id AND cc.status = 'active'
+         LEFT JOIN users cu ON cc.user_id = cu.id
+        WHERE p.id = $1`,
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'No such payment' });
+    const p = rows[0];
+
+    if (p.credit_id) {
+      return res.status(409).json({
+        error: `That payment is already counted for ${p.credit_user_name ?? 'somebody'}.`,
+      });
+    }
+
+    const note = str(req.body?.note, 300);
+    const credit = await recordCredit({
+      userId: forUser,
+      amount: Number(p.amount),
+      kind: 'qr',
+      occurredAt: p.received_at,
+      qrPaymentId: p.id,
+      note: note
+        ? `Claimed by hand — ${note}`
+        : `Claimed by hand${p.qr_label ? ` from QR ${p.qr_label}` : ''}`,
+      createdBy: me,
+    });
+
+    if (!credit) {
+      // Lost the race rather than hit an error. Said plainly, because the
+      // screen refreshing to show somebody else's name on it would otherwise
+      // look like the button did nothing.
+      return res.status(409).json({ error: 'Somebody else claimed that payment a moment ago.' });
+    }
+    res.json({ claimed: true, credit });
+  } catch (err) {
+    console.error('crm.claimPayment error:', err);
+    res.status(500).json({ error: 'Could not claim that payment' });
+  }
+});
+
+/**
+ * DELETE /qr/payments/:id/claim - take it back off somebody.
+ *
+ * Reversal, not deletion: the row stays with a reason on it. A credit is a
+ * claim about money, and erasing one leaves no record that anybody ever made
+ * it - which is exactly what you want to be able to look up when two people
+ * disagree about a figure.
+ */
+router.delete('/qr/payments/:id/claim', authenticate, authorize('admin', 'accountant'), async (req, res) => {
+  try {
+    const n = await reverseCreditFor(
+      { qrPaymentId: String(req.params.id) },
+      req.user?.userId ?? '',
+      str(req.body?.reason, 300) ?? 'Reversed by an administrator'
+    );
+    if (!n) return res.status(404).json({ error: 'Nothing was credited for that payment' });
+    res.json({ reversed: n });
+  } catch (err) {
+    console.error('crm.unclaimPayment error:', err);
+    res.status(500).json({ error: 'Could not reverse that credit' });
   }
 });
 
@@ -1493,7 +1923,29 @@ router.post('/qr/payments/:id/attach', authenticate, async (req, res) => {
         Number(pay.rows[0].amount),
         'Paid by QR, linked by hand',
         client,
-        share.rows[0].shared_by ?? null
+        share.rows[0].shared_by ?? null,
+        {
+          qrPaymentId: pay.rows[0].id,
+          shareId,
+          personId: share.rows[0].person_id,
+          occurredAt: pay.rows[0].received_at,
+        }
+      );
+    } else if (share.rows[0].shared_by) {
+      // Same reasoning as the automatic path: a share with no lead behind it
+      // still belongs to whoever sent it.
+      await recordCredit(
+        {
+          userId: share.rows[0].shared_by,
+          amount: Number(pay.rows[0].amount),
+          kind: 'qr',
+          occurredAt: pay.rows[0].received_at,
+          qrPaymentId: pay.rows[0].id,
+          shareId,
+          personId: share.rows[0].person_id,
+          note: 'Paid by QR, linked by hand',
+        },
+        client
       );
     }
 

@@ -1619,3 +1619,336 @@ CREATE INDEX IF NOT EXISTS idx_abandoned_dismissed ON abandoned_attempts(phone) 
 -- the index it is a sequential scan of people on each one.
 CREATE INDEX IF NOT EXISTS idx_people_phone10
   ON people ((right(regexp_replace(phone, '\D', '', 'g'), 10)));
+
+
+/* =========================================================================
+   WHO RAISED THIS MONEY
+   =========================================================================
+
+   THE PROBLEM THIS TABLE SOLVES
+
+   Until now, "how much has Ana raised" was a live join:
+
+     SELECT SUM(converted_amount) FROM leads
+      WHERE converted_at IS NOT NULL AND assigned_to = <Ana>
+
+   Credit was therefore not a fact about the past. It was a statement about
+   who the lead belongs to RIGHT NOW. Reassign a lead and the money moves with
+   it - retroactively, into every month that lead ever appeared in, for both
+   callers, with nothing recording that it happened. A bulk reassignment of
+   two thousand leads silently rewrote the whole team's history.
+
+   Worse, three screens had each picked a different key for the same question:
+   the dashboard summed leads.converted_amount by leads.assigned_to, the QR
+   tile summed qr_shares.matched_amount by qr_shares.shared_by, and the per-QR
+   breakdown summed qr_payments.amount by razorpay_qrs.owner_id. Three numbers,
+   one word, all of them defensible on their own terms. That is how a caller
+   and an admin end up looking at the same screen and disagreeing about what a
+   shift was worth.
+
+   So credit is written down. One row, at the moment the money is attributed,
+   naming the caller, the amount, and the evidence that earned it. Every
+   "raised" figure in the product reads this table and only this table.
+
+   WHY ROWS ARE NEVER DELETED OR EDITED
+
+   A credit is a claim about money. Withdrawing one by deleting the row leaves
+   no trace that anybody ever made the claim, which is exactly the record you
+   want when two people disagree about a figure. So a credit is reversed, not
+   removed: status flips, the reason and the person are recorded, and the
+   original row stays. Totals filter on status = 'active'.
+
+   WHY THE AMOUNT IS COPIED RATHER THAN JOINED
+
+   The amount is stored here even though it could be read back from the
+   payment or the donation. That is deliberate. A donation can be corrected, a
+   QR payment can be re-matched, a lead's converted_amount can be overwritten
+   by a later sync - and when any of those happen, last month's figures must
+   not move. What was credited is what was credited.
+   ========================================================================= */
+
+CREATE TABLE IF NOT EXISTS caller_credits (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  -- Who gets it. NOT NULL: a credit with no caller is not a credit, it is an
+  -- unattributed payment, and those are counted separately by looking at what
+  -- has no row here at all.
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+
+  -- What it is worth, in rupees, as at the moment of attribution.
+  amount NUMERIC(12,2) NOT NULL CHECK (amount >= 0),
+
+  /* HOW THE MONEY WAS RAISED. This is the column that stops a weak signal
+     being mistaken for a strong one in a report:
+       qr       - a QR this caller shared was paid
+       link     - a donation arrived through a link assigned to this caller
+       lead     - a lead this caller worked converted on one of the sites
+       offline  - money the caller collected and recorded themselves
+                  (a temple UPI number, cash, a cheque). Self-reported until
+                  somebody checks it against the statement - see verified_at.
+       manual   - an admin attributed it by hand
+     Deliberately a short closed list, enforced below. */
+  kind VARCHAR(12) NOT NULL,
+
+  /* WHEN THE MONEY LANDED, not when the row was written. A caller claiming a
+     payment from three days ago must have it counted on the day it arrived,
+     or a Monday reconciliation inflates Monday and empties Friday. */
+  occurred_at TIMESTAMPTZ NOT NULL,
+
+  -- The evidence. At least one of these is always set; which one depends on
+  -- kind. They are the audit trail: a figure nobody can trace back to a
+  -- payment is a figure nobody will believe.
+  qr_payment_id UUID REFERENCES qr_payments(id) ON DELETE SET NULL,
+  donation_id   UUID REFERENCES donations(id)   ON DELETE SET NULL,
+  lead_id       UUID REFERENCES leads(id)       ON DELETE SET NULL,
+  share_id      UUID REFERENCES qr_shares(id)   ON DELETE SET NULL,
+  link_id       UUID REFERENCES crm_links(id)   ON DELETE SET NULL,
+  person_id     UUID REFERENCES people(id)      ON DELETE SET NULL,
+
+  -- One line a human can read on a report row: "QR 'Gaushala' paid ₹1,100",
+  -- "offline — PhonePe, UTR 4411…". Written once, never recomputed, so it
+  -- still describes what happened even after the thing it describes changes.
+  note TEXT,
+
+  /* MONEY THE CALLER SAYS ARRIVED, versus money the system watched arrive.
+     An offline credit is a claim until somebody reconciles it against the
+     bank or PhonePe statement. Both are counted, and both are shown, but a
+     caller's total and a verified total are different numbers and the screens
+     say which is which. NULL here means "not checked yet", not "wrong". */
+  verified_at TIMESTAMPTZ,
+  verified_by UUID REFERENCES users(id) ON DELETE SET NULL,
+
+  -- Reversal, rather than deletion. See the header.
+  status VARCHAR(10) NOT NULL DEFAULT 'active',
+  reversed_at TIMESTAMPTZ,
+  reversed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  reversed_reason TEXT,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Who caused this row. Usually the same as user_id; different when an admin
+  -- attributes money to somebody else, which is precisely the case worth
+  -- being able to look up later.
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'caller_credits_kind_known') THEN
+    ALTER TABLE caller_credits ADD CONSTRAINT caller_credits_kind_known
+      CHECK (kind IN ('qr', 'link', 'lead', 'offline', 'manual'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'caller_credits_status_known') THEN
+    ALTER TABLE caller_credits ADD CONSTRAINT caller_credits_status_known
+      CHECK (status IN ('active', 'reversed'));
+  END IF;
+END $$;
+
+/* ONE CREDIT PER PAYMENT, ENFORCED BY THE DATABASE.
+
+   Two people can race to claim the same QR payment - one from the payments
+   screen, one from the attach dialog - and a report showing the same ₹5,000
+   under two callers is worse than one showing it under neither. A partial
+   unique index is the only thing that actually prevents it; a check in the
+   handler loses the race. The same money being credited twice to the same
+   caller is also prevented, which is what a double-clicked button produces.
+
+   Reversed rows are excluded so a mistaken claim can be reversed and the
+   payment then claimed by the right person. */
+CREATE UNIQUE INDEX IF NOT EXISTS uq_credit_per_qr_payment
+  ON caller_credits(qr_payment_id) WHERE qr_payment_id IS NOT NULL AND status = 'active';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_credit_per_donation
+  ON caller_credits(donation_id) WHERE donation_id IS NOT NULL AND status = 'active';
+
+/* A lead converts once. Without this, a sync that re-detects a conversion -
+   or a caller pressing "they donated" twice - doubles that caller's month. */
+CREATE UNIQUE INDEX IF NOT EXISTS uq_credit_per_lead
+  ON caller_credits(lead_id) WHERE lead_id IS NOT NULL AND status = 'active';
+
+-- The shape every report reads: one caller, one window.
+CREATE INDEX IF NOT EXISTS idx_credits_user_when
+  ON caller_credits(user_id, occurred_at DESC) WHERE status = 'active';
+-- The admin's view across everybody, and the verification queue.
+CREATE INDEX IF NOT EXISTS idx_credits_when ON caller_credits(occurred_at DESC) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_credits_unverified
+  ON caller_credits(occurred_at DESC) WHERE status = 'active' AND kind = 'offline' AND verified_at IS NULL;
+
+
+/* -------------------------------------------------------------------------
+   BACKFILL, ONCE.
+
+   Switching the reports onto this table without this block would show every
+   caller a zero for every month they have already worked, which reads as
+   "DRM lost my numbers" and is the fastest way to lose a team's trust in a
+   system. So the conversions that already exist are written in as credits
+   with their current attribution, at the time they actually converted.
+
+   Guarded on there being no lead-kind credits at all rather than row by row:
+   this is a one-time migration of history, not a sync. Once a single credit
+   exists the application owns the table and this must never run again - a
+   second pass after somebody reverses a credit would resurrect it.
+   ------------------------------------------------------------------------- */
+DO $$
+DECLARE filled INT;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM caller_credits WHERE kind = 'lead') THEN
+    INSERT INTO caller_credits
+      (user_id, amount, kind, occurred_at, lead_id, person_id, note, created_at)
+    SELECT l.assigned_to,
+           COALESCE(l.converted_amount, 0),
+           'lead',
+           l.converted_at,
+           l.id,
+           l.person_id,
+           'Converted before credits were recorded separately',
+           l.converted_at
+      FROM leads l
+     WHERE l.converted_at IS NOT NULL
+       AND l.assigned_to IS NOT NULL
+       AND COALESCE(l.converted_amount, 0) > 0
+    ON CONFLICT DO NOTHING;
+    GET DIAGNOSTICS filled = ROW_COUNT;
+    IF filled > 0 THEN
+      RAISE NOTICE '[schema] caller_credits: brought forward % existing conversion(s) so nobody''s history reads as zero.', filled;
+    END IF;
+  END IF;
+END $$;
+
+
+/* =========================================================================
+   LINKS THAT BELONG TO A CALLER
+   =========================================================================
+
+   crm_links.owner_user_id already existed and means "my private preset" -
+   whether this link shows up in my list. It is not an assignment, there is no
+   way to set it on an existing link, and assertMayEdit actively stops an
+   admin changing somebody else's.
+
+   These two columns are the other thing: who the MONEY goes to.
+
+   HOW A DONATION FINDS ITS WAY BACK
+
+   Neither website sends DRM anything that identifies a caller. They forward
+   utm_source, utm_medium and utm_campaign and nothing else - utm_content is
+   stored by HKMV and dropped before it reaches DRM. So the token travels in a
+   field that already survives the trip: it is appended to the link's URL as
+   utm_campaign, comes back on the donation untouched, and is matched here.
+   That is why this works today with no change to either site.
+   ========================================================================= */
+
+-- The caller the money goes to. Separate from owner_user_id on purpose: a
+-- link can sit in the shared list where everybody can see and send it, and
+-- still credit one person for what it brings in.
+ALTER TABLE crm_links ADD COLUMN IF NOT EXISTS credit_user_id UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE crm_links ADD COLUMN IF NOT EXISTS credit_token VARCHAR(40);
+ALTER TABLE crm_links ADD COLUMN IF NOT EXISTS credit_assigned_at TIMESTAMPTZ;
+ALTER TABLE crm_links ADD COLUMN IF NOT EXISTS credit_assigned_by UUID REFERENCES users(id) ON DELETE SET NULL;
+
+-- The token is the join key against a donation's utm_campaign, so two links
+-- sharing one would send the same money to two callers.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_links_credit_token
+  ON crm_links(credit_token) WHERE credit_token IS NOT NULL;
+
+-- Looking a donation's campaign up against the links on every sync.
+CREATE INDEX IF NOT EXISTS idx_donations_utm_campaign
+  ON donations(utm_campaign) WHERE utm_campaign IS NOT NULL;
+
+
+/* =========================================================================
+   WHAT A RECEIPT NEEDS THAT DRM WAS NEVER ASKING FOR
+   ========================================================================= */
+
+/* "On the name of" - the person the donation is offered for.
+
+   This field has been on both sites' receipts and in both their donation
+   models since the beginning, and DRM has never once filled it: every receipt
+   DRM raised printed "---" where the donor expected a name. On annadan it is
+   load-bearing beyond the paper, too - sendBirthdayWishToSevak messages this
+   person on their birthday, which cannot happen if the name was never
+   captured.
+
+   Stored on the payment rather than only passed through, so a reprint months
+   later says the same thing the original did. */
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS sevak_name VARCHAR(160);
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS sevak_phone VARCHAR(15);
+
+-- Donor details typed in when raising a receipt for a payment DRM knows
+-- nothing about. A QR payment with no share has no lead and no person, so
+-- without these there is no name to put on the certificate.
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS donor_name VARCHAR(160);
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS donor_phone VARCHAR(15);
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS donor_email VARCHAR(160);
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS donor_pan VARCHAR(12);
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS donor_address TEXT;
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS purpose VARCHAR(120);
+-- Who pressed the button. A receipt is a legal document with the temple's
+-- name on it; who raised each one is worth knowing without reading a log.
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS receipt_by UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS receipt_issued_at TIMESTAMPTZ;
+
+-- The same two on donations, for the offline path and for a receipt raised
+-- against a donation that already exists.
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS sevak_name VARCHAR(160);
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS sevak_phone VARCHAR(15);
+
+
+/* =========================================================================
+   MONEY COLLECTED BY HAND
+   =========================================================================
+
+   The detail behind an 'offline' credit: who gave it, how it reached the
+   temple, and the reference somebody will search the bank statement for.
+
+   SEPARATE FROM caller_credits ON PURPOSE. The ledger answers one question -
+   who raised how much, when - and it answers it for every channel in the same
+   shape. Hanging six donor-detail columns off it that only ever apply to one
+   kind of credit would make the common query wider for nothing and invite the
+   next channel to add six more.
+   ========================================================================= */
+
+CREATE TABLE IF NOT EXISTS collections (
+  credit_id UUID PRIMARY KEY REFERENCES caller_credits(id) ON DELETE CASCADE,
+
+  donor_name VARCHAR(160) NOT NULL,
+  donor_phone VARCHAR(15) NOT NULL,
+  donor_email VARCHAR(160),
+  donor_pan VARCHAR(12),
+  donor_address TEXT,
+  purpose VARCHAR(120),
+
+  -- How it actually reached the temple: upi, cash, cheque, bank transfer.
+  -- Free text rather than an enum because the honest answer is often
+  -- "PhonePe to the office number", and an enum turns that into "other".
+  method VARCHAR(40),
+
+  /* THE UTR, THE PHONEPE REFERENCE, THE CHEQUE NUMBER.
+     This is the only string tying a line in DRM to a line on a bank
+     statement, so it is what makes verification possible at all. It is also
+     what makes raising the receipt safe to retry: both donation sites refuse
+     a duplicate reference, so a second attempt cannot mint a second 80G
+     number for the same money. */
+  reference VARCHAR(80),
+
+  -- "On the name of" - who the donation is offered for. Prints in the sevak
+  -- field on both sites' receipts; on annadan it also decides who gets the
+  -- birthday message.
+  sevak_name VARCHAR(160),
+  sevak_phone VARCHAR(15),
+
+  -- The receipt, raised as a second deliberate step rather than as part of
+  -- recording the money. See the header of routes/crmCollections.ts.
+  receipt_status VARCHAR(20),
+  receipt_error TEXT,
+  receipt_number VARCHAR(80),
+  receipt_site VARCHAR(20),
+  external_donation_id VARCHAR(80),
+  receipt_at TIMESTAMPTZ,
+  receipt_by UUID REFERENCES users(id) ON DELETE SET NULL,
+
+  recorded_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Finding a donor again, and the reconciliation search.
+CREATE INDEX IF NOT EXISTS idx_collections_phone ON collections(donor_phone);
+CREATE INDEX IF NOT EXISTS idx_collections_reference ON collections(reference) WHERE reference IS NOT NULL;

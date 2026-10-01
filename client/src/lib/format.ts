@@ -140,6 +140,25 @@ export function dateTime(value: string | null | undefined): string {
   });
 }
 
+/**
+ * Just the clock time, in IST.
+ *
+ * Sits under a date in the money tables rather than being folded into it.
+ * Reconciling a shift or matching a bank statement is a question about the
+ * hour — "did that eleven hundred come in before or after I rang him" — and a
+ * date alone cannot answer it. Kept separate from dateTime() because in a
+ * narrow table column the date and the time want to be on two lines.
+ */
+export function clockTime(value: string | null | undefined): string {
+  const d = parseDate(value);
+  if (!d) return "";
+  return d.toLocaleTimeString("en-IN", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: IST,
+  });
+}
+
 // "3 days ago" reads faster than a date when scanning for staleness (when did
 // this donor last give?), which is the common question in a donor list.
 //

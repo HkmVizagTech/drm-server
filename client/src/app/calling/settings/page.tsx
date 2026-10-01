@@ -51,6 +51,7 @@ import {
 } from "@/components/ui";
 import { ALERT_OPTIONS, DEFAULT_ALERTS, cleanAlerts } from "@/lib/reminders";
 import { apiClient as api } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import { currency, number, relativeDate } from "@/lib/format";
 import { toBase64 } from "@/lib/spreadsheet";
 
@@ -779,6 +780,18 @@ function AddPreacherDialog({ onClose, onDone }: { onClose: () => void; onDone: (
  * Here rather than only on the calling screen because this is where the temple
  * decides what the team offers - a new festival page should appear in every
  * caller's dropdown the moment someone adds it, without a deploy.
+ *
+ * TWO DIFFERENT PEOPLE CAN BE ATTACHED TO ONE LINK, and they do unrelated jobs:
+ *
+ *   owner_user_id decides whose picker the link shows up in. Nothing else.
+ *   credit_user_id decides who is credited for the money it raises.
+ *
+ * A link can sit in the shared list for the whole team to send and still credit
+ * one caller, which is the usual arrangement for a campaign somebody is
+ * working. The table keeps the two in separate columns, worded as what they
+ * actually do, because treating them as one thing is how a caller ends up being
+ * paid attention for a link they cannot see, or seeing one that pays them
+ * nothing.
  */
 interface LinkRow {
   id: string;
@@ -788,20 +801,37 @@ interface LinkRow {
   message: string | null;
   owner_user_id: string | null;
   owner_name: string | null;
+  /** Who the donations through this link are credited to, if anybody. */
+  credit_user_id: string | null;
+  credit_user_name: string | null;
+  /** What rides home on the URL as utm_campaign, and matches the money back. */
+  credit_token: string | null;
   sort_order: number;
   active: boolean;
   use_count: number;
 }
 
 function LinksSection() {
+  const { user } = useAuth();
   const [links, setLinks] = useState<LinkRow[]>([]);
+  const [users, setUsers] = useState<{ id: string; name: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
 
+  // PUT /links/:id/credit is authorize('admin'), so a caller is shown who each
+  // link credits and no control to change it - an assignment dropdown that
+  // answered 403 on every use would be worse than not offering one.
+  const isAdmin = user?.role === "admin";
+
   const load = useCallback(async () => {
     try {
-      const d = await api.get<{ links: LinkRow[] }>("/api/crm/links/all");
+      const [d, cfg] = await Promise.all([
+        api.get<{ links: LinkRow[] }>("/api/crm/links/all"),
+        // The same team list the QR table assigns from, for the same reason.
+        api.get<{ users: { id: string; name: string }[] }>("/api/crm/config"),
+      ]);
       setLinks(d.links);
+      setUsers(cfg.users);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load the links");
     }
@@ -820,6 +850,26 @@ function LinksSection() {
     }
   }
 
+  /**
+   * Say whose money this link raises.
+   *
+   * Its own endpoint rather than a field on PUT /links, because the server
+   * guards the two differently: anyone may edit a shared link's wording, and
+   * only an admin may decide who gets credited for what it brings in.
+   */
+  async function saveCredit(id: string, userId: string | null) {
+    setError(null);
+    try {
+      // null, not an omitted field: the server refuses a body without user_id
+      // precisely so that "unassign" cannot be confused with "forgot to say".
+      await api.put(`/api/crm/links/${id}/credit`, { user_id: userId });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not change who this link credits");
+      await load();
+    }
+  }
+
   async function remove(id: string, label: string) {
     if (!confirm(`Delete "${label}"? Callers will no longer be able to send it.`)) return;
     try {
@@ -835,24 +885,29 @@ function LinksSection() {
       <CardHeader
         icon="link"
         title="Links callers can send"
-        subtitle="Picked on the calling screen and sent straight into the donor's WhatsApp. Editing one changes it for everybody."
+        subtitle="Picked on the calling screen and sent straight into the donor's WhatsApp. Editing one changes it for everybody. Assign a link to a caller and the donations it brings in are credited to them."
       />
 
       {error && <Alert tone="danger">{error}</Alert>}
 
       <TableShell>
         <Thead>
-          <Th className="w-1/3">Name</Th>
+          <Th className="w-1/4">Name</Th>
           <Th>Link</Th>
+          {/* Two columns, two unrelated questions, each headed with what it
+              actually decides. The second one used to read just "Shared",
+              which beside a column about crediting is the same question asked
+              twice - and the whole point is that they are not the same. */}
+          <Th>Donations credited to</Th>
           <Th align="right">Sent</Th>
-          <Th align="center">Shared</Th>
+          <Th align="center">In whose picker</Th>
           <Th align="center">In use</Th>
           <Th align="right"><span className="sr-only">Actions</span></Th>
         </Thead>
         {!links.length ? (
           <tbody>
             <tr>
-              <td colSpan={6}>
+              <td colSpan={7}>
                 <EmptyState
                   icon="link"
                   title="No links saved yet"
@@ -881,6 +936,38 @@ function LinksSection() {
                     <span className="block truncate text-xs text-ink-muted" title={l.url}>
                       {l.url}
                     </span>
+                  </Td>
+                  <Td>
+                    {isAdmin ? (
+                      <Select
+                        value={l.credit_user_id ?? ""}
+                        onChange={(v) => void saveCredit(l.id, v || null)}
+                        className="min-w-[10rem]"
+                        ariaLabel={`Who donations through ${l.label} are credited to`}
+                        options={[
+                          { value: "", label: "Nobody" },
+                          ...users.map((u) => ({ value: u.id, label: u.name })),
+                        ]}
+                      />
+                    ) : l.credit_user_name ? (
+                      <Badge tone="good" icon="rupee">
+                        {l.credit_user_name}
+                      </Badge>
+                    ) : (
+                      <span className="text-xs text-ink-faint">Nobody</span>
+                    )}
+                    {/* The token is a diagnostic, not something anybody types:
+                        it is here so that "why was this donation not credited"
+                        can be answered by comparing it with the utm_campaign on
+                        the donation, and for nothing else. */}
+                    {l.credit_user_id && l.credit_token && (
+                      <span
+                        className="mt-1 block truncate font-mono text-2xs text-ink-faint"
+                        title="Rides home on the link as utm_campaign. Donations carrying it are credited to this caller."
+                      >
+                        {l.credit_token}
+                      </span>
+                    )}
                   </Td>
                   <Td align="right" className="text-sm tabular-nums">
                     {l.use_count || <span className="text-ink-faint">0</span>}
@@ -918,7 +1005,7 @@ function LinksSection() {
                 </tr>
                 {editing === l.id && (
                   <tr>
-                    <td colSpan={6} className="bg-sunken px-4 py-3">
+                    <td colSpan={7} className="bg-sunken px-4 py-3">
                       <Field label="Link" className="mb-2">
                         <Input
                           defaultValue={l.url}
@@ -947,11 +1034,32 @@ function LinksSection() {
         )}
       </TableShell>
 
-      <p className="mt-3 text-xs text-ink-muted">
-        These go out from the caller&apos;s own WhatsApp, so there is no Meta template to approve and nothing to pay
-        per message. DRM opens the chat with the text ready — the caller still presses send, which is why the
-        history says &ldquo;opened WhatsApp&rdquo; rather than claiming it was delivered.
-      </p>
+      <div className="mt-3 space-y-2">
+        <p className="text-xs text-ink-muted">
+          <strong className="font-medium text-ink-soft">Donations credited to</strong> is who is counted as having
+          raised the money: assign a link to a caller and every donation that arrives through it is credited to
+          them. That is a different question from{" "}
+          <strong className="font-medium text-ink-soft">in whose picker</strong>, which
+          only decides who sees the link to send — a link everyone can send can still credit one caller, and often
+          does.
+        </p>
+        <p className="text-xs text-ink-muted">
+          An assigned link carries a short tracking token, shown under whoever it credits. It goes out on the end of
+          the link and comes home on the donation, which is what ties the two together. A link keeps the same token when it
+          is reassigned to somebody else, on purpose: the links already sitting in donors&apos; WhatsApp are opened
+          weeks later, and they go on working — the credit simply follows whoever the link is assigned to now.
+        </p>
+        <p className="text-xs text-ink-muted">
+          These go out from the caller&apos;s own WhatsApp, so there is no Meta template to approve and nothing to pay
+          per message. DRM opens the chat with the text ready — the caller still presses send, which is why the
+          history says &ldquo;opened WhatsApp&rdquo; rather than claiming it was delivered.
+        </p>
+        {!isAdmin && (
+          <p className="text-xs text-ink-faint">
+            Only an admin can change who a link credits, so these are shown here but cannot be edited.
+          </p>
+        )}
+      </div>
     </div>
   );
 }

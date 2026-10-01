@@ -48,9 +48,33 @@ interface LinkRow {
   message: string | null;
   owner_user_id: string | null;
   owner_name: string | null;
+  /** Who the donations through this link are credited to, if anybody. Set by
+   *  an admin in Calling settings - the endpoint behind it is admin-only, so
+   *  this screen reads it and never offers to change it. */
+  credit_user_id: string | null;
+  credit_user_name: string | null;
   sort_order: number;
   active: boolean;
   use_count: number;
+}
+
+/**
+ * Whether this link is earning, and for whom.
+ *
+ * Worth a caller seeing on their own list: a preset of theirs that credits
+ * nobody looks identical to one that credits them, right up until the month's
+ * figures come out and the donations they remember sending are attached to no
+ * one. Read-only, because the endpoint behind it is admin-only and a control
+ * that answered 403 every time would be worse than none.
+ */
+function CreditBadge({ link, youId }: { link: LinkRow; youId?: string }) {
+  if (!link.credit_user_id) return null;
+  const yours = link.credit_user_id === youId;
+  return (
+    <Badge tone={yours ? "good" : "neutral"} icon="rupee">
+      {yours ? "credits you" : `credits ${link.credit_user_name ?? "another caller"}`}
+    </Badge>
+  );
 }
 
 const DEFAULT_MESSAGE =
@@ -221,6 +245,7 @@ export default function MyLinksPage() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium text-ink">{l.label}</span>
                       {i === 0 && <Badge tone="brand">picked by default</Badge>}
+                      <CreditBadge link={l} youId={user?.id} />
                       {l.use_count > 0 && (
                         <span className="text-xs text-ink-faint">
                           sent {l.use_count} time{l.use_count === 1 ? "" : "s"}
@@ -278,7 +303,12 @@ export default function MyLinksPage() {
           {shared.map((l) => (
             <li key={l.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
               <div className="min-w-0 flex-1">
-                <span className="font-medium text-ink">{l.label}</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-ink">{l.label}</span>
+                  {/* A shared link can be assigned to one caller: everybody
+                      sends it, one person is credited for it. */}
+                  <CreditBadge link={l} youId={user?.id} />
+                </div>
                 <p className="truncate text-xs text-ink-muted" title={l.url}>
                   {l.url}
                 </p>
@@ -289,13 +319,25 @@ export default function MyLinksPage() {
             </li>
           ))}
         </ul>
-        <p className="border-t border-line-soft px-5 py-4 text-xs text-ink-muted">
-          Shared links are managed in{" "}
-          <Link href="/calling/settings" className="text-brand-700 hover:underline">
-            Calling settings
-          </Link>{" "}
-          — changing one there changes it for every caller{user?.name ? `, not just you, ${user.name.split(" ")[0]}` : ""}.
-        </p>
+        <div className="space-y-2 border-t border-line-soft px-5 py-4 text-xs text-ink-muted">
+          <p>
+            Shared links are managed in{" "}
+            <Link href="/calling/settings" className="text-brand-700 hover:underline">
+              Calling settings
+            </Link>{" "}
+            — changing one there changes it for every caller
+            {user?.name ? `, not just you, ${user.name.split(" ")[0]}` : ""}.
+          </p>
+          <p>
+            A link marked <strong className="font-medium text-ink-soft">credits you</strong> means every donation that
+            comes in through it is counted as yours, whoever sends it. Only an admin can assign that, in Calling
+            settings — it is not the same thing as a link being yours to send.
+          </p>
+          <p>
+            Copying a link gives you your own unassigned copy, so a copy of a link that credits somebody credits
+            nobody until an admin assigns it. Ask for the assignment rather than copying, if the point is the credit.
+          </p>
+        </div>
       </Card>
     </div>
   );

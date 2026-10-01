@@ -20,6 +20,7 @@ import type { PoolClient } from 'pg';
 import pool from '../db/pool';
 import { hkmvMappers, HkmvDonation, HkmvSubscription, HkmvTransaction, SiteKey } from './hkmvClient';
 import { decideName } from './profileSync';
+import { recordCredit } from './credits';
 import { addressValues, fromHkmvSaved } from '../utils/address';
 
 export interface HkmvDonorPayload {
@@ -152,6 +153,95 @@ async function upsertPerson(
   return { id: result.rows[0].id, created: result.rows[0].created };
 }
 
+/**
+ * Credit the caller whose link brought this donation in.
+ *
+ * THE ROUND TRIP, IN FULL
+ * An admin assigns a link to a caller in Calling settings, which mints a
+ * credit_token on that link. routes/crmLinks.ts appends the token to the
+ * outgoing URL as utm_campaign - the only per-link field both websites forward
+ * to DRM untouched. The donation arrives here still carrying it, and this
+ * matches it back. Neither site knows a caller exists; this field is the whole
+ * of the mechanism.
+ *
+ * WHY THE WHOLE THING IS WRAPPED
+ * The donation is the money and the credit is bookkeeping, so nothing here may
+ * cost the donation. A caller deleted mid-sync, a token matching a link whose
+ * assignee is gone, a constraint nobody anticipated - any of those must end in
+ * a logged line and a donation that still saved.
+ *
+ * A SAVEPOINT rather than a bare try/catch, because this runs inside the
+ * donor's transaction: in Postgres a failed statement poisons the whole
+ * transaction, so catching the error would not save anything - the very next
+ * query in upsertDonorSnapshot would fail with "current transaction is
+ * aborted" and the donor's entire snapshot would roll back. Rolling back to
+ * the savepoint discards only the failed credit.
+ */
+async function creditAssignedLink(
+  client: PoolClient,
+  donation: {
+    donationId: string;
+    personId: string;
+    amount: number | string;
+    occurredAt: Date | string;
+    utmCampaign: string | null;
+  }
+): Promise<void> {
+  const token = String(donation.utmCampaign ?? '').trim();
+  if (!token) return;
+
+  try {
+    await client.query('SAVEPOINT credit_link');
+
+    // credit_user_id IS NOT NULL in the WHERE, not checked afterwards: a link
+    // that has a token but nobody assigned is the normal state of a link that
+    // was unassigned, and it must miss rather than credit anyone.
+    const found = await client.query(
+      `SELECT id, label, credit_user_id FROM crm_links
+        WHERE credit_token = $1 AND credit_user_id IS NOT NULL`,
+      [token]
+    );
+    // Most donations land here: every seeded link carries utm_campaign=calling
+    // and donors arrive through campaigns DRM has never heard of. Not a match
+    // is the ordinary case, not a problem, and says nothing worth logging.
+    if (!found.rows.length) {
+      await client.query('RELEASE SAVEPOINT credit_link');
+      return;
+    }
+    const link = found.rows[0];
+
+    await recordCredit(
+      {
+        kind: 'link',
+        userId: link.credit_user_id,
+        amount: donation.amount,
+        // The day the money arrived, NOT now. A backfill that catches up a
+        // week of donations on a Monday morning must credit each one on its
+        // own day, or Monday's figure swallows the whole week and every daily
+        // report for those days reads as zero.
+        occurredAt: donation.occurredAt,
+        donationId: donation.donationId,
+        linkId: link.id,
+        personId: donation.personId,
+        note: `Donation through the link "${link.label}"`,
+      },
+      client
+    );
+    // recordCredit returns null when this donation is already credited, which
+    // is what every re-sync of an already-imported donation does. Normal, and
+    // deliberately not logged: a nightly backfill would otherwise fill the log
+    // with thousands of lines that all mean "nothing to do".
+
+    await client.query('RELEASE SAVEPOINT credit_link');
+  } catch (err) {
+    await client.query('ROLLBACK TO SAVEPOINT credit_link').catch(() => undefined);
+    console.error(
+      `[hkmvSync] donation ${donation.donationId} saved, but crediting its link failed:`,
+      err
+    );
+  }
+}
+
 async function upsertDonation(
   client: PoolClient,
   personId: string,
@@ -182,7 +272,12 @@ async function upsertDonation(
        -- EXCLUDED.payment_ref would wipe that reference on the very next
        -- import, silently losing the only link back to the bank statement.
        payment_ref       = COALESCE(EXCLUDED.payment_ref, donations.payment_ref)
-     RETURNING id`,
+     -- amount, created_at and utm_campaign come back so the credit below is
+     -- written from what the row actually says rather than from the snapshot
+     -- in hand. They differ in the cases that matter: utm_campaign is
+     -- truncated on the way in, and created_at is NOT in the DO UPDATE list,
+     -- so on a re-sync it is still the moment the donation first arrived.
+     RETURNING id, amount, created_at, utm_campaign`,
     [
       personId,
       d.amount,
@@ -205,6 +300,14 @@ async function upsertDonation(
 
   const donationId = donationResult.rows[0].id;
   let deliveryUpserted = false;
+
+  await creditAssignedLink(client, {
+    donationId,
+    personId,
+    amount: donationResult.rows[0].amount,
+    occurredAt: donationResult.rows[0].created_at,
+    utmCampaign: donationResult.rows[0].utm_campaign,
+  });
 
   if (d.prasadam) {
     const status = hkmvMappers.PRASADAM_STATUS_MAP[d.prasadam.status] || 'pending';

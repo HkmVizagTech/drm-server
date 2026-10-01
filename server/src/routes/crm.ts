@@ -35,6 +35,7 @@ import { authenticate, authorize } from '../middleware/auth';
 import { fetchAbandonedPage, isSiteConfigured, type SiteKey } from '../services/hkmvClient';
 import { buildWorkbook } from '../utils/spreadsheet';
 import { parseDate, istDate } from '../bootTimezone';
+import { recordCredit } from '../services/credits';
 import {
   sendExport, formatFrom, describeFilters, EXPORT_ROW_CAP, type ExportFormat,
 } from '../utils/export';
@@ -161,8 +162,39 @@ async function reconcileConversions(force = false): Promise<number> {
        updated_at            = NOW()
      FROM first_gift f
      WHERE l.id = f.lead_id
-     RETURNING l.id`
+     RETURNING l.id, l.assigned_to, l.person_id, f.donation_id, f.amount, f.created_at`
   );
+
+  /* CREDIT THE CALLER WHOSE LEAD IT WAS.
+   *
+   * Written here, at the moment the match is made, rather than read back out
+   * of leads.assigned_to whenever a report runs. That is the whole difference:
+   * the credit records who was working this lead when the money arrived, and
+   * stays true afterwards even if the lead is reassigned, bulk-moved, or the
+   * caller leaves.
+   *
+   * occurred_at is the donation's own date, not now. A sync that catches up a
+   * week of donations must credit each one on the day it arrived, or Monday
+   * swallows the whole week and the four days before it read as empty.
+   */
+  for (const row of result.rows) {
+    if (!row.assigned_to || !Number(row.amount)) continue;
+    await recordCredit({
+      userId: row.assigned_to,
+      amount: row.amount,
+      kind: 'lead',
+      occurredAt: row.created_at,
+      leadId: row.id,
+      donationId: row.donation_id,
+      personId: row.person_id,
+      note: 'Donated on the site after being called',
+    }).catch((e) =>
+      // Never take the conversion down with the bookkeeping. The lead is
+      // already marked converted; a missing credit is a figure to repair, a
+      // thrown error here would undo a match DRM had correctly made.
+      console.error('crm.reconcileConversions credit failed:', (e as Error).message)
+    );
+  }
 
   // And the promises they had made are kept. Closed rather than deleted, so
   // what was promised and what came of it both stay on the record - and so
@@ -2913,6 +2945,35 @@ router.post('/leads/:id/donated', async (req, res) => {
        WHERE id = $4 RETURNING *`,
       [amount, asDate(req.body?.at), str(req.body?.note, 1000), req.params.id]
     );
+
+    /* THE CALLER'S OWN WORD, recorded as such.
+     *
+     * This endpoint deliberately creates no donation row - the site's entry
+     * is the money, and this is somebody saying it arrived. The credit mirrors
+     * that: it is written to whoever recorded it rather than to whoever the
+     * lead is assigned to, because the person who got the donor to pay is the
+     * person on this request.
+     *
+     * Credited at the time they say it happened, not at the time they typed
+     * it in, so a caller writing up Friday's shift on Monday does not empty
+     * Friday and inflate Monday.
+     */
+    const recordedBy = req.user?.userId ?? null;
+    if (recordedBy) {
+      await recordCredit(
+        {
+          userId: recordedBy,
+          amount,
+          kind: 'lead',
+          occurredAt: result.rows[0].converted_at ?? new Date(),
+          leadId: String(req.params.id),
+          personId: result.rows[0].person_id ?? null,
+          note: str(req.body?.note, 300) ?? 'Recorded by hand after a call',
+          createdBy: recordedBy,
+        },
+        client
+      );
+    }
 
     await client.query(
       `INSERT INTO lead_activities (lead_id, user_id, kind, from_value, to_value, note)

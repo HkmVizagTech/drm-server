@@ -388,12 +388,41 @@ export interface OfflineDonationInput {
   /**
    * The preacher's DCC id number, so the receipt is enrolled under them.
    *
-   * A plain number, the one the temple's own system knows them by. Both sites
-   * pass it through to DCC as `enrolledBy`; without it DCC falls back to a
-   * generic default (36 on both), which is how a donation brought in by a
-   * named preacher ends up credited to nobody.
+   * A plain number, the one the temple's own system knows them by. Without one
+   * DCC falls back to a generic default (36 on both sites), which is how a
+   * donation brought in by a named preacher ends up credited to nobody.
+   *
+   * NEITHER SITE READS THIS TODAY. DRM sends it on both branches and both
+   * discard it: HKMV's createManual never destructures dccEnrolledById from
+   * the body - it derives the value itself by looking up a `devoteeId`
+   * (donation.controller.js:451-456) - and annadan's offline controller does
+   * not destructure it at all. So every offline receipt DRM raises is still
+   * enrolled under the default, and the preacher a caller named here reaches
+   * DCC nowhere.
+   *
+   * It is sent anyway, deliberately: the value is correct, the wire name is
+   * the one both sites would use if they accepted it, and the fix belongs on
+   * their side. This note exists so the next person reading the payload does
+   * not conclude from its presence that attribution is working - it is not,
+   * and a figure built on the assumption that it is would be wrong about who
+   * raised what.
    */
   dccEnrolledById?: number | null;
+
+  /**
+   * "On the name of" - the person the donation is offered for, and their
+   * phone.
+   *
+   * Both sites' receipt templates have rendered this field since the
+   * beginning and both their donation models store it, and DRM has never once
+   * sent it: every receipt DRM raised printed "---" where the donor expected
+   * the name of the person they were giving for. On annadan it is load-bearing
+   * past the paper too - sendBirthdayWishToSevak messages this person on their
+   * birthday, and a name that was never captured means that message is never
+   * sent.
+   */
+  sevakName?: string | null;
+  sevakMobile?: string | null;
 }
 
 export interface OfflineDonationResult {
@@ -469,6 +498,13 @@ function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<st
       ...(billingFlat.city ? { city: billingFlat.city } : {}),
       ...(billingFlat.state ? { state: billingFlat.state } : {}),
       ...(billingFlat.pincode ? { pincode: billingFlat.pincode } : {}),
+      // annadan's offline controller destructures both of these by exactly
+      // these names (offline.donation.controller.js:19) and stores them on the
+      // donation, where the receipt and the birthday wish both read them. The
+      // mobile decides who the wish goes to: with it the honoree is messaged
+      // directly, without it the donor is messaged about them.
+      sevakName: input.sevakName || undefined,
+      sevakMobile: input.sevakMobile || undefined,
       enteredByName: input.enteredByName || undefined,
       dccEnrolledById: input.dccEnrolledById ?? undefined,
     };
@@ -491,6 +527,18 @@ function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<st
     // wording travels alongside so nothing is lost.
     prasadamAddress: input.wantPrasadam ? hkmvPrasadamObject : undefined,
     prasadamAddressText: input.wantPrasadam ? input.prasadamAddress || undefined : undefined,
+    // createManual destructures `sevakName` (donation.controller.js:433) and
+    // writes it onto the donation, which is what receipt.service.js prints in
+    // place of the "---" it has been printing until now.
+    //
+    // The honoree's PHONE is deliberately not sent. HKMV has no field for it -
+    // neither createManual's destructure nor the donation schema mentions
+    // sevakMobile - so Mongoose would drop it on the way in, and a reader of
+    // this payload would reasonably conclude the number had reached the site.
+    // That is the same false impression dccEnrolledById above has been giving,
+    // and once was enough. HKMV also has no birthday wish to feed, so nothing
+    // is lost by leaving it out; if a field is added there, add it here.
+    sevakName: input.sevakName || undefined,
     manualEntryNote: input.note || undefined,
     enteredByName: input.enteredByName || undefined,
     dccEnrolledById: input.dccEnrolledById ?? undefined,

@@ -39,6 +39,7 @@ import crmLinksRoutes from './routes/crmLinks';
 import crmPreachersRoutes from './routes/crmPreachers';
 import crmImportRoutes from './routes/crmImport';
 import crmListsRoutes from './routes/crmLists';
+import crmCollectionsRoutes from './routes/crmCollections';
 import crmQrRoutes, { webhookRouter as razorpayWebhook } from './routes/crmQr';
 import profilesRoutes from './routes/profiles';
 import filesRoutes from './routes/files';
@@ -209,6 +210,8 @@ app.use('/api/crm', crmPreachersRoutes);
 app.use('/api/crm', crmImportRoutes);
 app.use('/api/crm', crmListsRoutes);
 app.use('/api/crm', crmQrRoutes);
+// Money a caller collected on a UPI number that no system watched arrive.
+app.use('/api/crm', crmCollectionsRoutes);
 
 // Razorpay's QR payment webhook. Mounted here, ahead of the JWT-protected
 // groups and outside /api/crm, because Razorpay has no token and because a

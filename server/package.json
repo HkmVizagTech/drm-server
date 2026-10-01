@@ -12,7 +12,8 @@
     "test:scope": "tsx scripts/test-dashboard-scope.ts",
     "test:promises": "tsx scripts/test-promises.ts",
     "test:access": "tsx scripts/test-role-access.ts",
-    "test:time": "tsx scripts/test-time-and-exports.ts"
+    "test:time": "tsx scripts/test-time-and-exports.ts",
+    "test:credits": "tsx scripts/test-credits.ts"
   },
   "keywords": [],
   "author": "",
