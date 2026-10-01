@@ -590,15 +590,25 @@ async function syncAbandoned(
   const days = Math.min(365, Math.max(1, opts.days ?? 90));
   const since = new Date(Date.now() - days * 86_400_000).toISOString();
   const minMinutes = Math.max(15, opts.minMinutes ?? 60);
-  const results: { site: string; seen: number; error: string | null }[] = [];
+  const results: {
+    site: string;
+    seen: number;
+    skipped?: number;
+    truncated?: boolean;
+    /** Another request was already crawling this site; nothing was fetched. */
+    alreadyRunning?: boolean;
+    error: string | null;
+  }[] = [];
 
   for (const site of sites) {
     if (!isSiteConfigured(site)) {
       const error = 'Not connected — its URL and internal secret are not set on DRM, so it was not asked.';
+      // Not marked as checked: it was not. Only the reason is recorded, so a
+      // site that is simply not connected does not also claim a timestamp.
       await pool.query(
-        `INSERT INTO abandoned_sync_state (source_site, last_error, last_synced_at)
-         VALUES ($1, $2, NOW())
-         ON CONFLICT (source_site) DO UPDATE SET last_error = $2, last_synced_at = NOW(), running_since = NULL`,
+        `INSERT INTO abandoned_sync_state (source_site, last_error)
+         VALUES ($1, $2)
+         ON CONFLICT (source_site) DO UPDATE SET last_error = $2, running_since = NULL`,
         [site, error]
       );
       results.push({ site, seen: 0, error });
@@ -614,22 +624,38 @@ async function syncAbandoned(
        ON CONFLICT (source_site) DO UPDATE SET running_since = NOW()
          WHERE abandoned_sync_state.running_since IS NULL
             OR abandoned_sync_state.running_since < NOW() - INTERVAL '5 minutes'
-       RETURNING source_site`,
+       RETURNING source_site, running_since`,
       [site]
     );
     if (!claim.rows.length) {
-      results.push({ site, seen: 0, error: null });
+      // Somebody else is already doing it. Reported as such rather than as a
+      // sync that found nothing, so "Checked just now" is never shown for a
+      // site nobody contacted.
+      results.push({ site, seen: 0, error: null, alreadyRunning: true });
       continue;
     }
+    // The token this run holds. The release is guarded on it, so a crawl that
+    // hangs past the five-minute escape hatch and then finishes cannot clear a
+    // newer run's claim or overwrite its result.
+    const token = claim.rows[0].running_since as string;
 
     let seen = 0;
+    let skipped = 0;
+    let truncated = false;
     let error: string | null = null;
     try {
-      for (let page = 1; page <= 10; page++) {
+      for (let page = 1; page <= MAX_ABANDONED_PAGES; page++) {
         const result = await fetchAbandonedPage(site, { page, limit: 200, since, minMinutes });
         for (const d of result.donations) {
           const phone = normalizePhone(d.mobile);
-          if (!isDialable(phone)) continue;
+          // No number to ring, no id to key on, or no date to place it: all
+          // three make the row unusable. Counted, because a silent drop is how
+          // "the site has 2,000 and DRM shows 1,870" becomes unexplainable.
+          const externalId = String(d.externalId ?? '').trim();
+          if (!isDialable(phone) || !externalId || !d.attemptedAt) {
+            skipped++;
+            continue;
+          }
           seen++;
           await pool.query(
             `INSERT INTO abandoned_attempts
@@ -650,39 +676,48 @@ async function syncAbandoned(
                last_seen_at = NOW()`,
             [
               site,
-              String(d.externalId ?? ''),
+              externalId.slice(0, 80),
               phone,
-              d.name ?? null,
-              d.email ?? null,
+              cut(d.name, 255),
+              cut(d.email, 255),
               d.amount ?? null,
-              d.purpose ?? null,
-              d.sourcePage ?? null,
-              d.status ?? null,
-              d.attemptedAt ?? new Date().toISOString(),
+              // The sites' seva names and page URLs are free text and overrun
+              // these columns. Unclipped, one 270-character festival name
+              // threw mid-crawl and cost every page after it.
+              cut(d.purpose, 255),
+              cut(d.sourcePage, 255),
+              cut(d.status, 20),
+              d.attemptedAt,
             ]
           );
         }
         if (!result.hasMore) break;
+        // Still more to come and this was the last page we will ask for. The
+        // figure that follows is a floor, not a total, and saying so is the
+        // difference between a number somebody can act on and one they cannot.
+        if (page === MAX_ABANDONED_PAGES) truncated = true;
       }
     } catch (err) {
       error = err instanceof Error ? err.message : 'Unknown error';
     }
 
-    // How many times each person tried, counted once per sync rather than on
-    // every read.
+    // Released only if this run still holds the claim, and - the important
+    // part - last_synced_at and synced_days move ONLY on success. A site that
+    // fails every time used to mark itself freshly checked, which both hid the
+    // staleness and blocked retries for half an hour.
     await pool.query(
-      `UPDATE abandoned_attempts a SET attempts = c.n
-         FROM (SELECT phone, COUNT(*)::int AS n FROM abandoned_attempts GROUP BY phone) c
-        WHERE a.phone = c.phone AND a.attempts <> c.n`
+      `UPDATE abandoned_sync_state SET
+         last_synced_at = CASE WHEN $2::text IS NULL THEN NOW() ELSE last_synced_at END,
+         synced_days    = CASE WHEN $2::text IS NULL THEN $4::int ELSE synced_days END,
+         last_error     = $2,
+         rows_seen      = $3,
+         rows_skipped   = $5::int,
+         truncated      = $6::boolean,
+         running_since  = NULL
+       WHERE source_site = $1 AND running_since = $7::timestamptz`,
+      [site, error, seen, days, skipped, truncated, token]
     );
-
-    await pool.query(
-      `UPDATE abandoned_sync_state
-          SET last_synced_at = NOW(), last_error = $2, rows_seen = $3, running_since = NULL
-        WHERE source_site = $1`,
-      [site, error, seen]
-    );
-    results.push({ site, seen, error });
+    results.push({ site, seen, skipped, truncated, error });
   }
 
   return results;
@@ -690,6 +725,22 @@ async function syncAbandoned(
 
 /** How stale the copy may get before a read quietly refreshes it. */
 const ABANDONED_STALE_MINUTES = 30;
+
+/**
+ * How many pages of 200 to crawl per site.
+ *
+ * Was ten. A first sync against a site holding 4,800 attempts stored the
+ * newest 2,000 and reported success, so the backfill was short by thousands of
+ * people and nothing said so. Raised, and the state now records when the
+ * ceiling was actually hit.
+ */
+const MAX_ABANDONED_PAGES = 40;
+
+/** Clip to a column width. The sites' free text overruns these regularly. */
+const cut = (v: unknown, n: number): string | null => {
+  const t = String(v ?? '').trim();
+  return t ? t.slice(0, n) : null;
+};
 
 /**
  * GET /leads/abandoned - the list a caller works through.
@@ -721,62 +772,110 @@ router.get('/leads/abandoned', async (req, res) => {
     );
     const byState = new Map(state.rows.map((r) => [r.source_site, r]));
 
+    // How far back this view is asking. The sync has to cover at least that,
+    // or the screen quietly shows a year's filter over ninety days of data and
+    // reports a total for a period it never actually fetched.
+    const viewDays = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+    const syncDays = Math.max(90, viewDays);
+
     const stale = wanted.filter((site) => {
       const r = byState.get(site);
       if (!r || !r.last_synced_at) return true;
+      // Old in TIME, or short in REACH. The second half is the one that bit:
+      // a sync for ninety days three minutes ago made a year's view look fresh
+      // while answering it out of a quarter of the data, and pressing "Check
+      // the sites now" only reset the clock on the same ninety days.
+      if ((r.synced_days ?? 0) < viewDays) return true;
       return Date.now() - new Date(r.last_synced_at).getTime() > ABANDONED_STALE_MINUTES * 60_000;
     });
 
-    // Never awaited unless the caller asked for fresh data. The page is for
-    // reading, and reading must not block on somebody else's Mongo.
-    if (req.query.fresh === 'true') {
-      await syncAbandoned(wanted);
+    // A site DRM has never asked is a different situation from a stale one. A
+    // stale copy is yesterday's answer, which is worth showing while today's
+    // is fetched; no copy at all is no answer, and returning a confident zero
+    // while a sync runs in the background is how a screen tells somebody there
+    // is nothing to ring when there are four thousand people.
+    const never = wanted.filter((site) => !byState.get(site)?.last_synced_at);
+
+    // Never awaited unless the caller asked for fresh data, or there is no
+    // data at all. The page is for reading, and reading must not block on
+    // somebody else's Mongo when there is something to read.
+    if (req.query.fresh === 'true' || never.length) {
+      await syncAbandoned(req.query.fresh === 'true' ? wanted : never, { days: syncDays });
       // Re-read, because the state above was captured before that ran. Without
       // this the one request that definitely has fresh information reports the
       // state from before it - including saying a site is fine when the sync
-      // just discovered it is not connected.
+      // just discovered it is not connected, or "not checked yet" for a site
+      // it has this second finished checking.
       const after = await pool.query(
         `SELECT source_site, last_synced_at, last_error, running_since FROM abandoned_sync_state`
       );
       byState.clear();
       for (const row of after.rows) byState.set(row.source_site, row);
     } else if (stale.length) {
-      void syncAbandoned(stale).catch((e) =>
+      void syncAbandoned(stale, { days: syncDays }).catch((e) =>
         console.error('crm.syncAbandoned background error:', (e as Error).message)
       );
     }
 
-    /* ------------------------------------------------------------ filters */
-    const conditions: string[] = ['a.dismissed_at IS NULL'];
+    /* ------------------------------------------------------------ filters
+     *
+     * TWO GROUPS, AND THE ORDER MATTERS
+     *
+     * `scope` decides which attempts exist at all for this view - the sites
+     * chosen, the period, anybody set aside. `narrow` is what the caller is
+     * looking for within that: an amount band, an outcome, a name.
+     *
+     * The scope filters run BEFORE one-row-per-person is picked; the narrowing
+     * ones run after. Mixing them meant the amount filter changed WHICH
+     * attempt represented each person: a donor who tried ₹25,000 in September
+     * and ₹500 last week was represented by the ₹500 row unfiltered, and by
+     * the ₹25,000 row the moment you asked for "at least ₹1,000". Narrowing
+     * the filter made the headline figure fifty times larger, and neither
+     * number was wrong on its own terms - which is the worst kind.
+     */
+    const scope: string[] = [];
+    const narrow: string[] = [];
     const values: unknown[] = [];
     let i = 1;
 
-    conditions.push(`a.source_site = ANY($${i++}::text[])`);
+    // Set aside is per PERSON. Dismissing one of somebody's four attempts used
+    // to promote the next one into the list on the following load, taking the
+    // value at stake up rather than down.
+    scope.push(`NOT EXISTS (
+      SELECT 1 FROM abandoned_attempts d
+       WHERE d.phone = a.phone AND d.dismissed_at IS NOT NULL
+    )`);
+
+    scope.push(`a.source_site = ANY($${i++}::text[])`);
     values.push(wanted);
 
     // How long ago they tried. Days rather than a date range, because the
     // question a caller asks is "who nearly gave this week".
-    const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
-    conditions.push(`a.attempted_at >= NOW() - ($${i++} || ' days')::interval`);
-    values.push(String(days));
+    scope.push(`a.attempted_at >= NOW() - ($${i++} || ' days')::interval`);
+    values.push(String(viewDays));
 
     // Leave them alone until the attempt has had time to complete.
-    conditions.push(`a.attempted_at <= NOW() - INTERVAL '15 minutes'`);
+    scope.push(`a.attempted_at <= NOW() - INTERVAL '15 minutes'`);
 
-    if (req.query.min_amount) {
-      conditions.push(`a.amount >= $${i++}::numeric`);
-      values.push(Number(req.query.min_amount));
+    // Guarded against NaN: a non-numeric min_amount used to reach Postgres as
+    // 'NaN'::numeric, which sorts above every number, so the endpoint answered
+    // 200 with no rows and zero at stake rather than an error.
+    const minAmount = Number(req.query.min_amount);
+    if (req.query.min_amount !== undefined && Number.isFinite(minAmount)) {
+      narrow.push(`l.amount >= $${i++}::numeric`);
+      values.push(minAmount);
     }
-    if (req.query.max_amount) {
-      conditions.push(`a.amount <= $${i++}::numeric`);
-      values.push(Number(req.query.max_amount));
+    const maxAmount = Number(req.query.max_amount);
+    if (req.query.max_amount !== undefined && Number.isFinite(maxAmount)) {
+      narrow.push(`l.amount <= $${i++}::numeric`);
+      values.push(maxAmount);
     }
     if (req.query.status) {
-      conditions.push(`a.status = ANY($${i++}::text[])`);
+      narrow.push(`l.status = ANY($${i++}::text[])`);
       values.push(String(req.query.status).split(',').filter(Boolean));
     }
     if (req.query.search) {
-      conditions.push(`(a.name ILIKE $${i} OR a.phone ILIKE $${i} OR a.email ILIKE $${i})`);
+      narrow.push(`(l.name ILIKE $${i} OR l.phone ILIKE $${i} OR l.email ILIKE $${i})`);
       values.push(`%${String(req.query.search).trim()}%`);
       i++;
     }
@@ -795,52 +894,103 @@ router.get('/leads/abandoned', async (req, res) => {
     // One row per person: somebody who tried four times is one phone call.
     // The row kept is their most recent attempt, which is the one worth
     // mentioning when the phone is answered.
-    const rows = await pool.query(
-      `WITH latest AS (
-         SELECT DISTINCT ON (a.phone) a.*
-           FROM abandoned_attempts a
-          WHERE ${conditions.join(' AND ')}
-          ORDER BY a.phone, a.attempted_at DESC
-       )
-       SELECT l.*,
-              -- Did they give anyway? Any donation at or after the attempt,
-              -- from either site, by any means.
-              EXISTS (
-                SELECT 1 FROM people p JOIN donations d ON d.person_id = p.id
-                 WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = l.phone
-                   AND d.created_at >= l.attempted_at
-              ) AS gave_anyway,
-              ld.id AS lead_id,
-              ld.status AS lead_status,
-              u.name AS assigned_to_name
-         FROM latest l
-         LEFT JOIN leads ld ON ld.phone = l.phone
-         LEFT JOIN users u ON ld.assigned_to = u.id
-        ORDER BY ${order}
-        LIMIT 500`,
-      values
-    );
+    //
+    // THE TOTALS ARE COMPUTED IN SQL, OVER EVERYTHING
+    //
+    // They used to be summed in JavaScript over the rows this query returned -
+    // which is capped at 500. So on a list longer than that, "value at stake"
+    // silently reported the value of the first five hundred people and nothing
+    // else. The figure dropped from about twelve lakhs to seven the moment the
+    // page started reading a stored copy, and the money had not gone anywhere:
+    // the old version fetched the sites live with no cap, and the new one was
+    // adding up a page of the answer and calling it the answer.
+    //
+    // A total and a page are different questions. The page is capped because
+    // nobody scrolls five hundred rows; the total must not be, because it is
+    // what decides whether the list is worth a shift.
+    const base = `
+      WITH in_scope AS (
+        SELECT a.* FROM abandoned_attempts a
+         WHERE ${scope.join(' AND ')}
+      ),
+      latest AS (
+        SELECT DISTINCT ON (a.phone) a.*,
+               -- How many times THIS person tried, within the period and the
+               -- sites being looked at. The stored column counts every attempt
+               -- ever, across both sites and including dismissed ones, so a
+               -- "Today, annadan only" view was showing "tried 7 times" for
+               -- somebody who tried once today.
+               COUNT(*) OVER (PARTITION BY a.phone)::int AS attempts_in_view
+          FROM in_scope a
+         ORDER BY a.phone, a.attempted_at DESC
+      ),
+      resolved AS (
+        SELECT l.*,
+               -- Did they give anyway? Any donation at or after the attempt,
+               -- from either site, by any means.
+               EXISTS (
+                 SELECT 1 FROM people p JOIN donations d ON d.person_id = p.id
+                  WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = l.phone
+                    AND d.created_at >= l.attempted_at
+               ) AS gave_anyway,
+               ld.id AS lead_id,
+               ld.status AS lead_status,
+               u.name AS assigned_to_name
+          FROM latest l
+          LEFT JOIN leads ld ON ld.phone = l.phone
+          LEFT JOIN users u ON ld.assigned_to = u.id
+          ${narrow.length ? `WHERE ${narrow.join(' AND ')}` : ''}
+      )`;
 
-    const all = rows.rows;
-    const open = all.filter((r) => !r.gave_anyway);
-    const shown = req.query.include_settled === 'true' ? all : open;
+    const [page, totals] = await Promise.all([
+      pool.query(
+        `${base}
+         SELECT * FROM resolved l
+          ${req.query.include_settled === 'true' ? '' : 'WHERE NOT gave_anyway'}
+          ORDER BY ${order}
+          LIMIT 500`,
+        values
+      ),
+      pool.query(
+        `${base}
+         SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE NOT gave_anyway)::int AS open,
+                COUNT(*) FILTER (WHERE gave_anyway)::int AS gave_anyway,
+                COUNT(*) FILTER (WHERE NOT gave_anyway AND lead_id IS NOT NULL)::int AS already_leads,
+                COALESCE(SUM(amount) FILTER (WHERE NOT gave_anyway), 0)::numeric AS value_at_stake
+           FROM resolved`,
+        values
+      ),
+    ]);
+
+    const t = totals.rows[0];
 
     res.json({
-      rows: shown,
-      total: all.length,
-      open: open.length,
-      gave_anyway: all.length - open.length,
-      already_leads: open.filter((r) => r.lead_id).length,
-      // What walked away, over the people still worth ringing. This is the
-      // number that decides whether the list is worth a shift.
-      value_at_stake: open.reduce((sum, r) => sum + Number(r.amount ?? 0), 0),
+      rows: page.rows,
+      // Compared against the real total, not the page length: at exactly 500
+      // the old form said "showing the first 500 of 500".
+      complete: page.rows.length >= (req.query.include_settled === 'true' ? t.total : t.open),
+      total: t.total,
+      open: t.open,
+      gave_anyway: t.gave_anyway,
+      already_leads: t.already_leads,
+      // What walked away, over everybody still worth ringing - not over the
+      // page. This is the number that decides whether the list is worth a
+      // shift, so it has to cover the whole shift.
+      value_at_stake: Number(t.value_at_stake),
       sites: wanted.map((site) => {
         const r = byState.get(site);
         return {
           site,
           last_synced_at: r?.last_synced_at ?? null,
+          synced_days: r?.synced_days ?? null,
           error: r?.last_error ?? null,
           refreshing: !!r?.running_since || stale.includes(site),
+          // Rows the site returned that DRM could not use, and whether the
+          // crawl stopped before the site ran out. Both mean the figure is a
+          // floor rather than a total, which the screen has to be able to say.
+          rows_skipped: r?.rows_skipped ?? 0,
+          truncated: !!r?.truncated,
         };
       }),
     });
@@ -854,9 +1004,12 @@ router.get('/leads/abandoned', async (req, res) => {
 router.post('/leads/abandoned/refresh', async (req, res) => {
   const sites = (String(req.body?.sites ?? '').split(',').filter(Boolean) as SiteKey[]);
   try {
-    const results = await syncAbandoned(sites.length ? sites : (['hkmv', 'annadan'] as SiteKey[]), {
-      days: Number(req.body?.days) || 90,
-    });
+    // The window the screen is showing, so pressing the button on a year view
+    // actually fetches the year. Without this it refetched ninety days and
+    // reset the staleness clock, which made the button the one thing
+    // guaranteeing the year was never fetched.
+    const days = Math.min(365, Math.max(1, Number(req.body?.days) || 90));
+    const results = await syncAbandoned(sites.length ? sites : (['hkmv', 'annadan'] as SiteKey[]), { days });
     res.json({ results });
   } catch (err) {
     console.error('crm.refreshAbandoned error:', err);
@@ -867,14 +1020,23 @@ router.post('/leads/abandoned/refresh', async (req, res) => {
 /** POST /leads/abandoned/:id/dismiss - not worth a call. Survives refreshes. */
 router.post('/leads/abandoned/:id/dismiss', async (req, res) => {
   try {
+    // Every attempt by that person, not the one row somebody clicked.
+    //
+    // The list is one row per person; the table underneath is one row per
+    // attempt. Dismissing a single attempt removed it from the dedupe and
+    // promoted the person's NEXT attempt into the list, so somebody who tried
+    // four times needed setting aside four times - and the value at stake went
+    // UP each time, because the earlier attempts were for more money.
     const r = await pool.query(
       `UPDATE abandoned_attempts
           SET dismissed_at = NOW(), dismissed_by = $2::uuid
-        WHERE id = $1 AND dismissed_at IS NULL RETURNING id`,
+        WHERE phone = (SELECT phone FROM abandoned_attempts WHERE id = $1)
+          AND dismissed_at IS NULL
+        RETURNING id`,
       [req.params.id, req.user?.userId ?? null]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'No such attempt' });
-    res.json({ dismissed: true });
+    res.json({ dismissed: true, attempts: r.rows.length });
   } catch (err) {
     console.error('crm.dismissAbandoned error:', err);
     res.status(500).json({ error: 'Could not set that aside' });

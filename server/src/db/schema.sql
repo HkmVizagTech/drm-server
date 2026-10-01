@@ -1552,3 +1552,35 @@ CREATE TABLE IF NOT EXISTS abandoned_sync_state (
   -- Set while a sync is running, so two page loads cannot start two of them.
   running_since TIMESTAMPTZ
 );
+
+-- How far back the last SUCCESSFUL sync reached.
+--
+-- Without this, "when did we last check" was the only thing recorded, and a
+-- screen asking for a year could be answered out of ninety days of stored rows
+-- while reporting itself as up to date three minutes ago. A view that reaches
+-- further back than this is stale however recently the sync ran.
+ALTER TABLE abandoned_sync_state ADD COLUMN IF NOT EXISTS synced_days INT;
+-- Rows the site returned that DRM could not use: no id, no number, nothing to
+-- ring. Counted rather than silently dropped, so "the site has 2,000 and DRM
+-- shows 1,870" is explainable instead of unnerving.
+ALTER TABLE abandoned_sync_state ADD COLUMN IF NOT EXISTS rows_skipped INT NOT NULL DEFAULT 0;
+-- True when the crawl hit its page ceiling with the site still offering more.
+-- The figure is then a floor, not a total, and the screen has to say so.
+ALTER TABLE abandoned_sync_state ADD COLUMN IF NOT EXISTS truncated BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- An attempt with no id from the site cannot be stored: the unique key is
+-- (site, external id), so every id-less row from a site would collide into one
+-- row and that site's whole list would collapse to a single person.
+ALTER TABLE abandoned_attempts DROP CONSTRAINT IF EXISTS abandoned_external_id_present;
+ALTER TABLE abandoned_attempts ADD CONSTRAINT abandoned_external_id_present
+  CHECK (external_id <> '');
+
+-- Dismissal is per person, not per attempt: setting aside one of somebody's
+-- four attempts used to promote the next one into the list the moment the
+-- page reloaded, taking the value at stake UP.
+CREATE INDEX IF NOT EXISTS idx_abandoned_dismissed ON abandoned_attempts(phone) WHERE dismissed_at IS NOT NULL;
+
+-- The gave-anyway check runs this expression per person on every read; without
+-- the index it is a sequential scan of people on each one.
+CREATE INDEX IF NOT EXISTS idx_people_phone10
+  ON people ((right(regexp_replace(phone, '\D', '', 'g'), 10)));

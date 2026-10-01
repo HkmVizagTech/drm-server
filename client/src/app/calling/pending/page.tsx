@@ -49,6 +49,8 @@ interface Row {
   attempted_at: string;
   source_site: string;
   attempts: number;
+  /** How many times they tried within the period and sites being viewed. */
+  attempts_in_view: number;
   gave_anyway?: boolean;
   lead_id?: string | null;
   lead_status?: string | null;
@@ -62,8 +64,18 @@ interface Answer {
   gave_anyway: number;
   already_leads: number;
   value_at_stake: number;
+  /** False when the table is showing only the first 500 of a longer list. */
+  complete: boolean;
   /** Per site: when it was last asked, what went wrong, whether it is being asked now. */
-  sites: { site: string; last_synced_at: string | null; error: string | null; refreshing: boolean }[];
+  sites: {
+    site: string;
+    last_synced_at: string | null;
+    synced_days: number | null;
+    error: string | null;
+    refreshing: boolean;
+    rows_skipped: number;
+    truncated: boolean;
+  }[];
 }
 
 const SITE_LABELS: Record<string, string> = {
@@ -138,7 +150,12 @@ export default function PendingPaymentsPage() {
     setRefreshing(true);
     setNotice(null);
     try {
-      await apiClient.post("/api/crm/leads/abandoned/refresh", { sites: site || undefined });
+      // The window on screen, so pressing this on a year view fetches the
+      // year rather than ninety days and then resetting the staleness clock.
+      await apiClient.post("/api/crm/leads/abandoned/refresh", {
+        sites: site || undefined,
+        days: Number(days),
+      });
       await load();
       setNotice("Checked both sites just now.");
     } catch (e) {
@@ -338,24 +355,51 @@ export default function PendingPaymentsPage() {
       {/* A site being unreachable, or never connected, must not look like a
           quiet week. And the page now reads a stored copy, so when that copy
           was last refreshed is part of what the number means. */}
-      {data?.sites.map((st) => (
+      {/* An error means the last good copy is what you are reading, not that
+          the site's rows are missing — saying "nothing from it is listed
+          below" was simply untrue, since last night's rows are still in the
+          table and still in the totals. */}
+      {data?.sites.map((st) =>
         st.error ? (
           <div
             key={st.site}
             className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
           >
-            {SITE_LABELS[st.site] ?? st.site}: {st.error} Nothing from it is listed below.
+            <strong className="font-medium">{SITE_LABELS[st.site] ?? st.site} could not be reached.</strong>{" "}
+            {st.error}{" "}
+            {st.last_synced_at
+              ? `What you see from it is the copy taken ${relativeDate(st.last_synced_at)}.`
+              : "Nothing from it has ever been fetched, so none of it is listed below."}
           </div>
         ) : null
-      ))}
+      )}
+
+      {/* A crawl that stopped at its ceiling, or rows the site returned that
+          DRM could not use. Either makes the total a floor. */}
+      {data?.sites.map((st) =>
+        !st.error && (st.truncated || st.rows_skipped > 0) ? (
+          <div
+            key={`${st.site}-partial`}
+            className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600"
+          >
+            {SITE_LABELS[st.site] ?? st.site}:{" "}
+            {st.truncated && "there are more attempts than DRM fetched in one go, so the figures below are a floor. "}
+            {st.rows_skipped > 0 &&
+              `${number(st.rows_skipped)} row${st.rows_skipped === 1 ? "" : "s"} could not be used — no number to ring, or nothing to identify them by.`}
+          </div>
+        ) : null
+      )}
 
       {data && (
         <p className="mb-4 text-xs text-slate-500">
           {data.sites
-            .filter((st) => !st.error)
             .map((st) =>
               st.last_synced_at
-                ? `${SITE_LABELS[st.site] ?? st.site} last checked ${relativeDate(st.last_synced_at)}`
+                ? `${SITE_LABELS[st.site] ?? st.site} last checked ${relativeDate(st.last_synced_at)}${
+                    st.synced_days && st.synced_days < Number(days)
+                      ? ` (last ${st.synced_days} days only)`
+                      : ""
+                  }`
                 : `${SITE_LABELS[st.site] ?? st.site} not checked yet`
             )
             .join(" · ")}
@@ -446,8 +490,10 @@ export default function PendingPaymentsPage() {
                     </Td>
                     <Td>
                       <Badge tone={word.tone}>{word.label}</Badge>
-                      {r.attempts > 1 && (
-                        <div className="mt-0.5 text-[11px] text-slate-500">tried {number(r.attempts)} times</div>
+                      {r.attempts_in_view > 1 && (
+                        <div className="mt-0.5 text-[11px] text-slate-500">
+                          tried {number(r.attempts_in_view)} times
+                        </div>
                       )}
                     </Td>
                     <Td align="right">
@@ -490,6 +536,15 @@ export default function PendingPaymentsPage() {
             )}
           </tbody>
         </TableShell>
+
+        {data && !data.complete && (
+          <div className="border-t border-[var(--line-soft)] px-5 py-3">
+            <p className="text-xs text-amber-800">
+              Showing the first {number(rows.length)} of {number(data.open)}. The totals above cover all of them —
+              narrow the filters to work through the rest.
+            </p>
+          </div>
+        )}
 
         <div className="border-t border-[var(--line-soft)] px-5 py-4">
           <p className="text-xs text-slate-500">

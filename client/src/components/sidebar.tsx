@@ -48,8 +48,10 @@ const navGroups: { heading: string; items: NavItem[]; roles?: string[] }[] = [
     roles: ["admin", "accountant", "volunteer_coordinator"],
     items: [
       { href: "/prasadam", label: "Prasadam", icon: "M3 9h18M5 9V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v2M5 9v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9" },
-      { href: "/seva", label: "Seva Bookings", icon: "M8 2v4M16 2v4M3 10h18M5 6h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z" },
-      { href: "/events", label: "Events", icon: "M21 10c0 6-9 12-9 12s-9-6-9-12a9 9 0 0 1 18 0zM12 8v4l3 2" },
+      // Seva Bookings and Events were nav entries with nothing behind them -
+      // a link that opens an empty screen teaches people the app is broken.
+      // The server routes stay, so the day either is actually built the link
+      // comes back here and nothing else has to be rebuilt.
     ],
   },
   {

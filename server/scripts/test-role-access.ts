@@ -152,9 +152,15 @@ async function main() {
     (r.body.sites ?? []).every((st: any) => /not connected/i.test(st.error ?? '')),
     r.body.sites
   );
+  // And it does NOT claim to have been checked. A site that was never asked
+  // reporting "last checked 2 minutes ago" under a banner saying it was never
+  // asked is the kind of contradiction that makes somebody stop trusting the
+  // whole screen.
+  await pool.query(`TRUNCATE abandoned_sync_state RESTART IDENTITY CASCADE`);
+  r = await req('GET', '/api/crm/leads/abandoned?days=30&fresh=true', caller);
   check(
-    'with a last-checked time, so the page can say how fresh it is',
-    (r.body.sites ?? []).every((st: any) => !!st.last_synced_at),
+    'and does not claim a check time it never had',
+    (r.body.sites ?? []).every((st: any) => st.last_synced_at === null),
     r.body.sites
   );
 
@@ -433,6 +439,118 @@ async function main() {
     'and no row was created for it',
     (await pool.query(`SELECT COUNT(*)::int c FROM preachers WHERE id_number='9999'`)).rows[0].c === 0
   );
+
+  console.log('\n14. the totals cover the whole list, not just the page');
+  // The reported bug: value at stake fell from about twelve lakhs to seven
+  // when the page started reading a stored copy. The money had not moved - the
+  // totals were being summed in JavaScript over the 500 rows the query
+  // returned, so any list longer than that reported the value of its first
+  // five hundred people and nothing else.
+  await pool.query(`TRUNCATE abandoned_attempts, abandoned_sync_state RESTART IDENTITY CASCADE`);
+  await pool.query(
+    `INSERT INTO abandoned_sync_state (source_site, last_synced_at) VALUES ('hkmv', NOW()), ('annadan', NOW())`
+  );
+  await pool.query(
+    `INSERT INTO abandoned_attempts (source_site, external_id, phone, name, amount, status, attempted_at)
+     SELECT 'hkmv', 'bulk' || g, '9' || lpad(g::text, 9, '0'), 'Donor ' || g,
+            1000, 'pending', NOW() - INTERVAL '2 days'
+       FROM generate_series(1, 700) g`
+  );
+
+  r = await req('GET', '/api/crm/leads/abandoned?days=30', caller);
+  check('the page is capped', (r.body.rows ?? []).length === 500, (r.body.rows ?? []).length);
+  check('but the count is the whole list', r.body.open === 700, r.body.open);
+  check(
+    'and so is the value at stake',
+    Number(r.body.value_at_stake) === 700000,
+    r.body.value_at_stake
+  );
+  check('the page says it is not showing everything', r.body.complete === false, r.body.complete);
+
+  // Filters must narrow the total too, not just the page.
+  r = await req('GET', '/api/crm/leads/abandoned?days=30&max_amount=999', caller);
+  check('a filter that matches nothing totals zero', Number(r.body.value_at_stake) === 0, r.body);
+
+  console.log('\n15. a view asking for a year is not answered from ninety days');
+  await pool.query(`TRUNCATE abandoned_attempts RESTART IDENTITY CASCADE`);
+  await pool.query(
+    `INSERT INTO abandoned_attempts (source_site, external_id, phone, name, amount, status, attempted_at)
+     VALUES ('hkmv','old1','9888000001','Long ago', 4000,'pending', NOW() - INTERVAL '200 days'),
+            ('hkmv','new1','9888000002','Recent',   1000,'pending', NOW() - INTERVAL '2 days')`
+  );
+  r = await req('GET', '/api/crm/leads/abandoned?days=30', caller);
+  check('a 30-day view excludes the old one', Number(r.body.value_at_stake) === 1000, r.body.value_at_stake);
+  r = await req('GET', '/api/crm/leads/abandoned?days=365', caller);
+  check('a year view includes it', Number(r.body.value_at_stake) === 5000, r.body.value_at_stake);
+
+  console.log('\n16. setting somebody aside sets aside the person, not one attempt');
+  await pool.query(`TRUNCATE abandoned_attempts RESTART IDENTITY CASCADE`);
+  await pool.query(
+    `INSERT INTO abandoned_attempts (source_site, external_id, phone, name, amount, status, attempted_at)
+     VALUES ('hkmv','t1','9877000001','Tried four', 10000,'pending', NOW() - INTERVAL '26 days'),
+            ('hkmv','t2','9877000001','Tried four', 10000,'pending', NOW() - INTERVAL '19 days'),
+            ('hkmv','t3','9877000001','Tried four', 10000,'pending', NOW() - INTERVAL '12 days'),
+            ('hkmv','t4','9877000001','Tried four',   500,'pending', NOW() - INTERVAL '2 days')`
+  );
+  r = await req('GET', '/api/crm/leads/abandoned?days=30', caller);
+  check('one row for the person', (r.body.rows ?? []).length === 1, r.body.rows);
+  check('showing their most recent attempt', Number(r.body.rows[0].amount) === 500, r.body.rows[0]);
+  check('and counting the attempts in view', r.body.rows[0].attempts_in_view === 4, r.body.rows[0]);
+
+  r = await req('POST', `/api/crm/leads/abandoned/${r.body.rows[0].id}/dismiss`, caller);
+  check('all four attempts go at once', r.body.attempts === 4, r.body);
+  r = await req('GET', '/api/crm/leads/abandoned?days=30', caller);
+  check('they are gone', (r.body.rows ?? []).length === 0, r.body.rows);
+  check('and the value went DOWN, not up', Number(r.body.value_at_stake) === 0, r.body.value_at_stake);
+
+  console.log('\n17. an amount filter does not change who represents a person');
+  await pool.query(`TRUNCATE abandoned_attempts RESTART IDENTITY CASCADE`);
+  await pool.query(
+    `INSERT INTO abandoned_attempts (source_site, external_id, phone, name, amount, status, attempted_at)
+     VALUES ('hkmv','b1','9877000002','Big then small', 25000,'pending', NOW() - INTERVAL '20 days'),
+            ('hkmv','b2','9877000002','Big then small',   500,'pending', NOW() - INTERVAL '2 days')`
+  );
+  r = await req('GET', '/api/crm/leads/abandoned?days=30', caller);
+  check('represented by the most recent attempt', Number(r.body.value_at_stake) === 500, r.body.value_at_stake);
+  r = await req('GET', '/api/crm/leads/abandoned?days=30&min_amount=1000', caller);
+  check(
+    'and a minimum amount excludes them rather than promoting an older attempt',
+    Number(r.body.value_at_stake) === 0 && (r.body.rows ?? []).length === 0,
+    r.body
+  );
+
+  console.log('\n18. a sync that fails does not mark the site as freshly checked');
+  await pool.query(`TRUNCATE abandoned_sync_state RESTART IDENTITY CASCADE`);
+  await pool.query(
+    `INSERT INTO abandoned_sync_state (source_site, last_synced_at, synced_days)
+     VALUES ('hkmv', NOW() - INTERVAL '2 hours', 90)`
+  );
+  const before18 = (await pool.query(`SELECT last_synced_at FROM abandoned_sync_state WHERE source_site='hkmv'`))
+    .rows[0].last_synced_at;
+  // The sites are unreachable from a test, so this sync fails by construction.
+  r = await req('POST', '/api/crm/leads/abandoned/refresh', caller, { days: 30 });
+  const after18 = (await pool.query(`SELECT last_synced_at, last_error FROM abandoned_sync_state WHERE source_site='hkmv'`))
+    .rows[0];
+  check(
+    'the last-checked time is untouched by a failure',
+    new Date(after18.last_synced_at).getTime() === new Date(before18).getTime(),
+    { before: before18, after: after18.last_synced_at }
+  );
+  check('and the reason is recorded', !!after18.last_error, after18);
+
+  console.log('\n19. a row the site cannot identify is skipped, not collapsed');
+  // An empty external id would collide with every other id-less row from that
+  // site under the unique key, folding a whole site into one person.
+  let rejected = false;
+  try {
+    await pool.query(
+      `INSERT INTO abandoned_attempts (source_site, external_id, phone, attempted_at)
+       VALUES ('hkmv','', '9877000003', NOW())`
+    );
+  } catch {
+    rejected = true;
+  }
+  check('the database refuses an empty id', rejected);
 
   console.log(failures ? `\n${failures} FAILURE(S)\n` : '\nall green\n');
   server.close();
