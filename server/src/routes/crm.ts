@@ -1352,6 +1352,84 @@ router.delete('/leads/:id', authorize('admin'), async (req, res) => {
   }
 });
 
+/**
+ * POST /calls/outside - a call that did not come out of the queue.
+ *
+ * THE GAP THIS CLOSES
+ * DRM assumed every call starts on the calling screen, with a lead already in
+ * front of the caller. Real days are not like that. Somebody rings the temple
+ * and the caller rings back from their own phone; a devotee passes on a number
+ * on a slip of paper; a donor from last year is called directly because the
+ * caller remembers them. In every one of those the money may still arrive
+ * through a QR - and until now none of it was recorded anywhere, so the call
+ * never happened as far as DRM was concerned and the payment that followed had
+ * no share to match against.
+ *
+ * One request records the lot: find or create the lead by number, log the call
+ * with its outcome, optionally book a callback, optionally raise a reminder
+ * for a promise, and hand back the lead id so the caller can go straight on to
+ * share a QR against it.
+ *
+ * Everything is attributed to whoever is signed in, because they are the one
+ * who made the call.
+ */
+router.post('/calls/outside', async (req, res) => {
+  const b = req.body ?? {};
+  const phone = normalizePhone(b.phone);
+  if (!isDialable(phone)) return res.status(400).json({ error: 'A phone number is required' });
+
+  const disposition = str(b.disposition, 30);
+  if (!disposition) return res.status(400).json({ error: 'Pick what came of the call' });
+
+  try {
+    const d = await pool.query(
+      `SELECT slug, counts_connected, suggests_status, wants_follow_up
+         FROM crm_dispositions WHERE slug = $1`,
+      [disposition]
+    );
+    if (!d.rows.length) return res.status(400).json({ error: `Unknown call outcome "${disposition}"` });
+
+    const { lead, created } = await upsertLead(
+      {
+        phone,
+        name: b.name,
+        email: b.email,
+        city: b.city,
+        source_detail: str(b.source_detail, 255) ?? 'Called outside DRM',
+        expected_amount: b.expected_amount ?? null,
+        // Theirs: they made the call. Only applied to a lead that is going
+        // spare - upsertLead leaves an existing assignment alone.
+        assigned_to: req.user?.userId ?? null,
+      },
+      req.user?.userId ?? null
+    );
+
+    // From here it is the ordinary call path, reached by its own handler so
+    // there is exactly one implementation of what logging a call does - the
+    // status move, the attempt count, the retry scheduling, the reminder, the
+    // conversion when they gave on the call. Duplicating any of that here is
+    // how the two ways of making a call would start to disagree.
+    const inner = {
+      ...b,
+      direction: str(b.direction, 10) ?? 'outbound',
+      source: 'manual',
+    };
+
+    // Called in-process rather than over HTTP: one transaction, no second
+    // round trip, and no token to forward to ourselves.
+    const result = await logCallForLead(String(lead.id), inner, req.user ?? null);
+
+    // `lead` from the call is the updated row; the one from upsertLead is how
+    // it looked a moment earlier, so the newer one wins.
+    res.status(201).json({ created, ...result });
+  } catch (err) {
+    const status = (err as { status?: number }).status ?? 500;
+    if (status === 400) return res.status(400).json({ error: (err as Error).message });
+    console.error('crm.outsideCall error:', err);
+    res.status(500).json({ error: 'Could not record that call' });
+  }
+});
+
 router.put('/leads/:id', async (req, res) => {
   const b = req.body ?? {};
   try {
@@ -1445,10 +1523,26 @@ router.put('/leads/:id', async (req, res) => {
  * read time, because the calling queue sorts by them and a subquery per row
  * would show up immediately on a list of several thousand.
  */
-router.post('/leads/:id/call', async (req, res) => {
-  const b = req.body ?? {};
+/**
+ * Everything logging a call does, as a function.
+ *
+ * WHY IT IS NOT JUST THE ROUTE HANDLER
+ * A call can start in two places now: the calling screen, working the queue,
+ * and a caller who rang somebody from their own phone and is recording it
+ * afterwards. Both have to do exactly the same thing to the lead - the stage
+ * move, the attempt count, the automatic retry date, the promise, the
+ * conversion when the donor gave on the call - and a second copy of that would
+ * drift from this one inside a month.
+ *
+ * Throws with a `status` for the caller to translate; the routes below do.
+ */
+async function logCallForLead(
+  leadId: string,
+  b: Record<string, unknown>,
+  user: { userId?: string; role?: string } | null
+): Promise<{ activity: Record<string, unknown>; lead: Record<string, unknown>; reminder: unknown }> {
   const disposition = str(b.disposition, 30);
-  if (!disposition) return res.status(400).json({ error: 'Pick what came of the call' });
+  if (!disposition) throw Object.assign(new Error('Pick what came of the call'), { status: 400 });
 
   const client = await pool.connect();
   try {
@@ -1464,11 +1558,11 @@ router.post('/leads/:id/call', async (req, res) => {
               -- be able to put the lead back to not having one.
               converted_at, converted_amount, converted_via, expected_amount
          FROM leads WHERE id = $1 FOR UPDATE`,
-      [req.params.id]
+      [leadId]
     );
     if (!lead.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Lead not found' });
+      throw Object.assign(new Error('Lead not found'), { status: 404 });
     }
 
     const d = await client.query(
@@ -1477,7 +1571,7 @@ router.post('/leads/:id/call', async (req, res) => {
     );
     if (!d.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: `Unknown call outcome "${disposition}"` });
+      throw Object.assign(new Error(`Unknown call outcome "${disposition}"`), { status: 400 });
     }
 
     // The caller may say otherwise - a "no answer" that actually connected and
@@ -1494,7 +1588,7 @@ router.post('/leads/:id/call', async (req, res) => {
     const session = sessionId
       ? await client.query(
           `SELECT id FROM calling_sessions WHERE id = $1 AND user_id = $2 AND ended_at IS NULL`,
-          [sessionId, req.user?.userId ?? null]
+          [sessionId, user?.userId ?? null]
         )
       : null;
     const activeSession = session?.rows[0]?.id ?? null;
@@ -1506,8 +1600,8 @@ router.post('/leads/:id/call', async (req, res) => {
        VALUES ($1,$2,'call',COALESCE($3,'outbound'),$4,$5,$6,COALESCE($7,'manual'),$8,$9,$10,COALESCE($11::timestamptz, NOW()),$12::jsonb,$13::uuid)
        RETURNING *`,
       [
-        req.params.id,
-        req.user?.userId ?? null,
+        leadId,
+        user?.userId ?? null,
         str(b.direction, 10),
         disposition,
         connected,
@@ -1583,7 +1677,7 @@ router.post('/leads/:id/call', async (req, res) => {
         d.rows[0].wants_follow_up === true,
         str(b.follow_up_note, 500),
         disposition === 'do_not_call',
-        req.params.id,
+        leadId,
         retryAfterDays,
         disposition === 'will_pay_qr',
       ]
@@ -1601,7 +1695,7 @@ router.post('/leads/:id/call', async (req, res) => {
              WHERE lead_id = $1::uuid AND matched_at IS NULL
              ORDER BY created_at DESC LIMIT 1
           )`,
-        [req.params.id]
+        [leadId]
       );
     }
 
@@ -1628,7 +1722,7 @@ router.post('/leads/:id/call', async (req, res) => {
            awaiting_qr_at     = NULL
          WHERE id = $1`,
         [
-          req.params.id,
+          leadId,
           num(b.donated_amount) ?? num(b.expected_amount),
           `Gave on the call (${disposition})`,
         ]
@@ -1638,7 +1732,7 @@ router.post('/leads/:id/call', async (req, res) => {
       await client.query(
         `UPDATE lead_reminders SET status = 'done', completed_at = NOW(), updated_at = NOW()
           WHERE lead_id = $1 AND status = 'open'`,
-        [req.params.id]
+        [leadId]
       );
     }
 
@@ -1646,7 +1740,7 @@ router.post('/leads/:id/call', async (req, res) => {
       await client.query(
         `INSERT INTO lead_activities (lead_id, user_id, kind, from_value, to_value)
          VALUES ($1,$2,'status_change',$3,$4)`,
-        [req.params.id, req.user?.userId ?? null, lead.rows[0].status, nextStatus]
+        [leadId, user?.userId ?? null, lead.rows[0].status, nextStatus]
       );
     }
 
@@ -1659,7 +1753,7 @@ router.post('/leads/:id/call', async (req, res) => {
     // Here the caller types the occasion into the box already in front of them
     // and it is saved with the call.
     let reminder = null;
-    const rem = b.reminder;
+    const rem = (b.reminder ?? null) as Record<string, unknown> | null;
     if (rem && rem.due_at) {
       const remDue = asDate(rem.due_at);
       if (remDue) {
@@ -1681,7 +1775,7 @@ router.post('/leads/:id/call', async (req, res) => {
                    COALESCE((SELECT assigned_to FROM leads WHERE id = $1), $8::uuid), $8::uuid)
            RETURNING *`,
           [
-            req.params.id,
+            leadId,
             str(rem.title, 200) ?? `Said they would donate${rem.occasion ? ` at ${String(rem.occasion).slice(0, 80)}` : ''}`,
             str(rem.note, 2000) ?? str(b.note, 2000),
             str(rem.occasion, 120),
@@ -1690,26 +1784,37 @@ router.post('/leads/:id/call', async (req, res) => {
             Array.isArray(rem.lead_times) && rem.lead_times.length
               ? rem.lead_times.map((n: unknown) => Math.round(Number(n))).filter((n: number) => Number.isFinite(n) && n >= 0)
               : null,
-            req.user?.userId ?? null,
+            user?.userId ?? null,
           ]
         );
         reminder = created.rows[0];
         await client.query(
           `INSERT INTO lead_activities (lead_id, user_id, kind, to_value, note)
            VALUES ($1,$2,'reminder',$3,$4)`,
-          [req.params.id, req.user?.userId ?? null, remDue, reminder.title]
+          [leadId, user?.userId ?? null, remDue, reminder.title]
         );
       }
     }
 
     await client.query('COMMIT');
-    res.status(201).json({ activity: activity.rows[0], lead: updated.rows[0], reminder });
+    return { activity: activity.rows[0], lead: updated.rows[0], reminder };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
-    console.error('crm.logCall error:', err);
-    res.status(500).json({ error: 'Could not log that call' });
+    throw err;
   } finally {
     client.release();
+  }
+}
+
+router.post('/leads/:id/call', async (req, res) => {
+  try {
+    const result = await logCallForLead(req.params.id, req.body ?? {}, req.user ?? null);
+    res.status(201).json(result);
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if (status) return res.status(status).json({ error: (err as Error).message });
+    console.error('crm.logCall error:', err);
+    res.status(500).json({ error: 'Could not log that call' });
   }
 });
 

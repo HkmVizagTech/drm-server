@@ -71,6 +71,53 @@ export async function preacherIdForCode(
   return result.rows[0]?.id ?? null;
 }
 
+/**
+ * Resolve a preacher from whatever the sheet actually carried.
+ *
+ * The office's sheets are not consistent: some have a short code (JTMD), some
+ * have the DCC id number the temple's own system uses (a number like 1042),
+ * and some have both in separate columns. Before this, only the code was
+ * understood, so a sheet keyed on id numbers imported with every lead's
+ * preacher blank - and the receipts raised for those donors later carried the
+ * temple's generic default instead of the preacher who actually brought them.
+ *
+ * An id number is matched against existing preachers and never invents one: a
+ * code is a label somebody chose and can be created on sight, but an id number
+ * means something in another system and a made-up row would quietly attribute
+ * donations to a preacher who does not exist. A code, as before, is created if
+ * it is new.
+ */
+export async function preacherIdFrom(
+  input: { code?: unknown; idNumber?: unknown },
+  client?: { query: typeof pool.query }
+): Promise<string | null> {
+  const db = client ?? pool;
+  const idNumber = String(input.idNumber ?? '').trim();
+
+  if (idNumber) {
+    const byId = await db.query(`SELECT id FROM preachers WHERE id_number = $1`, [idNumber]);
+    if (byId.rows.length) return byId.rows[0].id;
+
+    // An id with a code beside it is enough to create the preacher properly -
+    // the code names them, the id links them to the temple's own system.
+    const code = normalizeCode(input.code);
+    if (code) {
+      const made = await db.query(
+        `INSERT INTO preachers (code, id_number) VALUES ($1, $2)
+         ON CONFLICT (code) DO UPDATE SET id_number = COALESCE(preachers.id_number, EXCLUDED.id_number)
+         RETURNING id`,
+        [code, idNumber]
+      );
+      return made.rows[0]?.id ?? null;
+    }
+    // An id number nobody has registered and no code to name them by. Left
+    // unresolved rather than guessed at; the import reports it.
+    return null;
+  }
+
+  return preacherIdForCode(input.code, client);
+}
+
 /* ------------------------------------------------------------------ routes */
 
 /**

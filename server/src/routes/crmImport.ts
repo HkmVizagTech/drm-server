@@ -29,7 +29,7 @@ import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import * as storage from '../services/storage';
-import { preacherIdForCode, normalizeCode } from './crmPreachers';
+import { preacherIdFrom, normalizeCode } from './crmPreachers';
 import {
   parseWorkbook,
   detectColumns,
@@ -83,7 +83,10 @@ const FIELD_PATTERNS: FieldPattern[] = [
   { field: 'donor_code', any: ['donor number', 'donor no', 'donor code', 'donor id'] },
   { field: 'phone', any: ['mobile', 'phone', 'contact', 'whatsapp', 'number'], not: ['donor'] },
   { field: 'name', any: ['donor name', 'name'], not: ['preacher', 'enrolled'] },
-  { field: 'preacher_code', any: ['enrolled by', 'preacher', 'counsellor', 'counselor', 'sevak', 'referred by'] },
+  // The id number first, so a column headed "Preacher ID" is not claimed by
+  // the looser "preacher" pattern below and read as a code.
+  { field: 'preacher_id_number', any: ['preacher id', 'preacher no', 'enrolled by id', 'dcc id', 'counsellor id', 'sevak id'] },
+  { field: 'preacher_code', any: ['enrolled by', 'preacher', 'counsellor', 'counselor', 'sevak', 'referred by'], not: ['id'] },
   { field: 'account_type', any: ['account type', 'account'] },
   { field: 'last_donation_at', any: ['last donation', 'last date', 'last gave'] },
   // Order matters below: "total amount donated" must win before the looser
@@ -99,6 +102,7 @@ interface ParsedRow {
   phone: string;
   name: string | null;
   preacher_code: string | null;
+  preacher_id_number: string | null;
   amount_total: number | null;
   amount_recent: number | null;
   last_donation_at: Date | null;
@@ -125,6 +129,9 @@ function parseSheet(sheet: SheetData): { headers: string[]; mapping: Record<stri
       phone: normalizePhone(at(values, 'phone')),
       name: str(at(values, 'name'), 255),
       preacher_code: normalizeCode(at(values, 'preacher_code')),
+      // Digits only, and kept as text: these are identifiers, not quantities,
+      // and a sheet that writes 1042.0 must still match preacher 1042.
+      preacher_id_number: (String(at(values, 'preacher_id_number') ?? '').trim().replace(/\.0+$/, '') || null),
       amount_total: num(at(values, 'amount_total')),
       amount_recent: num(at(values, 'amount_recent')),
       last_donation_at: asDate(at(values, 'last_donation_at')),
@@ -472,13 +479,29 @@ router.post('/import/batches/:id/apply', async (req, res) => {
       [req.params.id]
     );
 
-    // Resolve every preacher code once rather than per row; a sheet of 8,500
-    // rows carries about 27 distinct codes.
-    const codes = [...new Set(rows.rows.map((r) => r.preacher_code).filter(Boolean))] as string[];
-    const preacherByCode = new Map<string, string>();
-    for (const code of codes) {
-      const id = await preacherIdForCode(code, client);
-      if (id) preacherByCode.set(code, id);
+    // Resolve every distinct preacher once rather than per row; a sheet of
+    // 8,500 rows carries about 27 of them. Keyed on the pair, because a sheet
+    // may carry an id number, a code, or both, and the two together are what
+    // identifies the preacher.
+    const seen = new Map<string, { code: string | null; idNumber: string | null }>();
+    for (const r of rows.rows) {
+      if (!r.preacher_code && !r.preacher_id_number) continue;
+      seen.set(`${r.preacher_id_number ?? ''}|${r.preacher_code ?? ''}`, {
+        code: r.preacher_code ?? null,
+        idNumber: r.preacher_id_number ?? null,
+      });
+    }
+    const preacherByKey = new Map<string, string>();
+    // Id numbers the sheet carried that match no preacher DRM knows, and had
+    // no code beside them to create one from. Reported rather than silently
+    // dropped: a sheet full of these means the preachers were never set up,
+    // and every donation from it would be receipted under the temple's
+    // generic default instead of the person who brought the donor in.
+    const unknownIds = new Set<string>();
+    for (const [key, who] of seen) {
+      const id = await preacherIdFrom(who, client);
+      if (id) preacherByKey.set(key, id);
+      else if (who.idNumber) unknownIds.add(who.idNumber);
     }
 
     let added = 0;
@@ -499,7 +522,8 @@ router.post('/import/batches/:id/apply', async (req, res) => {
         [r.donor_code, r.phone]
       );
       const personId = person.rows[0]?.id ?? null;
-      const preacherId = r.preacher_code ? preacherByCode.get(r.preacher_code) ?? null : null;
+      const preacherId =
+        preacherByKey.get(`${r.preacher_id_number ?? ''}|${r.preacher_code ?? ''}`) ?? null;
 
       const result = await client.query(
         `INSERT INTO leads
@@ -601,7 +625,17 @@ router.post('/import/batches/:id/apply', async (req, res) => {
     );
 
     await client.query('COMMIT');
-    res.json({ added, updated, skipped, list_name: listName, list_id: listRow.rows[0]?.id ?? null });
+    res.json({
+      added,
+      updated,
+      skipped,
+      list_name: listName,
+      list_id: listRow.rows[0]?.id ?? null,
+      // Named, so somebody can register them in Preachers and re-upload rather
+      // than discovering months later that a whole sheet was attributed to
+      // nobody.
+      unknown_preacher_ids: [...unknownIds].slice(0, 50),
+    });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.applyImport error:', err);

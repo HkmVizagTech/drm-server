@@ -19,7 +19,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { currency, number } from "@/lib/format";
-import { Badge, Card, CardHeader, EmptyState, PageHeader, StatTile, buttonPrimary, buttonSecondary } from "@/components/ui";
+import { Badge, Card, CardHeader, EmptyState, Modal, PageHeader, Select, StatTile, buttonPrimary, buttonSecondary, inputClass } from "@/components/ui";
 
 interface Dashboard {
   range: { from: string; to: string; label: string };
@@ -58,7 +58,25 @@ interface Dashboard {
   by_status: { status: string; label: string; tone: string; n: number; value: string }[];
   by_source: { source: string; n: number; converted: number }[];
   callers_today: { id: string; name: string; calls: number; connected: number }[];
-  qr: { shared: number; paid: number; raised: number; awaiting: number };
+  qr: {
+    shared: number;
+    paid: number;
+    raised: number;
+    awaiting: number;
+    /** Every rupee through a QR in this period, attributed or not. */
+    through_qrs: number;
+    unattributed: number;
+  };
+  by_qr: {
+    id: string;
+    qr_id: string;
+    label: string;
+    purpose: string | null;
+    owner_name: string | null;
+    raised: number;
+    payments: number;
+    unattributed: number;
+  }[];
 }
 
 const PRESETS = [
@@ -89,6 +107,7 @@ function mins(seconds: number | null): string {
 
 export default function CallingDashboardPage() {
   const [preset, setPreset] = useState("month");
+  const [outside, setOutside] = useState(false);
   const [data, setData] = useState<Dashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -139,6 +158,9 @@ export default function CallingDashboardPage() {
                 </Link>
               </>
             )}
+            <button onClick={() => setOutside(true)} className={buttonSecondary}>
+              Log a call I made
+            </button>
             <Link href="/calling/lists" className={buttonSecondary}>
               Lists
             </Link>
@@ -354,6 +376,61 @@ export default function CallingDashboardPage() {
           )}
         </Card>
 
+        {/* ------------------------------------------------- money by QR */}
+        {/* These QRs are shared on calls and nowhere else, so every rupee
+            through one was raised on the phone. That makes this the truest
+            picture of what the calling brought in - and unlike the figures
+            above it does not wait on anybody attributing a payment first. */}
+        {!!data?.by_qr.filter((q) => q.payments > 0).length && (
+          <Card className="lg:col-span-2">
+            <CardHeader
+              title="Raised through each QR"
+              subtitle="Money that arrived in this period, by the QR it came through"
+              action={
+                <Link href="/calling/payments" className="text-xs text-[var(--accent)] hover:underline">
+                  Every payment →
+                </Link>
+              }
+            />
+            <ul className="divide-y divide-slate-100">
+              {data.by_qr
+                .filter((q) => q.payments > 0)
+                .map((q) => (
+                  <li key={q.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium text-slate-900">{q.label}</span>
+                      <span className="block text-[11px] text-slate-500">
+                        {[q.purpose, q.owner_name ?? "the temple's"].filter(Boolean).join(" · ")}
+                        {q.unattributed > 0 && (
+                          <span className="text-amber-700">
+                            {" "}
+                            · {number(q.unattributed)} not yet matched to a donor
+                          </span>
+                        )}
+                      </span>
+                    </span>
+                    <span className="whitespace-nowrap text-right">
+                      <span className="block tabular-nums font-medium text-slate-900">{currency(q.raised)}</span>
+                      <span className="block text-[11px] text-slate-500">
+                        {number(q.payments)} payment{q.payments === 1 ? "" : "s"}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+            </ul>
+            <p className="mt-3 border-t border-[var(--line-soft)] pt-3 text-xs text-slate-500">
+              {currency(data.qr.through_qrs)} through QRs in this period
+              {data.qr.unattributed > 0 && (
+                <>
+                  {" — "}
+                  {number(data.qr.unattributed)} payment{data.qr.unattributed === 1 ? " is" : "s are"} still
+                  waiting to be matched to a donor, which is the only part of this the reports above cannot see.
+                </>
+              )}
+            </p>
+          </Card>
+        )}
+
         {/* --------------------------------------------------- QRs and money */}
         {/* Shown to everyone, because "was that QR ever paid" is the one
             question the rest of this screen cannot answer. On a caller's
@@ -425,6 +502,165 @@ export default function CallingDashboardPage() {
         </Card>
         )}
       </div>
+
+      {outside && (
+        <OutsideCallDialog
+          onClose={() => setOutside(false)}
+          onDone={async () => {
+            setOutside(false);
+            await load();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * A call that did not come out of the queue.
+ *
+ * DRM assumed every call starts on the calling screen. Real days are not like
+ * that: somebody rings the temple and gets rung back from a personal phone, a
+ * devotee passes on a number, a donor from last year is called directly. None
+ * of that was recorded anywhere, so the call never happened as far as DRM was
+ * concerned - and if money followed through a QR, there was no share for it to
+ * match against.
+ *
+ * One form records the lot. It finds the person by number or adds them, logs
+ * the call against your name, and hands you the lead so you can send them a QR
+ * straight afterwards.
+ */
+function OutsideCallDialog({ onClose, onDone }: { onClose: () => void; onDone: () => Promise<void> | void }) {
+  const [dispositions, setDispositions] = useState<{ slug: string; label: string; counts_connected: boolean }[]>([]);
+  const [phone, setPhone] = useState("");
+  const [name, setName] = useState("");
+  const [outcome, setOutcome] = useState("");
+  const [note, setNote] = useState("");
+  const [amount, setAmount] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<{ id: string; name: string | null } | null>(null);
+
+  useEffect(() => {
+    apiClient
+      .get<{ dispositions: typeof dispositions }>("/api/crm/config")
+      .then((d) => {
+        setDispositions(d.dispositions);
+        setOutcome((o) => o || d.dispositions[0]?.slug || "");
+      })
+      .catch(() => undefined);
+  }, []);
+
+  // Once it is recorded, the useful next step is almost always the QR.
+  if (done) {
+    return (
+      <Modal title="Recorded" onClose={onClose}>
+        <p className="text-sm text-slate-700">
+          The call is on {done.name || "their"} record, against your name.
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button onClick={onClose} className={buttonSecondary}>
+            Close
+          </button>
+          <Link href={`/leads/${done.id}`} className={buttonPrimary}>
+            Open them — send a QR
+          </Link>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Log a call I made" onClose={onClose}>
+      {error && <p className="mb-3 text-sm text-red-700">{error}</p>}
+      <p className="mb-4 text-sm text-slate-600">
+        For a call you made from your own phone, or to somebody who was not in a list. DRM finds them by number, or
+        adds them, and records the call against you.
+      </p>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="text-xs text-slate-500">
+          Their number <span className="text-red-600">*</span>
+          <input
+            value={phone}
+            onChange={(e) => setPhone(e.target.value.replace(/[^\d+\s-]/g, ""))}
+            placeholder="98480 12345"
+            inputMode="tel"
+            className={`${inputClass} mt-1 w-full tabular-nums`}
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          Their name
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="If you caught it"
+            className={`${inputClass} mt-1 w-full`}
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          What came of it <span className="text-red-600">*</span>
+          <Select
+            value={outcome}
+            onChange={setOutcome}
+            className="mt-1 w-full"
+            options={dispositions.map((d) => ({ value: d.slug, label: d.label }))}
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          If they gave, how much
+          <input
+            value={amount}
+            onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
+            placeholder="Optional"
+            inputMode="numeric"
+            className={`${inputClass} mt-1 w-full tabular-nums`}
+          />
+        </label>
+        <label className="text-xs text-slate-500 sm:col-span-2">
+          What was said
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            rows={2}
+            className={`${inputClass} mt-1 w-full`}
+          />
+        </label>
+      </div>
+
+      <div className="mt-5 flex justify-end gap-2">
+        <button onClick={onClose} className={buttonSecondary}>
+          Cancel
+        </button>
+        <button
+          disabled={busy || phone.replace(/\D/g, "").length < 10 || !outcome}
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            try {
+              const r = await apiClient.post<{ lead: { id: string; name: string | null } }>(
+                "/api/crm/calls/outside",
+                {
+                  phone,
+                  name: name.trim() || undefined,
+                  disposition: outcome,
+                  note: note.trim() || undefined,
+                  donated_amount: amount ? Number(amount) : undefined,
+                }
+              );
+              await onDone();
+              setDone({ id: r.lead.id, name: r.lead.name });
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not record that call");
+            } finally {
+              setBusy(false);
+            }
+          }}
+          className={buttonPrimary}
+        >
+          {busy ? "Saving…" : "Record it"}
+        </button>
+      </div>
+    </Modal>
   );
 }

@@ -26,7 +26,7 @@
 // because a donation credited to the wrong caller is worse than one credited
 // to nobody.
 
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
 import crypto from 'crypto';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
@@ -106,16 +106,38 @@ router.get('/qrs', authenticate, async (req, res) => {
   const all = req.query.all === 'true' && req.user?.role === 'admin';
   try {
     const rows = await pool.query(
+      // WHAT "RAISED" MEANS ON A QR, AND WHY IT CHANGED
+      //
+      // It used to sum qr_shares.matched_amount - money DRM had managed to
+      // attribute to a particular share. But these QRs exist for one purpose:
+      // a caller shares them on a call. So every rupee that arrives through
+      // one was raised by calling, whether or not DRM worked out which call.
+      // Counting only the attributed ones understated the QR by exactly the
+      // payments nobody had got round to attributing yet, which is the worst
+      // possible thing to under-report: the ones needing attention.
+      //
+      // So: raised is every captured payment on the QR. `attributed` is the
+      // part tied to a donor, and the gap between them is the work outstanding.
       `SELECT q.*, u.name AS owner_name,
-              c.shares, c.matched, c.raised
+              c.shares, c.matched,
+              p.raised, p.attributed, p.payments, p.unattributed, p.last_payment_at
          FROM razorpay_qrs q
          LEFT JOIN users u ON q.owner_id = u.id
          LEFT JOIN LATERAL (
            SELECT COUNT(*)::int AS shares,
-                  COUNT(*) FILTER (WHERE s.matched_at IS NOT NULL)::int AS matched,
-                  COALESCE(SUM(s.matched_amount), 0)::numeric AS raised
+                  COUNT(*) FILTER (WHERE s.matched_at IS NOT NULL)::int AS matched
              FROM qr_shares s WHERE s.qr_id = q.id
          ) c ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT COALESCE(SUM(pm.amount), 0)::numeric AS raised,
+                  COALESCE(SUM(pm.amount) FILTER (WHERE pm.share_id IS NOT NULL), 0)::numeric AS attributed,
+                  COUNT(*)::int AS payments,
+                  COUNT(*) FILTER (WHERE pm.share_id IS NULL)::int AS unattributed,
+                  MAX(pm.received_at) AS last_payment_at
+             FROM qr_payments pm
+            WHERE pm.qr_id = q.qr_id
+              AND COALESCE(pm.status, 'captured') IN ('captured', 'authorized')
+         ) p ON TRUE
         WHERE ($1::boolean OR (q.active AND (q.owner_id IS NULL OR q.owner_id = $2::uuid)))
         ORDER BY q.owner_id IS NULL, u.name NULLS FIRST, q.label`,
       [all, req.user?.userId ?? null]
@@ -218,7 +240,58 @@ router.put('/qrs/:id', authenticate, authorize('admin'), async (req, res) => {
  * offered at this moment", which is exactly what a later payment needs to be
  * matched against. A share that never got sent simply never matches anything.
  */
-router.post('/leads/:id/share-qr', authenticate, async (req, res) => {
+/**
+ * POST /qr/share-to - send a QR to a number DRM has never heard of.
+ *
+ * The share-by-lead route above assumes the person is already a lead, because
+ * it was written for the calling screen. A caller who rang somebody from their
+ * own phone, or who is standing in the temple with a number on a slip, has no
+ * lead to share against - and without one the share is not recorded, so the
+ * payment that follows arrives attached to nothing and has to be attributed by
+ * hand or not at all.
+ *
+ * So this makes the lead first and then shares, which means every QR that
+ * leaves DRM is recorded the same way whatever route it took out.
+ */
+router.post('/qr/share-to', authenticate, async (req, res) => {
+  const phone = String(req.body?.phone ?? '').replace(/\D/g, '').slice(-10);
+  if (phone.length !== 10) return res.status(400).json({ error: 'A 10-digit number is needed' });
+  if (!str(req.body?.qr_id, 36)) return res.status(400).json({ error: 'Choose a QR to send' });
+
+  try {
+    const existing = await pool.query(`SELECT id FROM leads WHERE phone = $1`, [phone]);
+    let leadId: string = existing.rows[0]?.id;
+
+    if (!leadId) {
+      const person = await pool.query(
+        `SELECT id FROM people WHERE right(regexp_replace(phone,'\\D','','g'), 10) = $1 LIMIT 1`,
+        [phone]
+      );
+      const made = await pool.query(
+        `INSERT INTO leads (phone, name, person_id, source, source_detail, assigned_to, assigned_at, created_by)
+         VALUES ($1,$2,$3::uuid,'manual','QR sent outside a DRM call',$4::uuid, NOW(), $4::uuid)
+         RETURNING id`,
+        [phone, str(req.body?.name, 255), person.rows[0]?.id ?? null, req.user?.userId ?? null]
+      );
+      leadId = made.rows[0].id;
+      await pool.query(
+        `INSERT INTO lead_activities (lead_id, user_id, kind, note)
+         VALUES ($1::uuid,$2::uuid,'import','Added when a QR was sent to this number')`,
+        [leadId, req.user?.userId ?? null]
+      );
+    }
+
+    // Straight through the ordinary share handler, so the row, the message and
+    // the WhatsApp link are built in exactly one place.
+    req.params.id = leadId;
+    return shareQrToLead(req, res, () => undefined);
+  } catch (err) {
+    console.error('crm.shareQrTo error:', err);
+    res.status(500).json({ error: 'Could not send that QR' });
+  }
+});
+
+const shareQrToLead: RequestHandler = async (req, res) => {
   const qrRowId = str(req.body?.qr_id, 36);
   if (!qrRowId) return res.status(400).json({ error: 'Choose a QR to send' });
 
@@ -294,7 +367,9 @@ router.post('/leads/:id/share-qr', authenticate, async (req, res) => {
     console.error('crm.shareQr error:', err);
     res.status(500).json({ error: 'Could not share that QR' });
   }
-});
+};
+
+router.post('/leads/:id/share-qr', authenticate, shareQrToLead);
 
 /**
  * POST /qrs/:id/image - upload a branded QR image.
@@ -826,6 +901,10 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
   const r = await pool.query(
     `SELECT p.*, s.lead_id, s.person_id, s.phone AS share_phone,
             q.receipt_site, q.purpose, q.label AS qr_label,
+            -- The preacher who brought this donor in, from the lead or from
+            -- the donor record, so DCC records the receipt as enrolled by
+            -- them rather than under the site's generic default.
+            COALESCE(pr_lead.id_number, pr_person.id_number) AS preacher_dcc_id,
             l.name AS lead_name, l.email AS lead_email,
             pe.name AS person_name, pe.email AS person_email, pe.pan,
             pe.address_door, pe.address_house, pe.address_street, pe.address_area,
@@ -836,6 +915,8 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
        JOIN razorpay_qrs q ON s.qr_id = q.id
        LEFT JOIN leads l ON s.lead_id = l.id
        LEFT JOIN people pe ON s.person_id = pe.id
+       LEFT JOIN preachers pr_lead ON l.preacher_id = pr_lead.id
+       LEFT JOIN preachers pr_person ON pe.preacher_id = pr_person.id
       WHERE p.id = $1`,
     [paymentRowId]
   );
@@ -884,6 +965,7 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
         city: p.address_city, state: p.address_state, pincode: p.address_pincode, country: p.address_country,
       },
       enteredByName: `DRM · QR ${p.qr_label}`,
+      dccEnrolledById: p.preacher_dcc_id ? Number(p.preacher_dcc_id) : null,
       note: `Paid by QR during a call. Razorpay payment ${p.payment_id}.`,
     });
 

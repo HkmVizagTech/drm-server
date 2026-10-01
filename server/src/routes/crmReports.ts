@@ -107,7 +107,7 @@ router.get('/dashboard', async (req, res) => {
     // conversion figures below are current rather than a day behind.
     await reconcileConversions();
 
-    const [leads, money, calls, pipeline, followUps, byStatus, bySource, callers, qr] = await Promise.all([
+    const [leads, money, calls, pipeline, followUps, byStatus, bySource, callers, qr, byQr] = await Promise.all([
       pool.query(
         // WHAT COUNTS AS A CONVERSION, AND WHY THIS CHANGED
         //
@@ -237,6 +237,33 @@ router.get('/dashboard', async (req, res) => {
             AND ($3::uuid IS NULL OR s.shared_by = $3::uuid)`,
         [from, to, me]
       ),
+      // MONEY THROUGH EACH QR, which is money raised by calling.
+      //
+      // These QRs are used for nothing but calls, so every payment that
+      // arrives through one was raised on the phone - whether or not anybody
+      // has yet worked out which call. That makes a per-QR total the truest
+      // picture of what the calling actually brought in, and the one figure
+      // that does not wait on somebody doing attribution first.
+      //
+      // Windowed on when the money arrived, like every other money figure
+      // here, and narrowed for a caller to the QRs that are theirs to use.
+      pool.query(
+        `SELECT q.id, q.qr_id, q.label, q.purpose, u.name AS owner_name, q.owner_id,
+                COALESCE(SUM(p.amount), 0)::numeric AS raised,
+                COUNT(p.id)::int AS payments,
+                COUNT(p.id) FILTER (WHERE p.share_id IS NULL)::int AS unattributed
+           FROM razorpay_qrs q
+           LEFT JOIN users u ON q.owner_id = u.id
+           LEFT JOIN qr_payments p
+             ON p.qr_id = q.qr_id
+            AND COALESCE(p.status, 'captured') IN ('captured', 'authorized')
+            AND ${WINDOW('p.received_at', 1, 2)}
+          WHERE ($3::uuid IS NULL OR q.owner_id = $3::uuid OR q.owner_id IS NULL)
+          GROUP BY q.id, q.qr_id, q.label, q.purpose, u.name, q.owner_id
+         HAVING COUNT(p.id) > 0 OR q.active
+          ORDER BY raised DESC, q.label`,
+        [from, to, me]
+      ),
     ]);
 
     const c = calls.rows[0];
@@ -288,7 +315,22 @@ router.get('/dashboard', async (req, res) => {
         paid: qr.rows[0].paid,
         raised: Number(qr.rows[0].raised),
         awaiting: qr.rows[0].awaiting,
+        // Every rupee through a QR in this window, attributed or not. Larger
+        // than `raised` above whenever payments are waiting to be attributed,
+        // and that difference is the point of showing both.
+        through_qrs: byQr.rows.reduce((t, r) => t + Number(r.raised), 0),
+        unattributed: byQr.rows.reduce((t, r) => t + Number(r.unattributed), 0),
       },
+      by_qr: byQr.rows.map((r) => ({
+        id: r.id,
+        qr_id: r.qr_id,
+        label: r.label,
+        purpose: r.purpose,
+        owner_name: r.owner_name,
+        raised: Number(r.raised),
+        payments: r.payments,
+        unattributed: r.unattributed,
+      })),
     });
   } catch (err) {
     console.error('crm.dashboard error:', err);

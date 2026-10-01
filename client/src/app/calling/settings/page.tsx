@@ -25,7 +25,7 @@ import { apiClient } from "@/lib/api";
 import { AlertPicker, Badge, buttonPrimary, buttonSecondary, Card, CardHeader, inputClass, PageHeader, Select, TableShell, Td, Th, Toggle, Modal } from "@/components/ui";
 import { ALERT_OPTIONS, DEFAULT_ALERTS, cleanAlerts } from "@/lib/reminders";
 import { apiClient as api } from "@/lib/api";
-import { currency, number } from "@/lib/format";
+import { currency, number, relativeDate } from "@/lib/format";
 import { toBase64 } from "@/lib/spreadsheet";
 
 interface Status {
@@ -899,7 +899,12 @@ interface QrRow {
   active: boolean;
   shares: number;
   matched: number;
+  /** Every captured payment through this QR — attributed or not. */
   raised: string;
+  attributed: string;
+  payments: number;
+  unattributed: number;
+  last_payment_at: string | null;
 }
 
 function QrSection() {
@@ -962,6 +967,7 @@ function QrSection() {
             <Th align="right">Sent</Th>
             <Th align="right">Paid</Th>
             <Th align="right">Raised</Th>
+            <Th align="right">Last paid</Th>
             <Th align="center">In use</Th>
             <Th align="right">Image</Th>
           </tr>
@@ -969,7 +975,7 @@ function QrSection() {
         <tbody className="divide-y divide-slate-100">
           {!rows.length ? (
             <tr>
-              <td colSpan={9} className="px-4 py-8 text-center text-sm text-slate-400">
+              <td colSpan={10} className="px-4 py-8 text-center text-sm text-slate-400">
                 None yet. A caller sees no QR option until one is added here.
               </td>
             </tr>
@@ -1021,8 +1027,21 @@ function QrSection() {
                 <Td align="right" className="tabular-nums text-slate-700">
                   {q.matched ? number(q.matched) : <span className="text-slate-300">—</span>}
                 </Td>
+                {/* Every rupee through this QR, not only the part DRM has
+                    managed to tie to a donor. These QRs are shared on calls and
+                    nowhere else, so all of it was raised by calling - and
+                    counting only the attributed part understated each QR by
+                    exactly the payments still needing attention. */}
                 <Td align="right" className="tabular-nums font-medium text-slate-900">
                   {Number(q.raised) ? currency(Number(q.raised)) : <span className="text-slate-300">—</span>}
+                  {q.unattributed > 0 && (
+                    <p className="text-[11px] font-normal text-amber-700">
+                      {number(q.unattributed)} not matched
+                    </p>
+                  )}
+                </Td>
+                <Td align="right" className="text-[11px] text-slate-500">
+                  {q.last_payment_at ? relativeDate(q.last_payment_at) : <span className="text-slate-300">—</span>}
                 </Td>
                 <Td align="center">
                   <Toggle on={q.active} onChange={(v) => void save(q.id, { active: v })} label={`${q.label} in use`} />

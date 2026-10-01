@@ -311,6 +311,129 @@ async function main() {
     (r.body.rows ?? []).length
   );
 
+  console.log('\n10. every rupee through a QR counts as raised by calling');
+  await pool.query(`TRUNCATE leads, qr_shares, qr_payments, razorpay_qrs RESTART IDENTITY CASCADE`);
+  const q1 = await pool.query(
+    `INSERT INTO razorpay_qrs (qr_id, label, active) VALUES ('qr_COUNT01','Annadan QR',TRUE) RETURNING id`
+  );
+  await pool.query(
+    `INSERT INTO razorpay_qrs (qr_id, label, owner_id, active)
+     VALUES ('qr_COUNT02','Ana QR',$1::uuid,TRUE)`,
+    [CALLER]
+  );
+  const lead10 = await pool.query(
+    `INSERT INTO leads (phone, name) VALUES ('9600000001','Donor') RETURNING id`
+  );
+  const share10 = await pool.query(
+    `INSERT INTO qr_shares (qr_id, lead_id, shared_by, phone, channel)
+     VALUES ($1::uuid,$2::uuid,$3::uuid,'9600000001','whatsapp') RETURNING id`,
+    [q1.rows[0].id, lead10.rows[0].id, CALLER]
+  );
+  // One attributed, one not — both are money the calling brought in.
+  await pool.query(
+    `INSERT INTO qr_payments (payment_id, qr_id, amount, status, received_at, share_id)
+     VALUES ('pay_C1','qr_COUNT01', 1000, 'captured', NOW(), $1::uuid)`,
+    [share10.rows[0].id]
+  );
+  await pool.query(
+    `INSERT INTO qr_payments (payment_id, qr_id, amount, status, received_at)
+     VALUES ('pay_C2','qr_COUNT01', 2500, 'captured', NOW())`
+  );
+  // A failed one must not be counted at all.
+  await pool.query(
+    `INSERT INTO qr_payments (payment_id, qr_id, amount, status, received_at)
+     VALUES ('pay_C3','qr_COUNT01', 9999, 'failed', NOW())`
+  );
+
+  r = await req('GET', '/api/crm/qrs?all=true', admin);
+  const counted = (r.body.qrs ?? []).find((x: any) => x.qr_id === 'qr_COUNT01');
+  check('the QR shows everything that came through it', Number(counted?.raised) === 3500, counted);
+  check('with the attributed part named separately', Number(counted?.attributed) === 1000, counted);
+  check('and one payment still to match', counted?.unattributed === 1, counted);
+
+  r = await req('GET', '/api/crm/dashboard?preset=today', admin);
+  const qrRow = (r.body.by_qr ?? []).find((x: any) => x.qr_id === 'qr_COUNT01');
+  check('the overview breaks it down by QR', Number(qrRow?.raised) === 3500, r.body.by_qr);
+  check('and totals it', Number(r.body.qr?.through_qrs) === 3500, r.body.qr);
+  check('a failed payment is in neither', !JSON.stringify(r.body.by_qr).includes('9999'), r.body.by_qr);
+
+  console.log('\n11. a call made outside DRM is still recorded');
+  await pool.query(`TRUNCATE leads, lead_activities RESTART IDENTITY CASCADE`);
+  await pool.query(
+    `INSERT INTO crm_dispositions (slug, label, counts_connected, suggests_status, wants_follow_up, sort_order)
+     VALUES ('interested','Interested',TRUE,'interested',TRUE,10) ON CONFLICT (slug) DO NOTHING`
+  );
+  r = await req('POST', '/api/crm/calls/outside', caller, {
+    phone: '+91 96000 00002',
+    name: 'Rang the temple',
+    disposition: 'interested',
+    note: 'Asked about annadan',
+  });
+  check('201', r.status === 201, r.body);
+  check('a lead was created', r.body.created === true, r.body);
+  check('assigned to whoever made the call', r.body.lead?.assigned_to === CALLER, r.body.lead);
+  check('with the call on its record', !!r.body.activity?.id, r.body);
+  const acts11 = await pool.query(
+    `SELECT kind, user_id FROM lead_activities WHERE lead_id = $1`,
+    [r.body.lead.id]
+  );
+  check('logged as a call, by them', acts11.rows.some((a) => a.kind === 'call' && a.user_id === CALLER), acts11.rows);
+
+  // And the same number again does not make a second lead.
+  r = await req('POST', '/api/crm/calls/outside', caller, {
+    phone: '9600000002',
+    disposition: 'interested',
+  });
+  check('a second call does not duplicate them', r.body.created === false, r.body);
+  check(
+    'one lead for that number',
+    (await pool.query(`SELECT COUNT(*)::int c FROM leads WHERE phone = '9600000002'`)).rows[0].c === 1
+  );
+
+  console.log('\n12. a QR can be sent to a number DRM has never heard of');
+  r = await req('POST', '/api/crm/qr/share-to', caller, {
+    phone: '9600000003',
+    name: 'Slip of paper',
+    qr_id: q1.rows[0].id,
+    expected_amount: 1100,
+  });
+  check('201', r.status === 201, r.body);
+  check('a WhatsApp link comes back', typeof r.body.wa_url === 'string', r.body);
+  const madeLead = await pool.query(`SELECT * FROM leads WHERE phone = '9600000003'`);
+  check('the person is now a lead', madeLead.rows.length === 1, madeLead.rows.length);
+  const madeShare = await pool.query(`SELECT * FROM qr_shares WHERE phone = '9600000003'`);
+  check('and the share is recorded, so a payment can find them', madeShare.rows.length === 1, madeShare.rows);
+  check('credited to the caller who sent it', madeShare.rows[0]?.shared_by === CALLER, madeShare.rows[0]);
+
+  console.log('\n13. a sheet keyed on preacher ID numbers');
+  const { preacherIdFrom } = await import('../src/routes/crmPreachers');
+  await pool.query(`TRUNCATE preachers RESTART IDENTITY CASCADE`);
+  await pool.query(`INSERT INTO preachers (code, name, id_number) VALUES ('JTMD','Jagat Tarini','1042')`);
+
+  check(
+    'an id number finds the preacher it belongs to',
+    (await preacherIdFrom({ idNumber: '1042' })) ===
+      (await pool.query(`SELECT id FROM preachers WHERE code='JTMD'`)).rows[0].id
+  );
+  check('a code still works on its own', !!(await preacherIdFrom({ code: 'JTMD' })));
+
+  // An id with a code beside it registers the preacher properly.
+  const madeId = await preacherIdFrom({ code: 'NEWP', idNumber: '2051' });
+  check('an id with a code creates one', !!madeId);
+  check(
+    'carrying the id number',
+    (await pool.query(`SELECT id_number FROM preachers WHERE code='NEWP'`)).rows[0].id_number === '2051'
+  );
+
+  // An id alone that matches nothing must NOT invent a preacher: it means
+  // something in the temple's own system and a made-up row would attribute
+  // donations to somebody who does not exist.
+  check('an unknown id alone invents nobody', (await preacherIdFrom({ idNumber: '9999' })) === null);
+  check(
+    'and no row was created for it',
+    (await pool.query(`SELECT COUNT(*)::int c FROM preachers WHERE id_number='9999'`)).rows[0].c === 0
+  );
+
   console.log(failures ? `\n${failures} FAILURE(S)\n` : '\nall green\n');
   server.close();
   await pool.end();

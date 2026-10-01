@@ -385,6 +385,15 @@ export interface OfflineDonationInput {
   note?: string | null;
   /** Shown on the source site's record so staff there know where it came from. */
   enteredByName?: string | null;
+  /**
+   * The preacher's DCC id number, so the receipt is enrolled under them.
+   *
+   * A plain number, the one the temple's own system knows them by. Both sites
+   * pass it through to DCC as `enrolledBy`; without it DCC falls back to a
+   * generic default (36 on both), which is how a donation brought in by a
+   * named preacher ends up credited to nobody.
+   */
+  dccEnrolledById?: number | null;
 }
 
 export interface OfflineDonationResult {
@@ -461,6 +470,7 @@ function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<st
       ...(billingFlat.state ? { state: billingFlat.state } : {}),
       ...(billingFlat.pincode ? { pincode: billingFlat.pincode } : {}),
       enteredByName: input.enteredByName || undefined,
+      dccEnrolledById: input.dccEnrolledById ?? undefined,
     };
   }
 
@@ -483,6 +493,7 @@ function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<st
     prasadamAddressText: input.wantPrasadam ? input.prasadamAddress || undefined : undefined,
     manualEntryNote: input.note || undefined,
     enteredByName: input.enteredByName || undefined,
+    dccEnrolledById: input.dccEnrolledById ?? undefined,
   };
 }
 
