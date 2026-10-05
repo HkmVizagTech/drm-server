@@ -10,6 +10,7 @@
 //   - "the QR screen showed me the payment, then said not found when I pressed
 //      Send receipt"
 //   - "I sent the receipt and the donor's address vanished off the payment"
+//   - "I unticked 80G and it came back anyway"
 //   - "they rang me, and there was nowhere to write that down"
 //   - "the Nearly gave list is full of people who gave on the donations page
 //      and were never mine to chase"
@@ -241,6 +242,11 @@ async function main() {
   });
   const edited = (await pool.query(`SELECT donor_address FROM qr_payments WHERE id = $1`, [keep])).rows[0];
   check('a real correction still goes through', edited.donor_address === '5 New Street', [edit.status, edited]);
+  await req('POST', `/api/crm/qr/payments/${keep}/receipt`, admin, {
+    donor_name: 'Keep Me', donor_phone: '9811100001', site: 'hkmv', want_prasadam: true, want_certificate: false,
+  });
+  const flags = (await pool.query(`SELECT want_prasadam, want_certificate, donor_pan FROM qr_payments WHERE id = $1`, [keep])).rows[0];
+  check('prasadam and "no 80G this time" are saved on the payment', flags.want_prasadam === true && flags.want_certificate === false, flags);
 
   server.close();
   await pool.end();

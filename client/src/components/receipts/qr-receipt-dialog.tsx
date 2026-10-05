@@ -87,6 +87,8 @@ export interface PaymentDetail {
   donor_email: string | null;
   donor_pan: string | null;
   donor_address: string | null;
+  want_prasadam?: boolean | null;
+  want_certificate?: boolean | null;
   purpose: string | null;
   sevak_name: string | null;
   sevak_phone: string | null;
@@ -196,10 +198,10 @@ export function ReceiptDialog({
           email: d.donor_email ?? d.person_email ?? d.lead_email ?? "",
           seva: d.purpose ?? d.qr_purpose ?? "",
           onNameOf: d.sevak_name ?? "",
-          want80G: !!pan,
+          want80G: d.want_certificate ?? !!pan,
           pan,
           address,
-          wantPrasadam: false,
+          wantPrasadam: !!d.want_prasadam,
           site: (d.site_for_receipt as ReceiptValues["site"]) ?? "",
           // Ticked only where this person's own work is plainly behind the
           // payment; ticking it everywhere would move colleagues' donations
@@ -246,6 +248,8 @@ export function ReceiptDialog({
         sevak_phone: "",
         site: siteFixed ? detail?.site_for_receipt : v.site,
         credit_me: v.myDonor,
+        want_certificate: v.want80G,
+        want_prasadam: v.wantPrasadam,
       });
       if (r.receipt_status === "issued") {
         if (r.credited) onCreditKnown(payment.id, { user_id: currentUserId, name: currentUserName });
@@ -305,7 +309,7 @@ export function ReceiptDialog({
           <DonorFields
             v={v}
             set={set}
-            showPrasadam={false}
+            showPrasadam
             showSite={!siteFixed}
             showMyDonor
             myDonorLocked={detail?.credit_id ? detail.credit_user_name ?? "someone else" : null}

@@ -385,6 +385,13 @@ export interface OfflineDonationInput {
    */
   prasadamParts?: Address | null;
   billingParts?: Address | null;
+  /**
+   * The payment gateway's own id (Razorpay "pay_..."), for a QR payment.
+   * Kept apart from referenceNo, which is the UTR the donor can read off
+   * their phone: the sites show and search the gateway id in its own column,
+   * and the receipt prints whichever of the two it has.
+   */
+  gatewayPaymentId?: string | null;
   note?: string | null;
   /** Shown on the source site's record so staff there know where it came from. */
   enteredByName?: string | null;
@@ -453,10 +460,42 @@ const ANNADAN_MODES: Record<string, string> = {
   bank: 'bank_transfer',
 };
 
-function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<string, unknown> {
-  // Parsed once, used by whichever branch runs.
-  const parts = input.prasadamParts ?? null;
-  const billing = input.billingParts ?? parts;
+/**
+ * A typed one-line address, made into parts the sites can print.
+ *
+ * Staff type "12-3, Beach Road, MVP Colony, Visakhapatnam 530017". Sent as a
+ * single string it lands in `street` and the receipt and DCC get no city and
+ * no PIN code. The PIN is unambiguous (six digits), and the words just before
+ * it are the city in the way everybody writes an Indian address, so those two
+ * are lifted out and the rest is kept as written.
+ */
+function partsFromText(text: string | null | undefined): Address | null {
+  const t = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  const pin = t.match(/\b(\d{6})\b/);
+  const withoutPin = pin ? t.replace(pin[0], '').replace(/[\s,.-]+$/, '').trim() : t;
+  const pieces = withoutPin.split(',').map((x) => x.trim()).filter(Boolean);
+  const city = pieces.length > 1 ? pieces.pop()! : null;
+  return {
+    street: pieces.join(', ') || withoutPin,
+    city,
+    pincode: pin ? pin[1] : null,
+    country: 'India',
+  };
+}
+
+export function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<string, unknown> {
+  // Parsed once, used by whichever branch runs. A typed address with no
+  // parts is split into parts here, so both the prasadam label and the 80G
+  // certificate get a city and PIN.
+  const typed = input.prasadamParts ? null : partsFromText(input.prasadamAddress);
+  const parts = input.prasadamParts ?? typed;
+  const billing = input.billingParts && Object.values(input.billingParts).some(Boolean) ? input.billingParts : parts;
+  // The address goes to the site whenever the receipt needs one - for the
+  // prasadam box OR for the 80G certificate. It used to go only with
+  // prasadam, so an 80G receipt for a donor who wanted no prasadam reached
+  // HKMV (whose only address field is prasadamAddress) and DCC with none.
+  const sendAddress = !!input.wantPrasadam || !!input.wantCertificate;
 
   const prasadamFlat = parts ? toAnnadan(parts) : ({} as Record<string, string>);
   const billingFlat = billing ? toAnnadan(billing) : ({} as Record<string, string>);
@@ -476,6 +515,20 @@ function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<st
       // still prints an address, where every-part-undefined prints "---".
       { street: input.prasadamAddress, country: 'India' }
     : undefined;
+  // The donor's saved address, when nothing was typed on the form.
+  const hkmvBillingObject =
+    billing && Object.values(billing).some(Boolean)
+      ? {
+          doorNo: billing.door ?? undefined,
+          house: billing.house ?? undefined,
+          street: billing.street ?? undefined,
+          area: billing.area ?? undefined,
+          city: billing.city ?? undefined,
+          state: billing.state ?? undefined,
+          pincode: billing.pincode ?? undefined,
+          country: billing.country ?? 'India',
+        }
+      : undefined;
 
   if (site === 'annadan') {
     return {
@@ -490,6 +543,10 @@ function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<st
       panNumber: input.panNumber || '',
       occasion: input.sevaName || '',
       mahaprasadam: !!input.wantPrasadam,
+      // Who the box is for. annadan's Prasadam tab lists these columns, and
+      // they were blank on everything DRM sent.
+      ...(input.wantPrasadam ? { prasadamName: input.donorName, prasadamMobile: input.donorMobile } : {}),
+      ...(input.gatewayPaymentId ? { razorpayPaymentId: input.gatewayPaymentId } : {}),
       // annadan keeps the address flat on the donation and its receipt reads
       // address/city/state/pincode separately, so sending only a blob is what
       // makes that receipt print ", ,  - ".
@@ -526,10 +583,13 @@ function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Record<st
     panNumber: input.panNumber || undefined,
     certificate: !!input.wantCertificate,
     wantPrasadam: !!input.wantPrasadam,
-    // The object shape HKMV's schema and receipt template expect. The original
-    // wording travels alongside so nothing is lost.
-    prasadamAddress: input.wantPrasadam ? hkmvPrasadamObject : undefined,
-    prasadamAddressText: input.wantPrasadam ? input.prasadamAddress || undefined : undefined,
+    // The object shape HKMV's schema and receipt template expect. HKMV has no
+    // separate billing address - the receipt and DCC both read this one - so
+    // it is sent for 80G as well as for prasadam. wantPrasadam alone decides
+    // whether a box is sent; an address without it is just the address.
+    prasadamAddress: sendAddress ? hkmvPrasadamObject ?? hkmvBillingObject : undefined,
+    prasadamAddressText: sendAddress ? input.prasadamAddress || undefined : undefined,
+    ...(input.gatewayPaymentId ? { razorpayPaymentId: input.gatewayPaymentId } : {}),
     // createManual destructures `sevakName` (donation.controller.js:433) and
     // writes it onto the donation, which is what receipt.service.js prints in
     // place of the "---" it has been printing until now.

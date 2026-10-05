@@ -1070,14 +1070,22 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
       // It arrived by UPI through a Razorpay QR. Saying so keeps the site's own
       // books honest about how the money came in.
       paymentMode: 'upi',
-      referenceNo: p.payment_id,
+      // The UTR when Razorpay sent one - it is what the donor sees on their
+      // phone and what the bank statement shows - else the payment id. The
+      // Razorpay id itself goes in its own field, so the site has both.
+      referenceNo:
+        p.raw?.payload?.payment?.entity?.acquirer_data?.rrn ||
+        p.raw?.payload?.payment?.entity?.acquirer_data?.upi_transaction_id ||
+        p.payment_id,
+      gatewayPaymentId: p.payment_id,
       paymentDate: new Date(p.received_at).toISOString(),
       sevaName: p.purpose || p.qr_purpose || undefined,
-      panNumber: p.donor_pan || p.pan || undefined,
-      // Only where there is a PAN to put on it; a certificate without one is
-      // no use to the donor.
-      wantCertificate: !!(p.donor_pan || p.pan),
-      wantPrasadam: false,
+      // 80G only when it was asked for (or, on rows from before the form
+      // asked, when there is a PAN), and the PAN only with it. A certificate
+      // without a PAN is no use to the donor.
+      panNumber: (p.want_certificate ?? !!(p.donor_pan || p.pan)) ? p.donor_pan || p.pan || undefined : undefined,
+      wantCertificate: (p.want_certificate ?? true) && !!(p.donor_pan || p.pan),
+      wantPrasadam: !!p.want_prasadam,
       prasadamAddress: p.donor_address || p.address_text || undefined,
       // "On the name of" - who the donation is offered for. Rendered on both
       // sites' receipts and never once filled by DRM until now, so every
@@ -1707,6 +1715,11 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
          purpose       = COALESCE($7, purpose),
          sevak_name    = COALESCE(NULLIF($8, ''), sevak_name),
          sevak_phone   = COALESCE(NULLIF($9, ''), sevak_phone),
+         want_prasadam = COALESCE($12::boolean, want_prasadam),
+         -- Said outright rather than read off the PAN: the PAN is kept even
+         -- when a field arrives empty (see above), so "no 80G this time" has
+         -- to be its own answer or it could never be given.
+         want_certificate = COALESCE($13::boolean, want_certificate),
          receipt_site = COALESCE($10, receipt_site),
          receipt_by = $11, receipt_status = NULL, receipt_error = NULL
        WHERE id = $1`,
@@ -1725,6 +1738,8 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
         (str(b.sevak_phone, 15) ?? '').replace(/\D/g, '').slice(-10) || null,
         site,
         req.user?.userId ?? null,
+        typeof b.want_prasadam === 'boolean' ? b.want_prasadam : null,
+        typeof b.want_certificate === 'boolean' ? b.want_certificate : null,
       ]
     );
 

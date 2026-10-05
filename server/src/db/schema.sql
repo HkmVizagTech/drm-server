@@ -2062,3 +2062,11 @@ CREATE TABLE IF NOT EXISTS calling_list_members (
   PRIMARY KEY (list_id, lead_id)
 );
 CREATE INDEX IF NOT EXISTS idx_list_members_lead ON calling_list_members(lead_id);
+
+
+-- A temple-QR donor can ask for Maha Prasadam exactly as a website donor
+-- can. Stored with the rest of the receipt details on the payment, so a
+-- retried receipt sends the same request.
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS want_prasadam BOOLEAN NOT NULL DEFAULT FALSE;
+-- NULL = never asked (older rows): fall back to "there is a PAN".
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS want_certificate BOOLEAN;
