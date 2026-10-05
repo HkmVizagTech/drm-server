@@ -58,12 +58,15 @@ export function RunHeader({
   finished,
   paused,
   actions,
+  badge,
 }: {
   label: string;
   counts: RunCounts;
   finished: boolean;
   paused: boolean;
   actions: ReactNode;
+  /** Beside the count - "Incoming call" while logging a call they made. */
+  badge?: ReactNode;
 }) {
   return (
     <div className="mb-4 border-b border-line-soft pb-4">
@@ -80,6 +83,7 @@ export function RunHeader({
                 Paused
               </Badge>
             )}
+            {badge}
           </p>
         </div>
         <div className="flex flex-none items-center gap-1.5">{actions}</div>

@@ -15,9 +15,23 @@
 
 import { useState, type ReactNode } from "react";
 import Link from "next/link";
-import { currency, dueLabel, istYear, relativeDate, shortDate } from "@/lib/format";
+import { clockTime, currency, dueLabel, istYear, relativeDate, shortDate } from "@/lib/format";
 import { Alert, Badge, Card, Icon, IconButton, LinkButton } from "@/components/ui";
-import { formatPhone, telHref, whatsappHref, type CallLead, type RecentActivity } from "@/lib/calling";
+import {
+  callsHref,
+  convertedViaLabel,
+  formatPhone,
+  telHref,
+  whatsappHref,
+  type CallLead,
+  type RecentActivity,
+} from "@/lib/calling";
+
+/** The id of the name heading - focus moves here when a new person comes on screen. */
+export const LEAD_HEADING_ID = "call-lead-name";
+
+/** How the caller reached out, as far as this screen can know. */
+export type DialVia = "call" | "alt" | "whatsapp" | "copy";
 
 type BadgeTone = "neutral" | "good" | "warn" | "info" | "danger" | "brand";
 
@@ -63,6 +77,7 @@ function activityLine(a: RecentActivity): string {
   if (a.kind === "qr_share") return "Sent a QR on WhatsApp";
   if (a.kind === "assignment") return a.to_value ? "Assigned to a caller" : "Unassigned";
   if (a.kind === "import") return a.note && /^Started a donation/.test(a.note) ? "Nearly gave on the website" : "Added from a sheet";
+  if (a.kind === "link_donation") return "Linked a donation from another number";
   return "Note";
 }
 
@@ -71,6 +86,9 @@ export function LeadCard({
   outcomeLabel,
   onEdit,
   isTouch,
+  onDial,
+  onLinkOther,
+  directions,
 }: {
   lead: CallLead;
   /** Turns a disposition slug (last_outcome) into the words the office uses. */
@@ -78,6 +96,12 @@ export function LeadCard({
   onEdit: () => void;
   /** On a desk a tel: link often does nothing, so a copy button sits beside it. */
   isTouch: boolean;
+  /** The caller reached for the phone - so leaving without an outcome can be questioned. */
+  onDial?: (via: DialVia) => void;
+  /** Opens "They gave from another number". */
+  onLinkOther?: () => void;
+  /** activity id -> inbound | outbound | missed, for history that came without it. */
+  directions?: Record<string, string>;
 }) {
   const [copied, setCopied] = useState(false);
   const [allHistory, setAllHistory] = useState(false);
@@ -85,6 +109,7 @@ export function LeadCard({
   async function copy() {
     try {
       await navigator.clipboard.writeText(lead.phone);
+      onDial?.("copy");
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -93,7 +118,8 @@ export function LeadCard({
   }
 
   const given = Number(lead.donation_count ?? 0) > 0;
-  const history = allHistory ? lead.recent_activities : lead.recent_activities.slice(0, 3);
+  const history = allHistory ? lead.recent_activities : lead.recent_activities.slice(0, 4);
+  const dirOf = (a: RecentActivity) => a.direction ?? directions?.[a.id] ?? null;
 
   return (
     <Card padded={false} className="p-4 sm:p-5">
@@ -101,7 +127,13 @@ export function LeadCard({
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="min-w-0 sm:order-1">
           <div className="flex items-start gap-1.5">
-            <h2 className="min-w-0 break-words text-xl font-semibold leading-tight text-ink">
+            {/* Focused (not scrolled to) when a new person comes on screen,
+                so a screen reader announces who is next. */}
+            <h2
+              id={LEAD_HEADING_ID}
+              tabIndex={-1}
+              className="min-w-0 break-words text-xl font-semibold leading-tight text-ink outline-none"
+            >
               {lead.name || "Name not known"}
             </h2>
             <IconButton name="edit" size="sm" label="Edit name and numbers" onClick={onEdit} className="-mt-1 flex-none" />
@@ -143,6 +175,7 @@ export function LeadCard({
               size="lg"
               icon="phone"
               className="h-13! flex-1 text-lg tabular-nums"
+              onClick={() => onDial?.("call")}
             >
               Call {formatPhone(lead.phone)}
             </LinkButton>
@@ -164,6 +197,7 @@ export function LeadCard({
                 variant="secondary"
                 icon="phone"
                 className="flex-1 tabular-nums"
+                onClick={() => onDial?.("alt")}
               >
                 Other: {formatPhone(lead.alt_phone)}
               </LinkButton>
@@ -175,6 +209,7 @@ export function LeadCard({
               variant="secondary"
               icon="message"
               className={lead.alt_phone ? "" : "flex-1"}
+              onClick={() => onDial?.("whatsapp")}
             >
               WhatsApp
             </LinkButton>
@@ -188,6 +223,14 @@ export function LeadCard({
         </Alert>
       )}
 
+      {/* Already given: so nobody chases a donor for money that has arrived.
+          Logging the call is still allowed - they may have rung to say so. */}
+      {lead.converted_at && (
+        <Alert tone="good" title={`Already donated${lead.converted_amount ? ` ${currency(Number(lead.converted_amount))}` : ""} on ${shortDate(lead.converted_at)}`} className="mt-3 mb-0">
+          {convertedViaLabel(lead.converted_via)} — no need to ask again. You can still log this call.
+        </Alert>
+      )}
+
       {/* ---------------------------------------- what changes the opening */}
       {lead.nearly_gave && (
         <div className="mt-3 rounded-card border border-amber-200 bg-warn-wash px-3.5 py-2.5 text-sm text-amber-900">
@@ -198,6 +241,18 @@ export function LeadCard({
           <p className="mt-0.5 pl-6 text-xs opacity-80">
             The donation did not go through. Ask if something went wrong — a link or QR finishes it.
           </p>
+          {onLinkOther && !lead.converted_at && (
+            // Often they finished it on a son's or spouse's phone. Said here,
+            // where the caller reads about the failed payment.
+            <button
+              type="button"
+              onClick={onLinkOther}
+              className="mt-2 ml-6 inline-flex min-h-11 items-center gap-1.5 rounded-control border border-amber-300 bg-surface px-3 py-2 text-left text-sm font-medium text-amber-900 hover:bg-amber-50"
+            >
+              <Icon name="link" size={14} className="flex-none" />
+              <span>They gave from another number / name</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -304,46 +359,80 @@ export function LeadCard({
         </div>
       )}
 
-      {/* --------------------------------------------------- what happened */}
+      {/* --------------------------------------------------- what happened
+          Every call to them, by anyone: who rang, when, what came of it, and
+          which way - "they rang" matters, because a donor who called back is
+          not the same conversation as a fourth unanswered attempt. */}
       {lead.recent_activities.length > 0 && (
         <div className="mt-4 border-t border-line-soft pt-3">
-          <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Recently</p>
-          <ol className="space-y-2">
-            {history.map((a) => (
-              <li key={a.id} className="flex gap-2.5 text-sm">
-                <span
-                  className={`mt-1.5 h-2 w-2 flex-none rounded-full ${
-                    a.kind === "call" ? (a.connected ? "bg-good" : "bg-line-strong") : "bg-info"
-                  }`}
-                  aria-hidden
-                />
-                <span className="min-w-0">
-                  <span className="font-medium text-ink">{activityLine(a)}</span>
-                  <span className="text-xs text-ink-faint">
-                    {" "}
-                    · {relativeDate(a.occurred_at)}
-                    {a.user_name && ` · ${a.user_name}`}
+          <div className="mb-2 flex items-baseline justify-between gap-2">
+            <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Calls and notes</p>
+            <Link
+              href={callsHref(lead.id)}
+              className="inline-flex min-h-8 items-center gap-1 text-xs font-medium text-brand-700 hover:underline"
+            >
+              See all calls
+              <Icon name="arrowRight" size={12} />
+            </Link>
+          </div>
+          <ol className="space-y-2.5">
+            {history.map((a) => {
+              const dir = a.kind === "call" ? dirOf(a) : null;
+              return (
+                <li key={a.id} className="flex gap-2.5 text-sm">
+                  <span
+                    className={`mt-1.5 h-2 w-2 flex-none rounded-full ${
+                      a.kind === "call"
+                        ? dir === "inbound"
+                          ? "bg-info"
+                          : a.connected
+                          ? "bg-good"
+                          : "bg-line-strong"
+                        : a.kind === "link_donation"
+                        ? "bg-good"
+                        : "bg-brand-300"
+                    }`}
+                    aria-hidden
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                      <span className="font-medium text-ink">{activityLine(a)}</span>
+                      {dir === "inbound" && (
+                        <Badge tone="info" icon="phone">
+                          They rang
+                        </Badge>
+                      )}
+                      {dir === "missed" && <Badge tone="warn">Missed call from them</Badge>}
+                    </span>
+                    <span className="block text-xs text-ink-muted">
+                      {relativeDate(a.occurred_at)} {clockTime(a.occurred_at)}
+                      {a.kind === "call"
+                        ? ` · ${dir === "inbound" ? "answered by" : "rung by"} ${a.user_name ?? "someone"}`
+                        : a.user_name
+                        ? ` · ${a.user_name}`
+                        : ""}
+                    </span>
+                    {a.note && <span className="mt-0.5 block whitespace-pre-line break-words text-ink-soft">{a.note}</span>}
                   </span>
-                  {a.note && <span className="block whitespace-pre-line text-ink-soft">{a.note}</span>}
-                </span>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ol>
           <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-            {lead.recent_activities.length > 3 ? (
+            {lead.recent_activities.length > 4 ? (
               <button
                 type="button"
                 onClick={() => setAllHistory((v) => !v)}
-                className="text-xs font-medium text-brand-700 hover:underline"
+                className="min-h-8 text-xs font-medium text-brand-700 hover:underline"
               >
-                {allHistory ? "Show less" : `Show ${lead.recent_activities.length - 3} more`}
+                {allHistory ? "Show less" : `Show ${lead.recent_activities.length - 4} more`}
               </button>
             ) : (
               <span />
             )}
             <Link
               href={`/leads/${lead.id}`}
-              className="inline-flex items-center gap-1 text-xs font-medium text-brand-700 hover:underline"
+              className="inline-flex min-h-8 items-center gap-1 text-xs font-medium text-brand-700 hover:underline"
             >
               Full record
               <Icon name="arrowRight" size={12} />

@@ -24,7 +24,7 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
-import { CALLABLE, DUE_NOW, LIST_MATCH, maxAttempts } from './crmLists';
+import { CALLABLE, DUE_NOW, FROM_DONATIONS_PAGE, LIST_MATCH, maxAttempts } from './crmLists';
 import {
   LEAD_COLUMNS, LEAD_JOINS, buildLeadFilters, leadScopeFor,
   abandonedRowsFor, adoptAbandonedRows,
@@ -154,6 +154,11 @@ async function sourceQuery(
     conds.push(`l.next_follow_up_at IS NOT NULL`);
   } else if (src.kind === 'nearly_gave') {
     conds.push(`'abandoned' = ANY(l.tags)`);
+    // Not somebody who only ever tried on the standalone /donations page -
+    // a lead adopted from there before that page was left out of the list.
+    conds.push(`NOT (
+      EXISTS (SELECT 1 FROM abandoned_attempts a WHERE a.phone = l.phone AND ${FROM_DONATIONS_PAGE('a')})
+      AND NOT EXISTS (SELECT 1 FROM abandoned_attempts a WHERE a.phone = l.phone AND NOT ${FROM_DONATIONS_PAGE('a')}))`);
   }
   return { where: `WHERE ${conds.join(' AND ')}`, values, order };
 }
@@ -440,11 +445,11 @@ async function sessionState(session: SessionRow, me: string) {
       pool.query(
         `SELECT a.amount, a.purpose, a.source_site, a.source_page, a.attempted_at, a.status
            FROM abandoned_attempts a JOIN leads l ON l.phone = a.phone
-          WHERE l.id = $1 ORDER BY a.attempted_at DESC LIMIT 1`,
+          WHERE l.id = $1 AND NOT ${FROM_DONATIONS_PAGE('a')} ORDER BY a.attempted_at DESC LIMIT 1`,
         [item.lead_id]
       ),
       pool.query(
-        `SELECT a.id, a.kind, a.disposition, a.connected, a.note, a.occurred_at, a.created_at,
+        `SELECT a.id, a.kind, a.disposition, a.connected, a.note, a.occurred_at, a.created_at, a.direction,
                 a.from_value, a.to_value, u.name AS user_name, d.label AS disposition_label
            FROM lead_activities a
            LEFT JOIN users u ON u.id = a.user_id
@@ -1059,7 +1064,19 @@ router.get('/search', async (req, res) => {
         [like, phoneLike, q, byPhone]
       ),
     ]);
-    res.json({ leads: leads.rows, people: people.rows });
+    // A whole number that is a colleague's lead: not shown (the caller may
+    // not open it), but said - otherwise "nobody matches" sends them off to
+    // add somebody who is already somebody else's donor.
+    let ownedBy: string | null = null;
+    if (scope && digits.length >= 10 && !leads.rows.length) {
+      const o = await pool.query(
+        `SELECT u.name FROM leads l JOIN users u ON u.id = l.assigned_to
+          WHERE (l.phone = $1 OR l.alt_phone = $1) AND l.assigned_to <> $2::uuid LIMIT 1`,
+        [digits.slice(-10), scope]
+      );
+      ownedBy = o.rows[0]?.name ?? null;
+    }
+    res.json({ leads: leads.rows, people: people.rows, owned_by: ownedBy });
   } catch (err) {
     console.error('crm.search error:', err);
     res.status(500).json({ error: 'Could not search' });

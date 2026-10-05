@@ -64,6 +64,7 @@ import {
 import { ExportButton } from "@/components/export-button";
 import { toast } from "@/components/toast";
 import { SelectAllBanner, SelectionBar } from "@/components/bulk/selection-bar";
+import { LinkDonationDialog } from "@/components/calling/link-donation";
 
 interface Row {
   id: string;
@@ -211,6 +212,9 @@ export default function PendingPaymentsPage() {
   const [assign, setAssign] = useState("me");
   const [bulkBusy, setBulkBusy] = useState<"add" | "call" | null>(null);
   const [callingAll, setCallingAll] = useState(false);
+  /** The person whose donation from another number is being looked for. */
+  const [linking, setLinking] = useState<{ leadId: string; name: string | null } | null>(null);
+  const closeLinking = useCallback(() => setLinking(null), []);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 300);
@@ -442,6 +446,41 @@ export default function PendingPaymentsPage() {
     }
   }
 
+  /**
+   * "They gave - just not from this number." A failed payment is often
+   * finished on a son's UPI or a neighbour's phone, which DRM files under a
+   * stranger, so this person would be chased for money already given. The
+   * dialog finds that donation and links it. Someone not yet a lead is added
+   * first, as with Call, so the donation has somebody to be linked to.
+   */
+  async function gaveAnotherWay(r: Row) {
+    if (r.lead_id) {
+      setLinking({ leadId: r.lead_id, name: r.name });
+      return;
+    }
+    setBusy(r.id);
+    try {
+      const res = await apiClient.post<AdoptResult>("/api/crm/leads/abandoned/adopt-bulk", {
+        ids: [r.id],
+        filters: Object.fromEntries(filterParams()),
+        assign: "me",
+      });
+      const id = res.lead_ids[0];
+      if (!id) {
+        toast.warn(`Could not open ${who(r)}`, summarise(res, { mine: true, owners: [] }));
+        void reload();
+        return;
+      }
+      if (res.created) toast(`${who(r)} is now your lead`);
+      void reload();
+      setLinking({ leadId: id, name: r.name });
+    } catch (e) {
+      toast.error(`Could not open ${who(r)}`, e instanceof Error ? e.message : undefined);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function adopt(r: Row) {
     setBusy(r.id);
     try {
@@ -599,6 +638,18 @@ export default function PendingPaymentsPage() {
           <Link href={`/leads/${r.lead_id}`} className={buttonClass("secondary", size)}>
             {phone ? "Open" : "Open lead"}
           </Link>
+        )}
+        {!r.lead_do_not_call && !others && (
+          <Button
+            variant="secondary"
+            size={size}
+            icon="rupee"
+            onClick={() => void gaveAnotherWay(r)}
+            disabled={busy === r.id}
+            title="They finished it on another phone, number or name - find that donation and link it"
+          >
+            Gave another way
+          </Button>
         )}
         <Button
           variant="ghost"
@@ -1041,6 +1092,16 @@ export default function PendingPaymentsPage() {
         reaches you, because chasing money that has already arrived is worse than not calling at all; that check runs
         on every load, not on the refresh, so it is never out of date.
       </p>
+
+      {linking && (
+        <LinkDonationDialog
+          leadId={linking.leadId}
+          leadName={linking.name}
+          onClose={closeLinking}
+          // A converted lead counts as "gave anyway", so they leave To call.
+          onLinked={() => void reload()}
+        />
+      )}
 
       <SelectionBar
         count={selectedCount}

@@ -76,6 +76,9 @@ export const navGroups: NavGroup[] = [
       // Lists are the unit of work now, so they sit at the top of the group.
       { href: "/calling/lists", label: "Lists", icon: "list" },
       { href: "/leads", label: "Leads", icon: "userPlus" },
+      // "What calls have I made, and to whom" - and where a caller goes when
+      // somebody rings back, to find them and log what happened.
+      { href: "/calling/calls", label: "My calls", icon: "phone" },
       { href: "/follow-ups", label: "Follow-ups", icon: "clock" },
       // Separate from follow-ups on purpose: a follow-up is the caller's own
       // working note, a reminder is a promise the donor made at a moment they

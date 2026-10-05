@@ -633,7 +633,7 @@ interface MatchResult {
  * Takes an optional client so the manual path can do it inside its own
  * transaction; the webhook path has no transaction to join and uses the pool.
  */
-async function markLeadDonated(
+export async function markLeadDonated(
   leadId: string,
   amount: number,
   note: string,

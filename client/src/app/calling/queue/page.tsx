@@ -4,8 +4,18 @@
 //
 // A caller works through sixty of these in an hour, so the screen is built
 // around one number: how many actions it takes to finish a call and get to the
-// next person. Dial, talk, one tap for the outcome - and with "move on by
-// itself" left on, that tap is also the move to the next person.
+// next person. Dial, talk, tap the outcome, confirm - and with "move on by
+// itself" left on, the confirm is also the move to the next person.
+//
+// WHAT IT GUARDS AGAINST
+//   - a mis-tapped outcome: a tap picks, a confirm logs ("Ask before logging",
+//     on unless the caller turns it off), and Undo stays for after.
+//   - a call that happened and was never logged: ring somebody (or open
+//     WhatsApp) and then try to move on, and the screen asks first.
+//   - the donor who rang back: "They rang me" logs the call as incoming, and
+//     "Already donated" says so before anybody asks for money twice.
+//   - the donor who gave from another phone: "They gave from another number"
+//     finds the donation and links it to them.
 //
 // THREE WAYS IN
 //   ?session=<id>  a run: a list the caller chose on the start screen, in an
@@ -55,6 +65,7 @@ import {
 } from "@/lib/calling";
 import {
   Alert,
+  Badge,
   Button,
   Card,
   DropdownMenu,
@@ -70,7 +81,9 @@ import {
 import { toast } from "@/components/toast";
 import { SendLink } from "@/components/send-link";
 import { SendQr } from "@/components/send-qr";
-import { LeadCard } from "@/components/calling/lead-card";
+import { LEAD_HEADING_ID, LeadCard, type DialVia } from "@/components/calling/lead-card";
+import { ConfirmLog } from "@/components/calling/confirm-log";
+import { LinkDonationDialog } from "@/components/calling/link-donation";
 import { OutcomePanel, useCallForm } from "@/components/calling/outcome-panel";
 import { UpNextList } from "@/components/calling/up-next";
 import { RunSummaryCard } from "@/components/calling/run-summary";
@@ -83,8 +96,18 @@ import { NavBar, NavButton, RunHeader } from "@/components/calling/run-chrome";
 const HEARTBEAT_MS = 4 * 60_000;
 const AUTO_ADVANCE_KEY = "drm.calling.autoAdvance";
 const SHORTCUTS_KEY = "drm.calling.shortcuts";
+const ASK_FIRST_KEY = "drm.calling.askFirst";
+/** Who the caller last reached for the phone to ring, so a refresh mid-call still remembers. */
+const DIALLED_KEY = "drm.calling.dialled";
 
 type Move = "next" | "skip" | "prev" | "jump" | "revisit";
+/** A move the "you rang them but didn't log it" question can stand in front of. */
+type Leave = Exclude<Move, "revisit"> | "back";
+
+interface Dialled {
+  leadId: string;
+  via: DialVia;
+}
 
 interface LastCall {
   activityId: string;
@@ -130,6 +153,33 @@ function writePref(key: string, on: boolean) {
   } catch {
     /* the setting just won't survive a refresh */
   }
+}
+
+// The dial is remembered for this tab only: a phone often drops the tab while
+// the dialler is in front, and coming back should still know a call was made.
+function readDialled(): Dialled | null {
+  try {
+    const v = window.sessionStorage.getItem(DIALLED_KEY);
+    if (!v) return null;
+    const d = JSON.parse(v) as Dialled;
+    return d && typeof d.leadId === "string" ? d : null;
+  } catch {
+    return null;
+  }
+}
+function writeDialled(d: Dialled | null) {
+  try {
+    if (d) window.sessionStorage.setItem(DIALLED_KEY, JSON.stringify(d));
+    else window.sessionStorage.removeItem(DIALLED_KEY);
+  } catch {
+    /* only the question on leaving is lost */
+  }
+}
+
+/** Back to the top of the page for a new person - the scroller is <main>, not the window. */
+function scrollToTop(behavior: ScrollBehavior) {
+  document.querySelector("main")?.scrollTo({ top: 0, behavior });
+  window.scrollTo({ top: 0, behavior });
 }
 
 /** Only ever a path inside DRM - `back` arrives in the URL and must not send anyone off-site. */
@@ -194,11 +244,16 @@ function CallScreenRouter() {
   const sessionId = params.get("session");
   const leadId = params.get("lead");
   const back = safeBack(params.get("back"));
+  // "They rang me" from a lead's page: the call being logged is one they made.
+  const inbound = params.get("inbound") === "1";
 
   // Keyed, so moving from one run (or one person) to another starts from a
   // clean screen rather than carrying a half-typed note across.
-  if (sessionId) return <CallScreen key={`s:${sessionId}`} sessionId={sessionId} leadId={null} back={null} />;
-  if (leadId) return <CallScreen key={`l:${leadId}`} sessionId={null} leadId={leadId} back={back} />;
+  if (sessionId) return <CallScreen key={`s:${sessionId}`} sessionId={sessionId} leadId={null} back={null} inbound={false} />;
+  if (leadId)
+    return (
+      <CallScreen key={`l:${leadId}:${inbound ? 1 : 0}`} sessionId={null} leadId={leadId} back={back} inbound={inbound} />
+    );
   return <FindRun />;
 }
 
@@ -220,10 +275,13 @@ function CallScreen({
   sessionId,
   leadId,
   back,
+  inbound: startInbound,
 }: {
   sessionId: string | null;
   leadId: string | null;
   back: string | null;
+  /** Opened as "They rang me". */
+  inbound: boolean;
 }) {
   const router = useRouter();
   const inRun = !!sessionId;
@@ -255,6 +313,24 @@ function CallScreen({
   // cannot make a server render and the browser's first render disagree.
   const [autoAdvance, setAutoAdvance] = useState(() => readPref(AUTO_ADVANCE_KEY, true));
   const [shortcutsOn, setShortcutsOn] = useState(() => readPref(SHORTCUTS_KEY, true));
+  const [askFirst, setAskFirst] = useState(() => readPref(ASK_FIRST_KEY, true));
+
+  // Per-person state is keyed by the lead it belongs to rather than reset on
+  // every move: whatever is not about the person on screen simply does not
+  // apply, and nothing has to remember to clear it.
+  /** The outcome tapped and waiting on the confirm. */
+  const [picked, setPicked] = useState<{ slug: string; leadId: string } | null>(null);
+  /** The caller tapped Call / WhatsApp / Copy for this person. */
+  const [dialled, setDialled] = useState<Dialled | null>(() => readDialled());
+  /** "They rang me" is on for this person. */
+  const [inboundFor, setInboundFor] = useState<string | null>(startInbound ? leadId : null);
+  /** "You rang them but didn't log it" - the move waiting on the answer. */
+  const [guard, setGuard] = useState<{ action: Leave; position?: number } | null>(null);
+  const [linkOpen, setLinkOpen] = useState(false);
+  /** A donation was just linked to this person - offer to move on. */
+  const [linkedFor, setLinkedFor] = useState<string | null>(null);
+  /** activity id -> direction, for a run's history (which comes without it). */
+  const [callDirs, setCallDirs] = useState<{ leadId: string; map: Record<string, string> } | null>(null);
 
   const form = useCallForm();
   // The two parts of the form that never change identity, pulled out so the
@@ -262,6 +338,7 @@ function CallScreen({
   const { reset: resetForm, setDefaultAlerts } = form;
   const noteRef = useRef<HTMLTextAreaElement>(null);
   const sendRef = useRef<HTMLDivElement>(null);
+  const outcomeRef = useRef<HTMLDivElement>(null);
   // The run as of the last answer from the server, for handlers that outlive
   // the render they were made in (an Undo pressed on a toast, say).
   const runRef = useRef<RunState | null>(null);
@@ -277,6 +354,12 @@ function CallScreen({
   );
   const keys = useMemo(() => outcomeKeys(dispositions), [dispositions]);
   const byKey = useMemo(() => new Map([...keys.entries()].map(([slug, n]) => [n, slug])), [keys]);
+
+  const pickedHere =
+    lead && picked?.leadId === lead.id ? (dispositions.find((d) => d.slug === picked.slug) ?? null) : null;
+  const inbound = !!lead && inboundFor === lead.id;
+  const dialledHere = lead && dialled?.leadId === lead.id ? dialled : null;
+  const leadName = lead ? lead.name || formatPhone(lead.phone) : "";
 
   /* ---------------------------------------------------------- loading */
 
@@ -372,10 +455,61 @@ function CallScreen({
     };
   }, [sessionId, paused, finished, ended]);
 
+  // Which calls they made to us. A run's history comes without direction,
+  // so it is filled in from the call log - refreshed when a call is added.
+  const histLead = inRun ? (lead?.id ?? null) : null;
+  const histTop = lead?.recent_activities[0]?.id ?? null;
+  useEffect(() => {
+    if (!histLead) return;
+    let live = true;
+    apiClient
+      .get<{ calls: { id: string; direction: string }[] }>(`/api/crm/calls?lead_id=${histLead}&user_id=all&limit=20`)
+      .then((r) => {
+        if (live) setCallDirs({ leadId: histLead, map: Object.fromEntries(r.calls.map((c) => [c.id, c.direction])) });
+      })
+      .catch(() => undefined); // without it a call simply shows no direction
+    return () => {
+      live = false;
+    };
+  }, [histLead, histTop]);
+
+  // A new person on screen starts at the top of the page, with the screen
+  // reader told who it is. Without this, auto-advance left the caller looking
+  // at the middle of the new person's outcome buttons, with the name, the
+  // number and "nearly gave" all scrolled away above.
+  const personKey = inRun
+    ? run
+      ? `${run.session?.position ?? ""}:${run.lead?.id ?? ""}:${run.finished ? 1 : 0}`
+      : null
+    : (single?.id ?? null);
+  const shownKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (!personKey || shownKey.current === personKey) return;
+    const first = shownKey.current === null;
+    shownKey.current = personKey;
+    scrollToTop(first ? "auto" : "smooth");
+    const raf = requestAnimationFrame(() => document.getElementById(LEAD_HEADING_ID)?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(raf);
+  }, [personKey]);
+
+  const markDialled = useCallback(
+    (via: DialVia) => {
+      if (!lead) return;
+      const d = { leadId: lead.id, via };
+      setDialled(d);
+      writeDialled(d);
+    },
+    [lead]
+  );
+  const clearDialled = useCallback(() => {
+    setDialled(null);
+    writeDialled(null);
+  }, []);
+
   /* ------------------------------------------------------------- moving */
 
   const move = useCallback(
-    async (action: Move, position?: number) => {
+    async (action: Move, position?: number, opts: { quiet?: boolean } = {}) => {
       if (!sessionId || moving) return;
       setMoving(action);
       if (action === "jump" && position !== undefined) setJumping(position);
@@ -384,7 +518,9 @@ function CallScreen({
       try {
         const s = await moveRun(sessionId, action, position);
         applyRun(s);
-        if (action === "skip" || (action === "next" && wasPending)) {
+        if (opts.quiet) {
+          if (!s.finished) toast.info("On to the next person");
+        } else if (action === "skip" || (action === "next" && wasPending)) {
           toast.info(`Skipped ${leaving?.name || formatPhone(leaving?.phone) || "them"}`, "They come back when you revisit the skipped.");
         }
         if (action === "revisit" && !s.message) toast("Back to the people you skipped");
@@ -436,14 +572,21 @@ function CallScreen({
     [sessionId, applyRun, reloadRun, reloadSingle]
   );
 
+  /**
+   * Save the call. `advance` is the confirm's choice between "Log it" and
+   * "Log & next person"; left out (no confirm), "move on by itself" decides.
+   */
   const logCall = useCallback(
-    async (d: Disposition) => {
+    async (d: Disposition, advance?: boolean) => {
       if (!lead || saving) return;
       setSaving(d.slug);
       try {
         const res = await apiClient.post<{ activity: { id: string } }>(`/api/crm/leads/${lead.id}/call`, {
           ...form.payload(),
           disposition: d.slug,
+          // They rang us. Left out for an ordinary call, which the server
+          // records as outbound.
+          direction: inbound ? "inbound" : undefined,
           // Marks the person done in the run. Left out for a single call.
           session_id: sessionId ?? undefined,
         });
@@ -455,8 +598,13 @@ function CallScreen({
           position: runRef.current?.item?.position ?? null,
         };
         setLastCall(lc);
-        toast(`Logged — ${d.label}`, { body: lc.name, action: { label: "Undo", onClick: () => void undo(lc) } });
+        toast(`Logged — ${d.label}`, {
+          body: inbound ? `${lc.name} · they rang you` : lc.name,
+          action: { label: "Undo", onClick: () => void undo(lc) },
+        });
         resetForm();
+        setPicked(null);
+        clearDialled();
 
         // "Will pay by QR" is only half done when the button is pressed: the
         // QR still has to go. Moving on by itself there would bury the very
@@ -471,7 +619,7 @@ function CallScreen({
         // showing what comes next, and must not read as the call being lost.
         try {
           if (sessionId) {
-            if (autoAdvance && !qrNext) applyRun(await moveRun(sessionId, "next"));
+            if ((advance ?? autoAdvance) && !qrNext) applyRun(await moveRun(sessionId, "next"));
             else await reloadRun();
           } else {
             await reloadSingle();
@@ -485,8 +633,102 @@ function CallScreen({
         setSaving(null);
       }
     },
-    [lead, saving, form, resetForm, sessionId, autoAdvance, undo, applyRun, reloadRun, reloadSingle]
+    [lead, saving, form, resetForm, sessionId, autoAdvance, inbound, undo, applyRun, reloadRun, reloadSingle, clearDialled]
   );
+
+  /** A tap or a number key on an outcome: logs at once, or picks it for the confirm. */
+  const pick = useCallback(
+    (d: Disposition) => {
+      if (!lead || saving) return;
+      if (!askFirst) {
+        void logCall(d);
+        return;
+      }
+      setPicked({ slug: d.slug, leadId: lead.id });
+    },
+    [lead, saving, askFirst, logCall]
+  );
+
+  const cancelPick = useCallback(() => {
+    const slug = picked?.slug;
+    setPicked(null);
+    // Back to the button that was picked, for a keyboard user choosing again.
+    requestAnimationFrame(() =>
+      document.querySelector<HTMLElement>(`[data-outcome="${slug}"]`)?.focus({ preventScroll: true })
+    );
+  }, [picked]);
+
+  // The confirm takes focus as it opens, so Enter logs and a screen reader
+  // reads the question. On a desk it is also brought into view: it sits under
+  // the buttons, which may be at the bottom edge.
+  const pickedSlug = pickedHere?.slug ?? null;
+  useEffect(() => {
+    if (!pickedSlug) return;
+    const raf = requestAnimationFrame(() => {
+      const btn = document.querySelector<HTMLButtonElement>("[data-confirm-primary]");
+      btn?.focus({ preventScroll: true });
+      if (isDesktop) btn?.closest('[role="alertdialog"]')?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [pickedSlug, isDesktop]);
+
+  // Enter logs, Escape changes - whether or not the other shortcuts are on,
+  // and on a phone with a keyboard too. Enter inside a note is a new line, and
+  // on a focused button it is that button's own press.
+  useEffect(() => {
+    if (!pickedSlug) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        cancelPick();
+        return;
+      }
+      if (e.key !== "Enter" || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.isComposing) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && ["TEXTAREA", "BUTTON", "A", "SELECT"].includes(el.tagName)) return;
+      e.preventDefault();
+      document.querySelector<HTMLButtonElement>("[data-confirm-primary]")?.click();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pickedSlug, cancelPick]);
+
+  /* --------------------------------------------- leaving without logging */
+
+  const leave = useCallback(() => (back ? router.push(back) : router.back()), [back, router]);
+
+  /** Moves on, unless they were rung (or an outcome picked) and nothing logged - then asks first. */
+  function go(action: Leave, position?: number) {
+    const unlogged = inRun ? run?.item?.state === "pending" : !singleLogged;
+    if (lead && unlogged && (dialledHere || pickedHere)) {
+      if (action === "jump") setSheetOpen(false);
+      setGuard({ action, position });
+      return;
+    }
+    if (action === "back") leave();
+    else void move(action, position);
+  }
+
+  function leaveAnyway() {
+    const g = guard;
+    setGuard(null);
+    setPicked(null);
+    clearDialled();
+    if (!g) return;
+    if (g.action === "back") leave();
+    else void move(g.action, g.position);
+  }
+
+  function toOutcomes() {
+    setGuard(null);
+    outcomeRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    requestAnimationFrame(() =>
+      document
+        .querySelector<HTMLElement>(pickedHere ? "[data-confirm-primary]" : "[data-outcome]")
+        ?.focus({ preventScroll: true })
+    );
+  }
 
   /* ------------------------------------------------ pausing and finishing */
 
@@ -546,6 +788,7 @@ function CallScreen({
     if (!lead) return;
     try {
       await navigator.clipboard.writeText(lead.phone);
+      markDialled("copy");
       toast.info(`Copied ${formatPhone(lead.phone)}`, "Dial it on your handset.");
     } catch {
       /* not in a secure context; the number is on screen */
@@ -582,7 +825,7 @@ function CallScreen({
       // Back works from the end-of-run summary too, where nobody is on screen.
       if (inRun && e.key === "ArrowLeft" && run?.has_prev) {
         e.preventDefault();
-        void move("prev");
+        go("prev");
         return;
       }
       if (!lead) return;
@@ -592,19 +835,19 @@ function CallScreen({
         const d = slug ? dispositions.find((x) => x.slug === slug) : undefined;
         if (d) {
           e.preventDefault();
-          void logCall(d);
+          pick(d);
         }
         return;
       }
       if (inRun && e.key === "ArrowRight" && !finished) {
         e.preventDefault();
-        void move(run?.item?.state === "pending" ? "skip" : "next");
+        go(run?.item?.state === "pending" ? "skip" : "next");
         return;
       }
       const k = e.key.toLowerCase();
       if (k === "s" && inRun && run?.item?.state === "pending") {
         e.preventDefault();
-        void move("skip");
+        go("skip");
       } else if (k === "u" && lastCall) {
         e.preventDefault();
         void undo(lastCall);
@@ -665,7 +908,7 @@ function CallScreen({
         size="lg"
         block
         icon="arrowLeft"
-        onClick={() => (back ? router.push(back) : router.back())}
+        onClick={leave}
       >
         Done — go back
       </Button>
@@ -689,6 +932,13 @@ function CallScreen({
         counts={run.counts}
         finished={finished}
         paused={paused}
+        badge={
+          inbound && !finished ? (
+            <Badge tone="info" icon="phone">
+              Incoming call
+            </Badge>
+          ) : null
+        }
         actions={
           <>
             {!finished && !ended && (
@@ -727,14 +977,16 @@ function CallScreen({
     ) : (
       <div className="mb-4 flex items-center justify-between gap-3 border-b border-line-soft pb-4">
         <div className="flex min-w-0 items-center gap-2">
-          <IconButton
-            name="arrowLeft"
-            variant="secondary"
-            label="Back"
-            onClick={() => (back ? router.push(back) : router.back())}
-          />
+          <IconButton name="arrowLeft" variant="secondary" label="Back" onClick={() => go("back")} />
           <div className="min-w-0">
-            <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-brand-600">Calling one person</p>
+            <p className="flex flex-wrap items-center gap-2 text-2xs font-semibold uppercase tracking-[0.08em] text-brand-600">
+              {inbound ? "They rang you" : "Calling one person"}
+              {inbound && (
+                <Badge tone="info" icon="phone">
+                  Incoming call
+                </Badge>
+              )}
+            </p>
             <h1 className="truncate text-lg font-semibold tracking-tight text-ink sm:text-2xl">
               {single?.name || formatPhone(single?.phone) || "Call"}
             </h1>
@@ -750,6 +1002,26 @@ function CallScreen({
     );
 
   /* ---------------------------------------------------------- body */
+
+  // The confirm, in whichever shape this screen wants: a sheet over the
+  // bottom edge on a phone, a bar under the buttons on a desk.
+  const confirmOn = !!pickedHere && !!lead && !paused && !ended && !(finished && inRun);
+  const confirmEl =
+    confirmOn && pickedHere && lead ? (
+      <ConfirmLog
+        outcome={pickedHere}
+        name={leadName}
+        form={form}
+        inbound={inbound}
+        canAdvance={inRun && autoAdvance && pickedHere.slug !== "will_pay_qr"}
+        advanceLabel={ahead > 0 ? "Log & next person" : "Log & finish"}
+        saving={saving === pickedHere.slug}
+        layout={isDesktop ? "inline" : "sheet"}
+        expectedAmount={lead.expected_amount}
+        onChange={cancelPick}
+        onConfirm={(advance) => void logCall(pickedHere, advance)}
+      />
+    ) : null;
 
   let body: ReactNode;
   if (ended) {
@@ -800,27 +1072,74 @@ function CallScreen({
   } else if (lead) {
     body = (
       <div className="space-y-4">
-        <LeadCard lead={lead} outcomeLabel={outcomeLabel} onEdit={() => setEditing(true)} isTouch={isTouch} />
+        {/* Just linked a donation from another number: they are done with,
+            unless the caller spoke to them and wants the call on record. */}
+        {linkedFor === lead.id && lead.converted_at && (
+          <Alert tone="good" title={`Linked — ${leadName} is marked as donated`} onDismiss={() => setLinkedFor(null)} className="mb-0">
+            <p>If you spoke to them, log how the call went below. Otherwise move on.</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {inRun ? (
+                <Button
+                  iconRight="arrowRight"
+                  loading={moving === "next"}
+                  disabled={!!moving}
+                  onClick={() => {
+                    setLinkedFor(null);
+                    clearDialled();
+                    void move("next", undefined, { quiet: true });
+                  }}
+                >
+                  {ahead > 0 ? "Next person" : "To the summary"}
+                </Button>
+              ) : (
+                <Button icon="arrowLeft" onClick={leave}>
+                  Done — go back
+                </Button>
+              )}
+              <Button variant="secondary" onClick={toOutcomes}>
+                Log the call
+              </Button>
+            </div>
+          </Alert>
+        )}
+
+        <LeadCard
+          lead={lead}
+          outcomeLabel={outcomeLabel}
+          onEdit={() => setEditing(true)}
+          isTouch={isTouch}
+          onDial={markDialled}
+          onLinkOther={() => setLinkOpen(true)}
+          directions={callDirs?.leadId === lead.id ? callDirs.map : undefined}
+        />
 
         {/* The outcome buttons before the send panel: on a phone, after the
             call, the next thing is the outcome, and sixty scrolls an hour past
             a panel used on a few calls is real fatigue. */}
-        <OutcomePanel
-          form={form}
-          dispositions={dispositions}
-          keys={keys}
-          saving={saving}
-          onLog={(d) => void logCall(d)}
-          shortcutsOn={shortcutsOn}
-          onShortcutsChange={(on) => {
-            setShortcutsOn(on);
-            writePref(SHORTCUTS_KEY, on);
-          }}
-          showKeys={!isTouch}
-          noteRef={noteRef}
-          logged={loggedLabel}
-          after={nextPersonButton}
-        />
+        <div ref={outcomeRef} className="scroll-mt-28">
+          <OutcomePanel
+            form={form}
+            dispositions={dispositions}
+            keys={keys}
+            saving={saving}
+            onPick={pick}
+            askFirst={askFirst}
+            selected={pickedHere?.slug ?? null}
+            confirm={isDesktop ? confirmEl : null}
+            inbound={inbound}
+            onInboundChange={(on) => setInboundFor(on ? lead.id : null)}
+            onLinkOther={() => setLinkOpen(true)}
+            shortcutsOn={shortcutsOn}
+            onShortcutsChange={(on) => {
+              setShortcutsOn(on);
+              writePref(SHORTCUTS_KEY, on);
+            }}
+            showKeys={!isTouch}
+            noteRef={noteRef}
+            logged={loggedLabel}
+            after={nextPersonButton}
+          />
+        </div>
 
         {/* Sent DURING the conversation, while the donor is on the line. The
             QR sits with the link because, from the caller's side, "send them
@@ -846,23 +1165,44 @@ function CallScreen({
           </Card>
         </div>
 
-        {inRun && (
-          <label className="flex min-h-11 items-center justify-between gap-3 rounded-card border border-line-soft bg-surface px-4 py-2 text-sm text-ink-soft">
+        {/* This device's own habits. */}
+        <div className="divide-y divide-line-soft rounded-card border border-line-soft bg-surface">
+          <label className="flex min-h-12 items-center justify-between gap-3 px-4 py-2 text-sm text-ink-soft">
             <span>
-              Move on by itself after I log a call
-              <span className="block text-xs text-ink-muted">Except &ldquo;Will pay by QR&rdquo; — the QR comes first.</span>
+              Ask before logging
+              <span className="block text-xs text-ink-muted">
+                A tap picks the outcome; you confirm before it is saved.
+              </span>
             </span>
             <Toggle
-              on={autoAdvance}
-              label="Move on by itself after logging"
+              on={askFirst}
+              label="Ask before logging"
               onChange={(on) => {
-                setAutoAdvance(on);
-                writePref(AUTO_ADVANCE_KEY, on);
-                toast.info(on ? "Will move on after each call" : "Will stay on the person after logging");
+                setAskFirst(on);
+                writePref(ASK_FIRST_KEY, on);
+                if (!on) setPicked(null);
+                toast.info(on ? "Will ask before logging each call" : "One tap will log the call", "Undo stays either way.");
               }}
             />
           </label>
-        )}
+          {inRun && (
+            <label className="flex min-h-12 items-center justify-between gap-3 px-4 py-2 text-sm text-ink-soft">
+              <span>
+                Move on by itself after I log a call
+                <span className="block text-xs text-ink-muted">Except &ldquo;Will pay by QR&rdquo; — the QR comes first.</span>
+              </span>
+              <Toggle
+                on={autoAdvance}
+                label="Move on by itself after logging"
+                onChange={(on) => {
+                  setAutoAdvance(on);
+                  writePref(AUTO_ADVANCE_KEY, on);
+                  toast.info(on ? "Will move on after each call" : "Will stay on the person after logging");
+                }}
+              />
+            </label>
+          )}
+        </div>
       </div>
     );
   } else {
@@ -881,12 +1221,12 @@ function CallScreen({
       icon="arrowLeft"
       disabled={!run?.has_prev || !!moving || !!saving || paused || ended}
       loading={moving === "prev"}
-      onClick={() => void move("prev")}
+      onClick={() => go("prev")}
     >
       Previous
     </NavButton>
   ) : (
-    <NavButton variant="secondary" icon="arrowLeft" onClick={() => (back ? router.push(back) : router.back())}>
+    <NavButton variant="secondary" icon="arrowLeft" onClick={() => go("back")}>
       Back
     </NavButton>
   );
@@ -907,7 +1247,7 @@ function CallScreen({
         iconRight="arrowRight"
         disabled={!!moving || !!saving}
         loading={moving === "skip"}
-        onClick={() => void move("skip")}
+        onClick={() => go("skip")}
       >
         Skip for now
       </NavButton>
@@ -957,7 +1297,7 @@ function CallScreen({
                   position={run?.session?.position ?? 0}
                   loading={!items}
                   jumping={jumping}
-                  onJump={(p) => void move("jump", p)}
+                  onJump={(p) => go("jump", p)}
                 />
               </div>
             </Card>
@@ -965,7 +1305,13 @@ function CallScreen({
         )}
       </div>
 
+      {/* Room to scroll the note and callback chips clear of the confirm
+          sheet, which sits over the bottom of the page. */}
+      {!isDesktop && confirmOn && <div aria-hidden className="h-72" />}
+
       <NavBar left={navLeft} right={navRight} />
+
+      {!isDesktop && confirmEl}
 
       {/* ------------------------------------------------------- dialogs */}
       {sheetOpen && inRun && (
@@ -975,7 +1321,7 @@ function CallScreen({
             position={run?.session?.position ?? 0}
             loading={!items}
             jumping={jumping}
-            onJump={(p) => void move("jump", p)}
+            onJump={(p) => go("jump", p)}
           />
         </Modal>
       )}
@@ -1009,6 +1355,47 @@ function CallScreen({
             />
           </Field>
         </Modal>
+      )}
+
+      {guard && lead && (
+        <Modal
+          title={
+            pickedHere
+              ? `You picked “${pickedHere.label}” but didn't log it`
+              : dialledHere?.via === "whatsapp"
+              ? `You messaged ${leadName} but didn't log what happened`
+              : `You rang ${leadName} but didn't log what happened`
+          }
+          onClose={() => setGuard(null)}
+        >
+          <p className="text-sm text-ink-soft">
+            {pickedHere
+              ? "It is not saved until you confirm it."
+              : "Log how it went — even “No answer” — so they come back round at the right time and nobody rings them twice."}
+          </p>
+          {/* In the body, Log first: the dialog focuses its first control, and
+              Enter should keep the call, not throw it away. */}
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+            <Button size="lg" icon="check" onClick={toOutcomes}>
+              Log an outcome
+            </Button>
+            <Button size="lg" variant="secondary" onClick={leaveAnyway}>
+              {guard.action === "skip" || guard.action === "next" ? "Skip anyway" : "Leave anyway"}
+            </Button>
+          </div>
+        </Modal>
+      )}
+
+      {linkOpen && lead && (
+        <LinkDonationDialog
+          leadId={lead.id}
+          leadName={lead.name}
+          onClose={() => setLinkOpen(false)}
+          onLinked={() => {
+            setLinkedFor(lead.id);
+            (inRun ? reloadRun() : reloadSingle()).catch(() => undefined);
+          }}
+        />
       )}
 
       {editing && lead && (

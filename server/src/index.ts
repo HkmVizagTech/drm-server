@@ -40,6 +40,7 @@ import crmPreachersRoutes from './routes/crmPreachers';
 import crmImportRoutes from './routes/crmImport';
 import crmListsRoutes from './routes/crmLists';
 import crmSessionsRoutes from './routes/crmSessions';
+import crmCallsRoutes from './routes/crmCalls';
 import crmCollectionsRoutes from './routes/crmCollections';
 import crmQrRoutes, { webhookRouter as razorpayWebhook } from './routes/crmQr';
 import profilesRoutes from './routes/profiles';
@@ -211,6 +212,7 @@ app.use('/api/crm', crmPreachersRoutes);
 app.use('/api/crm', crmImportRoutes);
 app.use('/api/crm', crmListsRoutes);
 app.use('/api/crm', crmSessionsRoutes);
+app.use('/api/crm', crmCallsRoutes);
 app.use('/api/crm', crmQrRoutes);
 // Money a caller collected on a UPI number that no system watched arrive.
 app.use('/api/crm', crmCollectionsRoutes);

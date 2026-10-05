@@ -38,7 +38,8 @@ import {
 import { SendLink } from "@/components/send-link";
 import { toast } from "@/components/toast";
 import { ContactEditor } from "@/components/calling/contact-editor";
-import { callHref, formatPhone, telHref } from "@/lib/calling";
+import { LinkDonationDialog } from "@/components/calling/link-donation";
+import { callHref, callsHref, formatPhone, telHref } from "@/lib/calling";
 import { ALERT_OPTIONS, DEFAULT_ALERTS, alertSummary, cleanAlerts } from "@/lib/reminders";
 
 interface Preacher { id: string; code: string; name: string | null }
@@ -136,6 +137,9 @@ export default function LeadDetailPage() {
   // that would quietly move a colleague's donor.
   const canAssign = isAdmin || user?.role === "accountant";
   const [editingContact, setEditingContact] = useState(false);
+  // "They gave from another number": a failed payment finished on a son's
+  // phone lands on a stranger unless somebody links it to this person.
+  const [linkOpen, setLinkOpen] = useState(false);
 
   const [lead, setLead] = useState<Lead | null>(null);
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -257,6 +261,15 @@ export default function LeadDetailPage() {
             <Button variant="secondary" icon="edit" onClick={() => setEditingContact(true)}>
               Name and numbers
             </Button>
+            {/* A donor ringing back: the same call screen, with the call
+                logged as one they made. */}
+            <Button
+              variant="secondary"
+              icon="phone"
+              onClick={() => router.push(callHref(lead.id, `/leads/${lead.id}`, { inbound: true }))}
+            >
+              They rang me
+            </Button>
             {/* Through the call screen, so the outcome is logged here instead
                 of the call happening somewhere DRM never hears about. Back
                 returns to this page. */}
@@ -316,6 +329,15 @@ export default function LeadDetailPage() {
             <CardHeader
               title="History"
               subtitle={`${number(lead.call_attempts)} call${lead.call_attempts === 1 ? "" : "s"} · lead added ${shortDate(lead.created_at)}`}
+              action={
+                <Link
+                  href={callsHref(lead.id)}
+                  className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-medium text-brand-700 hover:underline"
+                >
+                  See all calls
+                  <Icon name="arrowRight" size={13} />
+                </Link>
+              }
             />
             {!activities.length ? (
               <EmptyState title="Nothing yet" message="No calls or notes have been recorded for this person." />
@@ -328,16 +350,25 @@ export default function LeadDetailPage() {
                     <span
                       className={`absolute -left-[1.44rem] top-1.5 h-2.5 w-2.5 rounded-full ring-4 ring-surface ${
                         a.kind === "call"
-                          ? a.connected
+                          ? a.direction === "inbound"
+                            ? "bg-info"
+                            : a.connected
                             ? "bg-good"
                             : "bg-line"
                           : a.kind === "status_change"
                           ? "bg-info"
+                          : a.kind === "link_donation"
+                          ? "bg-good"
                           : "bg-line"
                       }`}
                     />
                     <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                       <span className="text-sm font-medium text-ink">{describe(a)}</span>
+                      {a.kind === "call" && a.direction === "inbound" && (
+                        <Badge tone="info" icon="phone">
+                          They rang
+                        </Badge>
+                      )}
                       <span className="text-xs text-ink-faint">{relativeDate(a.occurred_at)}</span>
                       {a.user_name && <span className="text-xs text-ink-faint">· {a.user_name}</span>}
                       {a.kind === "call" && a.duration_seconds !== null && (
@@ -380,6 +411,14 @@ export default function LeadDetailPage() {
                 <Icon name="phone" size={15} />
                 {formatPhone(lead.phone)}
                 <span className="ml-auto text-xs font-normal opacity-80">Call and log</span>
+              </Link>
+              <Link
+                href={callHref(lead.id, `/leads/${lead.id}`, { inbound: true })}
+                className={buttonClass("secondary", "md", "justify-start")}
+              >
+                <Icon name="phone" size={15} />
+                They rang me
+                <span className="ml-auto text-xs font-normal text-ink-muted">Log their call</span>
               </Link>
               {lead.alt_phone ? (
                 // The other number is a plain dial: it is usually a spouse's
@@ -605,6 +644,8 @@ export default function LeadDetailPage() {
                 <span className="mt-0.5 block text-xs text-emerald-800">
                   {lead.converted_via === "manual"
                     ? "Recorded by a caller — DRM did not see this one arrive."
+                    : lead.converted_via === "linked"
+                    ? "Linked by a caller — they gave from another number or name."
                     : "Matched automatically to a donation on the site."}
                 </span>
               </p>
@@ -668,10 +709,25 @@ export default function LeadDetailPage() {
                   </p>
                 </div>
               ) : (
-                <Button variant="secondary" icon="rupee" onClick={() => setDonatedOpen(true)} className="mb-3">
-                  They donated — record it
-                </Button>
+                <div className="mb-3 flex flex-wrap gap-2">
+                  <Button variant="secondary" icon="rupee" onClick={() => setDonatedOpen(true)}>
+                    They donated — record it
+                  </Button>
+                  <Button variant="secondary" icon="link" onClick={() => setLinkOpen(true)}>
+                    Gave from another number / name
+                  </Button>
+                </div>
               )
+            )}
+            {lead.converted_at && (
+              <button
+                type="button"
+                onClick={() => setLinkOpen(true)}
+                className="mb-3 inline-flex min-h-9 items-center gap-1.5 text-left text-xs font-medium text-brand-700 hover:underline"
+              >
+                <Icon name="link" size={13} className="flex-none" />
+                Link another donation they made from a different number
+              </button>
             )}
             {!donations.length ? (
               <p className="text-sm text-ink-muted">
@@ -716,6 +772,15 @@ export default function LeadDetailPage() {
 
       {editingContact && (
         <ContactEditor lead={lead} onClose={() => setEditingContact(false)} onSaved={load} />
+      )}
+
+      {linkOpen && (
+        <LinkDonationDialog
+          leadId={lead.id}
+          leadName={lead.name}
+          onClose={() => setLinkOpen(false)}
+          onLinked={() => void load()}
+        />
       )}
 
       {removing && (
@@ -1044,7 +1109,7 @@ function RemoveLeadDialog({
 function describe(a: Activity): string {
   if (a.kind === "call") {
     const outcome = a.disposition_label ?? a.disposition ?? "Called";
-    if (a.direction === "inbound") return `They rang in — ${outcome}`;
+    if (a.direction === "inbound") return outcome;
     if (a.direction === "missed") return "Missed call from them";
     return outcome;
   }
@@ -1055,5 +1120,6 @@ function describe(a: Activity): string {
   if (a.kind === "import") return "Added to the list";
   if (a.kind === "whatsapp") return "Opened WhatsApp with a link";
   if (a.kind === "qr_share") return "Sent a QR on WhatsApp";
+  if (a.kind === "link_donation") return "Linked a donation from another number";
   return "Note";
 }

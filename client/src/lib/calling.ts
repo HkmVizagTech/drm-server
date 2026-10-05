@@ -100,8 +100,13 @@ export function runHref(sessionId: string) {
  * outcome is logged exactly as in a run; nothing is lost by calling from a
  * list.
  */
-export function callHref(leadId: string, back?: string) {
-  return `${CALL_SCREEN}?lead=${leadId}${back ? `&back=${encodeURIComponent(back)}` : ""}`;
+export function callHref(leadId: string, back?: string, opts: { inbound?: boolean } = {}) {
+  return `${CALL_SCREEN}?lead=${leadId}${back ? `&back=${encodeURIComponent(back)}` : ""}${opts.inbound ? "&inbound=1" : ""}`;
+}
+
+/** Where a caller sees every call they made to one person. */
+export function callsHref(leadId: string) {
+  return `/calling/calls?lead_id=${leadId}`;
 }
 
 /**
@@ -270,6 +275,12 @@ export interface RecentActivity {
   user_name: string | null;
   from_value: string | null;
   to_value: string | null;
+  /**
+   * inbound | outbound | missed, for a call. GET /leads/:id carries it; a
+   * run's recent_activities does not, so the call screen fills it in from
+   * GET /calls?lead_id=.
+   */
+  direction?: string | null;
 }
 
 /**
@@ -301,6 +312,8 @@ export interface CallLead {
   do_not_call: boolean;
   converted_at: string | null;
   converted_amount: string | null;
+  /** auto | linked | manual - how the donation came to be on record. */
+  converted_via?: string | null;
   preacher_code: string | null;
   preacher_name: string | null;
   external_total_donated: string | null;
@@ -396,4 +409,36 @@ export function outcomeKeys(dispositions: Disposition[]): Map<string, number> {
     keyed.push(d.slug);
   }
   return new Map(keyed.slice(0, 9).map((slug, i) => [slug, i + 1]));
+}
+
+
+/**
+ * Outcomes that close a lead for good - never rung again from a run. Drawn in
+ * danger colours wherever they are confirmed.
+ */
+export function isClosingOutcome(d: Pick<Disposition, "slug" | "suggests_status">): boolean {
+  return (
+    NEVER_KEYED.includes(d.slug) || ["dnc", "invalid"].includes(d.suggests_status ?? "")
+  );
+}
+
+/** The outcome that records money taken on the call itself. */
+export function isDonatedOutcome(d: Pick<Disposition, "slug" | "suggests_status">): boolean {
+  return d.slug === "donated" || d.suggests_status === "converted";
+}
+
+/** "matched on the website" / "linked from another number" / "recorded by a caller". */
+export function convertedViaLabel(via: string | null | undefined): string {
+  switch (via) {
+    case "auto":
+      return "Matched on the website";
+    case "linked":
+      return "Paid from another number";
+    case "manual":
+      return "Recorded by a caller";
+    case "qr":
+      return "Paid by QR";
+    default:
+      return via ? via.replace(/_/g, " ") : "On record";
+  }
 }

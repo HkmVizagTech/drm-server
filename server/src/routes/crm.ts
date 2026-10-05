@@ -41,7 +41,7 @@ import {
 } from '../utils/export';
 // The queue's filter lives with the lists it belongs to, so a change to what
 // counts as callable changes the queue and every list's count together.
-import { CALLABLE, DUE_NOW, LIST_MATCH, NOT_CLAIMED_BY_OTHERS, listPredicate, loadList, maxAttempts } from './crmLists';
+import { CALLABLE, DUE_NOW, FROM_DONATIONS_PAGE, LIST_MATCH, NOT_CLAIMED_BY_OTHERS, listPredicate, loadList, maxAttempts } from './crmLists';
 
 const router = Router();
 router.use(authenticate);
@@ -853,6 +853,7 @@ function buildAbandonedQuery(
   scope.push(q.set_aside === 'true' ? setAsideRule : `NOT ${setAsideRule}`);
 
   scope.push(`a.source_site = ANY($${i++}::text[])`);
+  scope.push(`NOT ${FROM_DONATIONS_PAGE('a')}`);
   values.push(wanted);
 
   // How long ago they tried. Days rather than a date range, because the
@@ -938,6 +939,15 @@ function buildAbandonedQuery(
                SELECT 1 FROM people p JOIN donations d ON d.person_id = p.id
                 WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = l.phone
                   AND d.created_at >= l.attempted_at
+             )
+             -- Or their lead was marked as having given since - which is the
+             -- only way to know about somebody who gave from ANOTHER phone
+             -- under another name ("my son paid from his number"). The
+             -- caller linked that donation to the lead; this keeps them off
+             -- the list the same as a donation from their own number would.
+             OR EXISTS (
+               SELECT 1 FROM leads gl
+                WHERE gl.phone = l.phone AND gl.converted_at >= l.attempted_at
              ) AS gave_anyway,
              ld.id AS lead_id,
              ld.status AS lead_status,
@@ -1552,7 +1562,7 @@ router.get('/leads/:id', async (req, res) => {
       // call inside a run does.
       pool.query(
         `SELECT a.amount, a.purpose, a.source_site, a.source_page, a.attempted_at, a.status
-           FROM abandoned_attempts a WHERE a.phone = $1
+           FROM abandoned_attempts a WHERE a.phone = $1 AND NOT ${FROM_DONATIONS_PAGE('a')}
           ORDER BY a.attempted_at DESC LIMIT 1`,
         [lead.rows[0].phone]
       ),
@@ -3405,6 +3415,12 @@ router.post('/leads/sync-abandoned', authorize('admin', 'accountant'), async (re
           const result = await fetchAbandonedPage(site, { page, limit: 200, since, minMinutes });
           for (const d of result.donations) {
             const phone = normalizePhone(d.mobile);
+            // Not the standalone /donations page's - see FROM_DONATIONS_PAGE.
+            const page = String(d.sourcePage ?? '');
+            if (
+              site === 'hkmv' &&
+              (/^(https?:\/\/[^/]+)?\/?donations(\/|\?|#|$)/i.test(page) || d.purpose === 'Donation')
+            ) continue;
             if (isDialable(phone)) {
               found.push({ ...d, phone });
             }

@@ -118,6 +118,24 @@ export const CALLABLE = `
 export const DUE_NOW = `
   (l.next_follow_up_at IS NULL OR l.next_follow_up_at < date_trunc('day', NOW()) + INTERVAL '1 day')`;
 
+/**
+ * An attempt made on the main site's standalone /donations page.
+ *
+ * That page is its own campaign with its own team and dashboard (see
+ * donationAdmin.controller.js on hkmsite2.0-server, which scopes itself the
+ * same way: sourcePage "donations" or "donations/<anything>", the legacy
+ * "/donations", and the old type "Donation" - which reaches DRM as the
+ * purpose when there is no seva name). Its unfinished payments are not this
+ * calling team's to chase, so Nearly gave leaves them out everywhere: the
+ * list, its totals, the runs, and the "tried to give" box on the call screen.
+ * Matched on the stored rows rather than filtered on the site, so attempts
+ * already synced disappear too, with nothing to redeploy.
+ */
+export const FROM_DONATIONS_PAGE = (a: string) => `(
+  ${a}.source_site = 'hkmv'
+  AND (COALESCE(${a}.source_page, '') ~* '^(https?://[^/]+)?/?donations(/|\\?|#|$)'
+       OR COALESCE(${a}.purpose, '') = 'Donation'))`;
+
 /** Not on another caller's call right now. $n is the caller's own id. */
 export const NOT_CLAIMED_BY_OTHERS = (n: number) => `
   (l.claimed_by IS NULL OR l.claimed_by = $${n}::uuid OR l.claimed_until < NOW())`;

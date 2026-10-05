@@ -3,11 +3,20 @@
 // How the call went: the buttons the whole call screen exists for, and the
 // optional extras that ride along with them in one request.
 //
-// ONE TAP TO FINISH A CALL
+// ONE TAP TO PICK, ONE TO CONFIRM
 // A caller works through sixty of these in an hour, so an outcome is one tap
-// (or one number key at a desk). Everything else - the note, the callback date,
-// the promise, the amount - is optional and is sent WITH the outcome, never as
-// a second step after it, because second steps are the ones that get skipped.
+// (or one number key at a desk) - and, with "Ask before logging" on (the
+// default), one more on the confirm that says exactly what is about to be
+// saved. The pick is drawn as picked, so the caller can see what they hit
+// before it is saved. Everything else - the note, the callback date, the
+// promise, the amount - is optional and is sent WITH the outcome, never as a
+// separate save after it, because separate saves are the ones that get skipped.
+//
+// THEY RANG ME
+// A donor who did not answer at ten often rings back at four. That call is
+// logged here like any other, with "They rang me" switched on, so the record
+// says who rang whom - and "Donated now" with the amount is how money taken on
+// that call is recorded.
 //
 // THE REMINDER BOX
 // "I'll give on Govardhan Puja evening" is said DURING the call. If capturing it
@@ -21,9 +30,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { istDayPlus, istInputToISO, istInstant, istWeekday } from "@/lib/format";
-import { AlertPicker, Button, Card, Field, Icon, Input, SegmentedControl, textareaClass, type ButtonVariant } from "@/components/ui";
+import { AlertPicker, Button, Card, Field, Icon, Input, SegmentedControl, Toggle, textareaClass, type ButtonVariant } from "@/components/ui";
 import { ALERT_OPTIONS, DEFAULT_ALERTS } from "@/lib/reminders";
-import type { Disposition } from "@/lib/calling";
+import { isClosingOutcome, type Disposition } from "@/lib/calling";
 
 // Callback dates as buttons rather than a date picker. "Next week" said on the
 // phone should not become four taps on a calendar.
@@ -170,7 +179,13 @@ export function OutcomePanel({
   dispositions,
   keys,
   saving,
-  onLog,
+  onPick,
+  askFirst,
+  selected,
+  confirm,
+  inbound,
+  onInboundChange,
+  onLinkOther,
   shortcutsOn,
   onShortcutsChange,
   showKeys,
@@ -184,7 +199,19 @@ export function OutcomePanel({
   keys: Map<string, number>;
   /** The slug being saved, so only that button spins. */
   saving: string | null;
-  onLog: (d: Disposition) => void;
+  /** A tap (or key) on an outcome. The call screen decides whether that logs or asks first. */
+  onPick: (d: Disposition) => void;
+  /** "Ask before logging" is on: a tap picks, the confirm logs. */
+  askFirst: boolean;
+  /** The outcome picked and waiting on the confirm. */
+  selected: string | null;
+  /** The confirm bar, drawn right under the buttons (desk layout). */
+  confirm?: ReactNode;
+  /** "They rang me" - the call is logged as incoming. */
+  inbound: boolean;
+  onInboundChange: (on: boolean) => void;
+  /** Opens "They gave from another number". */
+  onLinkOther?: () => void;
   shortcutsOn: boolean;
   onShortcutsChange: (on: boolean) => void;
   /** Desk only: on a phone there is no keyboard to label. */
@@ -207,26 +234,35 @@ export function OutcomePanel({
   }, [armed]);
 
   const tap = (d: Disposition) => {
-    if (NEEDS_CONFIRM(d) && armed !== d.slug) return setArmed(d.slug);
+    // With the confirm on, the confirm is the second tap - it already draws
+    // "never call them" in red - so the old double-tap would be a third.
+    if (!askFirst && NEEDS_CONFIRM(d) && armed !== d.slug) return setArmed(d.slug);
     setArmed(null);
-    onLog(d);
+    onPick(d);
   };
 
   const button = (d: Disposition, variant: ButtonVariant) => {
     const key = keys.get(d.slug);
     const confirming = armed === d.slug;
+    const picked = selected === d.slug;
+    const closing = isClosingOutcome(d);
     return (
       <Button
         key={d.slug}
         size="lg"
-        variant={confirming ? "danger" : variant}
+        variant={confirming || (picked && closing) ? "danger" : picked ? "primary" : variant}
         disabled={saving !== null}
         loading={saving === d.slug}
         onClick={() => tap(d)}
+        aria-pressed={askFirst ? picked : undefined}
+        data-outcome={d.slug}
         // Wrapping allowed: "Asked not to be called" in half a phone's width
         // would otherwise run out of its own button.
-        className="h-auto! min-h-12 whitespace-normal! py-2 text-sm! leading-tight"
+        className={`h-auto! min-h-12 whitespace-normal! py-2 text-sm! leading-tight ${
+          picked ? `ring-4 ring-offset-1 ring-offset-surface ${closing ? "ring-red-300" : "ring-brand-300"}` : ""
+        } ${selected && !picked ? "opacity-70" : ""}`}
       >
+        {picked && <Icon name="check" size={16} className="flex-none" />}
         {confirming ? "Tap again — never call them" : d.label}
         {showKeys && shortcutsOn && key && (
           <kbd className="ml-1 text-2xs font-normal opacity-60">{key}</kbd>
@@ -245,6 +281,8 @@ export function OutcomePanel({
               <>
                 You logged <span className="font-semibold text-ink">{logged}</span>. Tap another to log again.
               </>
+            ) : askFirst ? (
+              "Tap how it went, then confirm. Everything below the buttons is optional."
             ) : (
               "One tap logs the call. Everything below the buttons is optional."
             )}
@@ -268,6 +306,25 @@ export function OutcomePanel({
 
       {after && <div className="mt-3">{after}</div>}
 
+      {/* Who rang whom. Off for an ordinary call; on when the donor rang
+          back - set already when the screen was opened with "They rang me". */}
+      <label
+        className={`mt-3 flex min-h-12 cursor-pointer items-center justify-between gap-3 rounded-card border px-3.5 py-2 text-sm transition-colors ${
+          inbound ? "border-info bg-info-wash text-sky-900" : "border-line-soft bg-sunken text-ink-soft"
+        }`}
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <Icon name="phone" size={15} className={`flex-none ${inbound ? "text-info" : "text-ink-muted"}`} />
+          <span className="min-w-0">
+            <span className="font-medium">They rang me</span>
+            <span className="block text-xs opacity-80">
+              {inbound ? "Logged as an incoming call" : "Switch on if they called you back"}
+            </span>
+          </span>
+        </span>
+        <Toggle on={inbound} onChange={onInboundChange} label="They rang me — log as an incoming call" />
+      </label>
+
       {/* How much, when they gave on this call. Inline, not a dialog: somebody
           is on the line. Blank falls back to what the lead was expected to
           give, and the donation is still recorded. */}
@@ -288,6 +345,17 @@ export function OutcomePanel({
           <span className="pb-2.5 text-2xs text-good">recorded with an outcome that means they donated</span>
         )}
       </div>
+      {onLinkOther && (
+        // A plain button: the label wraps at phone width.
+        <button
+          type="button"
+          onClick={onLinkOther}
+          className="mt-1 inline-flex min-h-11 items-center gap-1.5 text-left text-sm font-medium text-brand-700 underline-offset-2 hover:underline"
+        >
+          <Icon name="link" size={14} className="flex-none" />
+          <span>Already gave — from another number or name? Find it</span>
+        </button>
+      )}
 
       <div className="mt-4">
         <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Got through</p>
@@ -303,6 +371,8 @@ export function OutcomePanel({
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{unanswered.map((d) => button(d, "secondary"))}</div>
         <p className="mt-2 text-xs text-ink-muted">These come back round by themselves — no date needed.</p>
       </div>
+
+      {confirm}
 
       {/* ------------------------------------------------- the optional extras */}
       <div className="mt-5 space-y-3 border-t border-line-soft pt-4">

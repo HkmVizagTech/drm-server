@@ -386,6 +386,8 @@ CREATE TABLE IF NOT EXISTS lead_activities (
   user_id UUID REFERENCES users(id) ON DELETE SET NULL,
 
   -- call | note | status_change | follow_up | assignment | whatsapp | import
+  -- | link_donation. No CHECK: the list above is a convention, not a
+  -- constraint, and a new kind should not need a migration to be storable.
   kind VARCHAR(20) NOT NULL,
   note TEXT,
 
