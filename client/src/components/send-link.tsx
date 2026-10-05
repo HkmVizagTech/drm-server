@@ -234,7 +234,7 @@ export function SendLink({
                     setEditing(true);
                   }}
                   title="Click to edit before sending"
-                  className="w-full whitespace-pre-line rounded-control bg-sunken px-3 py-2 text-left text-xs text-ink-soft transition-colors hover:bg-brand-50"
+                  className="w-full whitespace-pre-line break-words rounded-control bg-sunken px-3 py-2 text-left text-xs text-ink-soft transition-colors [overflow-wrap:anywhere] hover:bg-brand-50"
                 >
                   {preview}
                 </button>

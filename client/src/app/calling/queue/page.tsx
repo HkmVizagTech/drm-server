@@ -1,1138 +1,1029 @@
 "use client";
 
-// The calling screen.
+// The call screen.
 //
-// A caller works through sixty of these in an hour, so this screen is designed
+// A caller works through sixty of these in an hour, so the screen is built
 // around one number: how many actions it takes to finish a call and get to the
-// next person. The answer is one - a single tap or a single keystroke. Every
-// other control is optional and stays out of the way until wanted.
+// next person. Dial, talk, one tap for the outcome - and with "move on by
+// itself" left on, that tap is also the move to the next person.
 //
-// WHY ONE LEAD AT A TIME, NOT A LIST
-// A list makes the caller decide who to ring next, sixty times an hour, and
-// they decide badly: the easy names first, the overdue promises last. The queue
-// already knows the right order (overdue, then today, then never-touched), so
-// this screen shows the next person and the history they need before the line
-// connects.
-//
-// DESKTOP AND PHONE ARE DIFFERENT JOBS
-// On a phone the caller taps the number and the dialler opens. On a desktop a
-// tel: link usually does nothing at all - so the same button copies the number
-// instead, and says so. That is the whole difference: a caller at a desk with
-// a handset needs the number in their clipboard, not a dead link. DRM never
-// places the call itself either way; see the note at the top of
-// server/src/routes/crm.ts.
+// THREE WAYS IN
+//   ?session=<id>  a run: a list the caller chose on the start screen, in an
+//                  order the SERVER keeps. Previous, Skip and Next move a
+//                  position the server holds, so a refresh, a second phone or
+//                  tomorrow morning all land on the same person. Nothing about
+//                  the order lives in this tab any more - the old screen kept
+//                  its own batch and refilled it endlessly, and every refresh
+//                  quietly reshuffled who came next.
+//   ?lead=<id>     one person, from a "Call" button anywhere else in DRM. The
+//                  same card and the same outcome buttons, so a call made from
+//                  the follow-ups board is logged exactly as one made in a run,
+//                  instead of vanishing into a bare tel: link.
+//   (nothing)      sends the caller to the run they were last in, or to the
+//                  start screen to choose one.
 //
 // MOST OF THE PEOPLE READING THIS ARE HOLDING A PHONE
-// Callers work from their own handsets, so every control here is sized for a
-// thumb rather than for a mouse: the dial button and the outcome buttons are
-// the large size, the quick-pick chips are a finger tall, and nothing on the
-// screen needs sideways scrolling at the width of a phone. A row of 12px
-// buttons is fine to click and genuinely hard to tap.
-//
-// THE REMINDER BOX
-// "I'll give on Govardhan Puja evening" is said DURING the call. If capturing
-// it means hanging up, finding the lead again and opening a separate form, it
-// gets captured maybe a third of the time. So it is a box right under the
-// outcome buttons, and it saves with the call in the same request.
+// Callers dial from their own handsets and come back to this tab to log the
+// outcome. So the dial button is the first and biggest thing on the card, the
+// outcome buttons are a thumb tall in two columns, and Previous / Next is a bar
+// pinned to the bottom edge. Nothing scrolls sideways at 390px.
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiClient } from "@/lib/api";
-import { currency, dueLabel, istDayPlus, istInputToISO, istInstant, istWeekday, istYear, number, relativeDate } from "@/lib/format";
+import { cleanAlerts } from "@/lib/reminders";
+import {
+  CALL_SCREEN,
+  endRun,
+  formatPhone,
+  getRun,
+  getRunItems,
+  getRunSummary,
+  heartbeatRun,
+  moveRun,
+  outcomeKeys,
+  pauseRun,
+  resumeRun,
+  runHref,
+  toCallLead,
+  type CallLead,
+  type Disposition,
+  type RunListItem,
+  type RunState,
+  type RunSummary,
+} from "@/lib/calling";
 import {
   Alert,
-  AlertPicker,
-  Badge,
   Button,
   Card,
+  DropdownMenu,
   EmptyState,
   Field,
-  Icon,
+  IconButton,
   Input,
-  LinkButton,
-  PageHeader,
-  SegmentedControl,
+  Modal,
   Skeleton,
-  buttonPrimary,
-  buttonSecondary,
-  textareaClass,
-  type ButtonVariant,
+  Toggle,
+  buttonClass,
 } from "@/components/ui";
-import { ALERT_OPTIONS, DEFAULT_ALERTS, cleanAlerts } from "@/lib/reminders";
+import { toast } from "@/components/toast";
 import { SendLink } from "@/components/send-link";
 import { SendQr } from "@/components/send-qr";
-import { useCallingAlerts } from "@/components/calling-alerts";
+import { LeadCard } from "@/components/calling/lead-card";
+import { OutcomePanel, useCallForm } from "@/components/calling/outcome-panel";
+import { UpNextList } from "@/components/calling/up-next";
+import { RunSummaryCard } from "@/components/calling/run-summary";
+import { ShortcutHelp } from "@/components/calling/shortcut-help";
+import { CallBanners } from "@/components/calling/call-banners";
+import { ContactEditor } from "@/components/calling/contact-editor";
+import { NavBar, NavButton, RunHeader } from "@/components/calling/run-chrome";
 
-interface Lead {
-  id: string;
-  phone: string;
-  name: string | null;
-  email: string | null;
-  city: string | null;
-  person_id: string | null;
-  status: string;
-  status_label: string | null;
-  tags: string[];
-  remarks: string | null;
-  next_follow_up_at: string | null;
-  follow_up_note: string | null;
-  last_contacted_at: string | null;
-  last_outcome: string | null;
-  call_attempts: number;
-  expected_amount: string | null;
-  source: string;
-  source_detail: string | null;
-  assigned_to_name: string | null;
-  total_donated: string | null;
-  donation_count: number | null;
-  last_donation_at: string | null;
-  preacher_code: string | null;
-  preacher_name: string | null;
-  donor_code: string | null;
-  external_total_donated: string | null;
-  external_account_count: number | null;
-  external_last_donation_at: string | null;
-  external_source: string | null;
-}
+/** How often the open screen tells the server the caller is still on this person. */
+const HEARTBEAT_MS = 4 * 60_000;
+const AUTO_ADVANCE_KEY = "drm.calling.autoAdvance";
+const SHORTCUTS_KEY = "drm.calling.shortcuts";
 
-interface Disposition {
-  slug: string;
+type Move = "next" | "skip" | "prev" | "jump" | "revisit";
+
+interface LastCall {
+  activityId: string;
   label: string;
-  counts_connected: boolean;
-  suggests_status: string | null;
-  wants_follow_up: boolean;
+  name: string;
+  leadId: string;
+  /** Where they sit in the run, so Undo can take the caller back to them. */
+  position: number | null;
 }
 
-// Callback dates as buttons rather than a date picker. A caller saying "next
-// week" should not have to open a calendar, work out the date and tap a day -
-// four interactions for something they said in two words.
-const WHEN_PRESETS: { label: string; days: number }[] = [
-  { label: "Tomorrow", days: 1 },
-  { label: "In 3 days", days: 3 },
-  { label: "Next week", days: 7 },
-  { label: "In 2 weeks", days: 14 },
-  { label: "Next month", days: 30 },
-];
+/* ------------------------------------------------------------------ helpers */
 
-function atTenAm(daysFromNow: number): string {
-  // 10am rather than the current time of day: a callback booked at 9pm should
-  // not come due at 9pm. 10am at the temple, counted off the temple's own
-  // calendar, so a caller on a laptop set to another zone books the same hour
-  // on the same day as everybody else.
-  return istInstant(istDayPlus(daysFromNow), "10:00").toISOString();
+/** A media query as live state - a phone turned sideways, a window resized. */
+function useMedia(query: string): boolean {
+  const subscribe = useCallback(
+    (cb: () => void) => {
+      const m = window.matchMedia(query);
+      m.addEventListener("change", cb);
+      return () => m.removeEventListener("change", cb);
+    },
+    [query]
+  );
+  return useSyncExternalStore(
+    subscribe,
+    () => window.matchMedia(query).matches,
+    () => false
+  );
 }
 
-/**
- * A quick-pick chip, on the same classes as the design system's AlertPicker.
- *
- * The chips here and the alert offsets in the reminder box are the same
- * control doing the same job - "one of these, tapped mid-call" - so they are
- * drawn from one description rather than two that drift. The padding is a
- * step larger than AlertPicker's own: these are tapped with a thumb while the
- * caller is holding a phone to their ear, and a 28px target is where mis-taps
- * start.
- */
-function chipClass(on: boolean): string {
-  return `inline-flex min-h-10 items-center gap-1 rounded-control border px-3 py-2 text-xs transition-colors ${
-    on
-      ? "border-brand-600 bg-brand-50 font-medium text-brand-800"
-      : "border-line-strong bg-surface text-ink-muted hover:border-brand-400 hover:bg-sunken"
-  }`;
+// Per-device preferences. Read once, when the screen opens; a private window
+// or blocked storage simply gets the defaults.
+function readPref(key: string, fallback: boolean): boolean {
+  try {
+    const v = window.localStorage.getItem(key);
+    return v === null ? fallback : v === "1";
+  } catch {
+    return fallback;
+  }
+}
+function writePref(key: string, on: boolean) {
+  try {
+    window.localStorage.setItem(key, on ? "1" : "0");
+  } catch {
+    /* the setting just won't survive a refresh */
+  }
 }
 
-/**
- * Colour by what the outcome MEANS, not by which group it sits in.
- *
- * The two groups are the connected/unanswered split the reports depend on, so
- * they have to stay - but "wrong number" and "asked not to be called" are both
- * technically "got through", and painting them the same encouraging green as
- * "will donate" made the row read wrong at a glance. The stage a disposition
- * suggests is exactly the signal needed: one that closes a lead is not good
- * news however the call connected.
- */
-// The stages that close a lead badly. `converted` closes it too, and should
-// stay green - it is the best outcome there is. Anything the temple invents in
-// Settings is unknown here and falls through to neutral, which is the right
-// default for a stage this screen has never heard of.
-const BAD_ENDINGS = ["not_interested", "invalid", "dnc"];
-
-// Not `dangerSoft` for the bad endings: a call that ended with "please don't
-// ring again" is a perfectly good thing to record, and painting the button red
-// would make an honest answer look like a destructive one.
-function variantFor(d: Disposition): ButtonVariant {
-  if (BAD_ENDINGS.includes(d.suggests_status ?? "")) return "secondary";
-  if (d.counts_connected) return "primary";
-  return "secondary";
+/** Only ever a path inside DRM - `back` arrives in the URL and must not send anyone off-site. */
+function safeBack(raw: string | null): string | null {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return null;
+  return raw;
 }
 
-// An IST wall-clock moment formatted for <input type="datetime-local">, which
-// refuses an ISO string with a timezone on it. The hour the quick-pick buttons
-// name - "this evening 6pm" - is the hour at the temple, so the value is built
-// from the IST calendar day rather than from the device's clock.
-function istInput(daysFromNow: number, hour: number): string {
-  return `${istDayPlus(daysFromNow)}T${String(hour).padStart(2, "0")}:00`;
+const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback);
+
+/** "Stepped past Ravi — Rung by Arjun", so nobody wonders where Ravi went. */
+function announcePassed(passed: RunState["passed"]) {
+  if (!passed?.length) return;
+  if (passed.length <= 2) {
+    for (const p of passed) toast.info(`Stepped past ${p.name || "someone"} — ${p.reason}`);
+  } else {
+    toast.info(
+      `Stepped past ${passed.length} people a colleague has`,
+      passed
+        .slice(0, 3)
+        .map((p) => `${p.name || "someone"}: ${p.reason}`)
+        .join(" · ")
+    );
+  }
 }
 
-// useSearchParams needs a Suspense boundary around it, so the screen is split:
-// this wrapper reads the URL, the component below does the work.
-export default function CallingQueuePage() {
+/* --------------------------------------------------------------------- page */
+
+// useSearchParams needs a Suspense boundary in this version of Next, so the
+// screen is split: this wrapper is what prerenders, the rest reads the URL.
+export default function CallScreenPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="max-w-4xl">
-          <Card>
-            <Skeleton className="h-40 w-full" rounded="rounded-card" />
-          </Card>
-        </div>
-      }
-    >
-      <CallingQueue />
+    <Suspense fallback={<CallSkeleton />}>
+      <CallScreenRouter />
     </Suspense>
   );
 }
 
-function CallingQueue() {
-  const router = useRouter();
+function CallSkeleton() {
+  return (
+    <div className="mx-auto max-w-6xl space-y-4">
+      <Skeleton className="h-6 w-48" />
+      <Skeleton className="h-2 w-full" rounded="rounded-pill" />
+      <Card>
+        <Skeleton className="h-13 w-full" />
+        <Skeleton className="mt-3 h-5 w-56" />
+        <Skeleton className="mt-3 h-24 w-full" rounded="rounded-card" />
+      </Card>
+      <Card>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <Skeleton key={i} className="h-12 w-full" />
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function CallScreenRouter() {
   const params = useSearchParams();
-  // Which list this run is against, and which run it is. Both come from the
-  // URL rather than from component state, so a refresh, a back button or a
-  // bookmarked link all land in the same shift instead of silently dropping
-  // the caller back into the global queue.
-  const listId = params.get("list");
   const sessionId = params.get("session");
+  const leadId = params.get("lead");
+  const back = safeBack(params.get("back"));
 
-  const [queue, setQueue] = useState<Lead[]>([]);
+  // Keyed, so moving from one run (or one person) to another starts from a
+  // clean screen rather than carrying a half-typed note across.
+  if (sessionId) return <CallScreen key={`s:${sessionId}`} sessionId={sessionId} leadId={null} back={null} />;
+  if (leadId) return <CallScreen key={`l:${leadId}`} sessionId={null} leadId={leadId} back={back} />;
+  return <FindRun />;
+}
+
+/** No run named: the one they were last in, or the start screen. */
+function FindRun() {
+  const router = useRouter();
+  useEffect(() => {
+    apiClient
+      .get<{ session: { id: string } | null }>("/api/crm/sessions/current")
+      .then((r) => router.replace(r.session ? runHref(r.session.id) : "/calling/start"))
+      .catch(() => router.replace("/calling/start"));
+  }, [router]);
+  return <CallSkeleton />;
+}
+
+/* ------------------------------------------------------------- the screen */
+
+function CallScreen({
+  sessionId,
+  leadId,
+  back,
+}: {
+  sessionId: string | null;
+  leadId: string | null;
+  back: string | null;
+}) {
+  const router = useRouter();
+  const inRun = !!sessionId;
+  const isTouch = useMedia("(hover: none) and (pointer: coarse)");
+  const isDesktop = useMedia("(min-width: 1024px)");
+
+  const [run, setRun] = useState<RunState | null>(null);
+  const [single, setSingle] = useState<CallLead | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [dispositions, setDispositions] = useState<Disposition[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  // Session tally. Not vanity: a caller doing a two-hour run wants to know
-  // where they are in it, and it is the only feedback the screen gives for
-  // work that otherwise disappears the moment it is logged.
-  //
-  // Seeded from the server on load rather than starting at zero, which is what
-  // makes "stop today, continue tomorrow" real: the count that comes back is
-  // the whole run, not what has happened since this tab was opened.
-  const [done, setDone] = useState(0);
-  const [connectedCount, setConnectedCount] = useState(0);
-  // How many of this list are still waiting, counted by the database through
-  // the same filter the queue uses - so it cannot drift from what is about to
-  // be handed over.
-  const [toCall, setToCall] = useState(0);
-  const [listName, setListName] = useState<string | null>(null);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [moving, setMoving] = useState<Move | "pause" | "resume" | "finish" | null>(null);
+  const [jumping, setJumping] = useState<number | null>(null);
+  const [lastCall, setLastCall] = useState<LastCall | null>(null);
+  // One-person mode has no run item to remember the outcome on.
+  const [singleLogged, setSingleLogged] = useState<string | null>(null);
 
-  // Per-call inputs, cleared between leads.
-  const [note, setNote] = useState("");
-  const [followUp, setFollowUp] = useState<string | null>(null);
-  const [customDate, setCustomDate] = useState("");
-  const [duration, setDuration] = useState("");
-  const [showMore, setShowMore] = useState(false);
+  const [items, setItems] = useState<RunListItem[] | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [summary, setSummary] = useState<RunSummary | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [pauseOpen, setPauseOpen] = useState(false);
+  const [pauseNote, setPauseNote] = useState("");
 
-  // The reminder the donor asked for, if they named a moment.
-  const [remOpen, setRemOpen] = useState(false);
-  const [remOccasion, setRemOccasion] = useState("");
-  const [remWhen, setRemWhen] = useState("");
-  const [remAmount, setRemAmount] = useState("");
-  // When to be warned. Defaults to the temple's own setting once config loads;
-  // until then, the wider default, so a caller who opens the reminder box in
-  // the first second after a refresh does not silently get something narrower.
-  const [remAlerts, setRemAlerts] = useState<number[]>(DEFAULT_ALERTS);
-  // What they gave, when the outcome is that they gave. Without this the
-  // conversion was recorded with no figure at all, and every report showed a
-  // donation taken on the call as a conversion worth nothing.
-  const [donatedAmount, setDonatedAmount] = useState("");
+  // Read in the initialiser. Nothing these drive is drawn until the run has
+  // loaded - the first render is the skeleton everywhere - so a stored choice
+  // cannot make a server render and the browser's first render disagree.
+  const [autoAdvance, setAutoAdvance] = useState(() => readPref(AUTO_ADVANCE_KEY, true));
+  const [shortcutsOn, setShortcutsOn] = useState(() => readPref(SHORTCUTS_KEY, true));
 
-  // What was just logged, so a misclick is one keystroke away from being fixed
-  // rather than a trip to the lead page.
-  const [lastCall, setLastCall] = useState<{ lead: Lead; activityId: string; label: string } | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [shortcutsOn, setShortcutsOn] = useState(true);
-
+  const form = useCallForm();
+  // The two parts of the form that never change identity, pulled out so the
+  // callbacks below do not have to be rebuilt on every keystroke in the note.
+  const { reset: resetForm, setDefaultAlerts } = form;
   const noteRef = useRef<HTMLTextAreaElement>(null);
-  const lead = queue[0] ?? null;
+  const sendRef = useRef<HTMLDivElement>(null);
+  // The run as of the last answer from the server, for handlers that outlive
+  // the render they were made in (an Undo pressed on a toast, say).
+  const runRef = useRef<RunState | null>(null);
 
-  // Reminders and conversions, from the one shared poll. On this screen they
-  // cannot live in a bell in the corner: a caller mid-run is looking at the
-  // outcome buttons, not the header, and a reminder they scroll past is a
-  // promise broken.
-  const { alerts, conversions, dueCount, dismissAlert, dismissConversions } = useCallingAlerts();
+  const lead: CallLead | null = inRun ? (run?.lead ?? null) : single;
+  const paused = !!run?.session?.paused_at;
+  const finished = !!run?.finished;
+  const ended = !!run?.session?.ended_at;
 
-  // Phone or desk? A tel: link opens the dialler on a touch device and usually
-  // does nothing on a desktop, so the primary button changes accordingly
-  // instead of both being offered and one of them quietly failing.
-  const [isTouch, setIsTouch] = useState(false);
-  useEffect(() => {
-    setIsTouch(typeof window !== "undefined" && window.matchMedia("(hover: none) and (pointer: coarse)").matches);
-  }, []);
+  const outcomeLabel = useCallback(
+    (slug: string) => dispositions.find((d) => d.slug === slug)?.label ?? slug.replace(/_/g, " "),
+    [dispositions]
+  );
+  const keys = useMemo(() => outcomeKeys(dispositions), [dispositions]);
+  const byKey = useMemo(() => new Map([...keys.entries()].map(([slug, n]) => [n, slug])), [keys]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const qs = new URLSearchParams({ limit: "25" });
-      if (listId) qs.set("list_id", listId);
+  /* ---------------------------------------------------------- loading */
 
-      const [q, cfg, sess] = await Promise.all([
-        apiClient.get<{ leads: Lead[]; to_call: number; list: { id: string; name: string } | null }>(
-          `/api/crm/queue?${qs}`
-        ),
-        apiClient.get<{ dispositions: Disposition[]; settings?: Record<string, unknown> }>("/api/crm/config"),
-        // The run's own tally, so reopening the page mid-shift shows the real
-        // total rather than restarting the count at zero.
-        apiClient
-          .get<{ session: { id: string; calls_logged: number; connected: number } | null }>(
-            "/api/crm/sessions/current"
-          )
-          .catch(() => ({ session: null })),
-      ]);
+  /** Every answer about the run comes through here. */
+  const applyRun = useCallback(
+    (s: RunState) => {
+      const before = runRef.current?.item?.position ?? null;
+      runRef.current = s;
+      setRun(s);
+      // A new person on screen is a new conversation: the last donor's note
+      // and amount must not ride along to this one.
+      if ((s.item?.position ?? null) !== before) resetForm();
+      if (!s.finished) setSummary(null);
+      if (s.message) toast.info(s.message);
+      announcePassed(s.passed);
+    },
+    [resetForm]
+  );
 
-      setQueue(q.leads);
-      setToCall(q.to_call);
-      setListName(q.list?.name ?? null);
-      setDispositions(cfg.dispositions);
-      // The temple's default alert times, so a promise taken mid-call warns
-      // whoever set it up expects - not a default baked into this screen.
-      const fromSettings = cfg.settings?.reminder_lead_times;
-      if (Array.isArray(fromSettings) && fromSettings.length) {
-        setRemAlerts(cleanAlerts(fromSettings.map(Number)));
-      }
-      if (sess.session && sess.session.id === sessionId) {
-        setDone(sess.session.calls_logged);
-        setConnectedCount(sess.session.connected);
-      }
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the queue");
-    } finally {
-      setLoading(false);
-    }
-  }, [listId, sessionId]);
+  const reloadRun = useCallback(async () => {
+    if (!sessionId) return;
+    applyRun(await getRun(sessionId));
+  }, [sessionId, applyRun]);
+
+  const reloadSingle = useCallback(async () => {
+    if (!leadId) return;
+    const d = await apiClient.get<Parameters<typeof toCallLead>[0]>(`/api/crm/leads/${leadId}`);
+    setSingle(toCallLead(d));
+  }, [leadId]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    // The fetch is started here and its answer applied in the callback, so
+    // nothing sets state synchronously inside the effect itself.
+    const first = sessionId
+      ? getRun(sessionId).then(applyRun)
+      : leadId
+      ? apiClient.get<Parameters<typeof toCallLead>[0]>(`/api/crm/leads/${leadId}`).then((d) => setSingle(toCallLead(d)))
+      : Promise.resolve();
+    first.catch((e) => setLoadError(errText(e, inRun ? "Could not open that run" : "Could not open that person")));
+    // applyRun is stable for the life of this screen; re-running on it would
+    // re-fetch for nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, leadId]);
 
-  const reset = () => {
-    setNote("");
-    setFollowUp(null);
-    setCustomDate("");
-    setDuration("");
-    setShowMore(false);
-    setRemOpen(false);
-    setRemOccasion("");
-    setRemWhen("");
-    setRemAmount("");
-    setDonatedAmount("");
-    setCopied(false);
-  };
+  useEffect(() => {
+    apiClient
+      .get<{ dispositions: Disposition[]; settings?: Record<string, unknown> }>("/api/crm/config")
+      .then((cfg) => {
+        setDispositions(cfg.dispositions);
+        // The temple's own alert times, so a promise taken mid-call warns the
+        // way whoever set DRM up expects.
+        const fromSettings = cfg.settings?.reminder_lead_times;
+        if (Array.isArray(fromSettings) && fromSettings.length) setDefaultAlerts(cleanAlerts(fromSettings.map(Number)));
+      })
+      .catch((e) => toast.error("Could not load the outcomes", errText(e, "Refresh to try again")));
+  }, [setDefaultAlerts]);
+
+  // The Up next list: refreshed when the place in the run or its tally moves,
+  // and only while it can be seen - on a phone it is behind a button.
+  const listVisible = inRun && (isDesktop || sheetOpen);
+  const runPos = run?.session?.position;
+  const runDone = run?.counts.done;
+  const runSkipped = run?.counts.skipped;
+  useEffect(() => {
+    if (!sessionId || !listVisible) return;
+    getRunItems(sessionId)
+      .then((r) => setItems(r.items))
+      .catch(() => undefined); // the panel is a convenience; the run still works without it
+  }, [sessionId, listVisible, runPos, runDone, runSkipped]);
+
+  // The end-of-run tally, fetched once the run says it is through.
+  useEffect(() => {
+    if (!sessionId || !finished || ended) return;
+    getRunSummary(sessionId)
+      .then((r) => setSummary(r.summary))
+      .catch(() => undefined);
+  }, [sessionId, finished, ended, runDone]);
+
+  // Heartbeat: while the screen is open and looked at, the person on it stays
+  // held so a colleague's run steps past them. Also sent the moment the tab
+  // comes back into view - which, on a phone, is the caller returning from
+  // the dialler, possibly after a long call.
+  useEffect(() => {
+    if (!sessionId || paused || finished || ended) return;
+    const beat = () => {
+      if (document.visibilityState === "visible") void heartbeatRun(sessionId).catch(() => undefined);
+    };
+    const timer = window.setInterval(beat, HEARTBEAT_MS);
+    document.addEventListener("visibilitychange", beat);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", beat);
+    };
+  }, [sessionId, paused, finished, ended]);
+
+  /* ------------------------------------------------------------- moving */
+
+  const move = useCallback(
+    async (action: Move, position?: number) => {
+      if (!sessionId || moving) return;
+      setMoving(action);
+      if (action === "jump" && position !== undefined) setJumping(position);
+      const leaving = runRef.current?.lead;
+      const wasPending = runRef.current?.item?.state === "pending";
+      try {
+        const s = await moveRun(sessionId, action, position);
+        applyRun(s);
+        if (action === "skip" || (action === "next" && wasPending)) {
+          toast.info(`Skipped ${leaving?.name || formatPhone(leaving?.phone) || "them"}`, "They come back when you revisit the skipped.");
+        }
+        if (action === "revisit" && !s.message) toast("Back to the people you skipped");
+        if (action === "jump") setSheetOpen(false);
+      } catch (e) {
+        toast.error(action === "jump" ? "Can't go to them right now" : "Could not move on", errText(e, ""));
+      } finally {
+        setMoving(null);
+        setJumping(null);
+      }
+    },
+    [sessionId, moving, applyRun]
+  );
+
+  /* ------------------------------------------------------------ logging */
+
+  /**
+   * Undo a logged call, and go back to the person it was for.
+   *
+   * Not cosmetic: outcome buttons sit close together and are hit at speed, so
+   * a mis-tap happens several times a shift. In a run the server puts the
+   * person back to "to call", and the screen returns to them - one step back
+   * when they were the last person (the usual case: the slip is noticed at
+   * once), a jump otherwise.
+   */
+  const undo = useCallback(
+    async (lc: LastCall) => {
+      try {
+        await apiClient.delete(`/api/crm/activities/${lc.activityId}`);
+        setLastCall((cur) => (cur?.activityId === lc.activityId ? null : cur));
+        setSingleLogged(null);
+        toast(`Undone — ${lc.label} for ${lc.name} is gone`);
+        if (sessionId) {
+          const cur = runRef.current;
+          if (lc.position !== null && cur?.item?.position !== lc.position) {
+            let s = await moveRun(sessionId, "prev");
+            if (s.item?.position !== lc.position) s = await moveRun(sessionId, "jump", lc.position);
+            applyRun(s);
+          } else {
+            await reloadRun();
+          }
+        } else {
+          await reloadSingle();
+        }
+      } catch (e) {
+        toast.error("Could not undo that", errText(e, ""));
+      }
+    },
+    [sessionId, applyRun, reloadRun, reloadSingle]
+  );
 
   const logCall = useCallback(
     async (d: Disposition) => {
       if (!lead || saving) return;
-      setSaving(true);
-      setError(null);
+      setSaving(d.slug);
       try {
         const res = await apiClient.post<{ activity: { id: string } }>(`/api/crm/leads/${lead.id}/call`, {
-          session_id: sessionId ?? undefined,
+          ...form.payload(),
           disposition: d.slug,
-          note: note.trim() || undefined,
-          duration_seconds: duration ? Number(duration) * 60 : undefined,
-          // The picker gives a bare `YYYY-MM-DD`, which `new Date()` reads as
-          // UTC midnight - so the callback was landing at 05:30 on the chosen
-          // morning. 10am IST, the same hour the quick-pick buttons book,
-          // because a callback is a time to ring somebody.
-          next_follow_up_at: followUp ?? (customDate ? istInstant(customDate, "10:00").toISOString() : undefined),
-          reminder: remWhen
-            ? {
-                occasion: remOccasion.trim() || undefined,
-                due_at: istInputToISO(remWhen),
-                expected_amount: remAmount ? Number(remAmount) : undefined,
-                lead_times: remAlerts,
-                note: note.trim() || undefined,
-              }
-            : undefined,
-          donated_amount: donatedAmount ? Number(donatedAmount) : undefined,
+          // Marks the person done in the run. Left out for a single call.
+          session_id: sessionId ?? undefined,
         });
+        const lc: LastCall = {
+          activityId: res.activity.id,
+          label: d.label,
+          name: lead.name || formatPhone(lead.phone),
+          leadId: lead.id,
+          position: runRef.current?.item?.position ?? null,
+        };
+        setLastCall(lc);
+        toast(`Logged — ${d.label}`, { body: lc.name, action: { label: "Undo", onClick: () => void undo(lc) } });
+        resetForm();
 
-        setDone((n) => n + 1);
-        setToCall((n) => Math.max(0, n - 1));
-        if (d.counts_connected) setConnectedCount((n) => n + 1);
-        setLastCall({ lead, activityId: res.activity.id, label: d.label });
-
-        // Drop this lead and move on. The rest of the queue is already loaded,
-        // so the next person appears with no wait - the whole reason for
-        // fetching 25 at a time rather than one.
-        setQueue((q) => q.slice(1));
-        reset();
+        // "Will pay by QR" is only half done when the button is pressed: the
+        // QR still has to go. Moving on by itself there would bury the very
+        // thing the caller has to do next.
+        const qrNext = d.slug === "will_pay_qr";
+        if (!sessionId) setSingleLogged(d.label);
+        if (qrNext) {
+          toast.info("Now send them the QR", "It is just below. Then move on.");
+          sendRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        // The call is saved by now. A failure past this point is about
+        // showing what comes next, and must not read as the call being lost.
+        try {
+          if (sessionId) {
+            if (autoAdvance && !qrNext) applyRun(await moveRun(sessionId, "next"));
+            else await reloadRun();
+          } else {
+            await reloadSingle();
+          }
+        } catch (e) {
+          toast.warn("Logged, but the screen could not catch up", errText(e, "Tap Next person to carry on."));
+        }
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Could not log that call");
+        toast.error("Could not log that call", errText(e, ""));
       } finally {
-        setSaving(false);
+        setSaving(null);
       }
     },
-    [lead, saving, sessionId, note, duration, followUp, customDate, remWhen, remOccasion, remAmount, remAlerts, donatedAmount]
+    [lead, saving, form, resetForm, sessionId, autoAdvance, undo, applyRun, reloadRun, reloadSingle]
   );
 
-  // Refill when the loaded batch runs low, so the caller never hits a spinner
-  // mid-run.
-  useEffect(() => {
-    if (!loading && queue.length > 0 && queue.length <= 2) void load();
-  }, [queue.length, loading, load]);
+  /* ------------------------------------------------ pausing and finishing */
 
-  /**
-   * Undo the last logged call.
-   *
-   * Not cosmetic: the outcome buttons sit close together and are hit at speed,
-   * so a misclick happens several times a shift. Without this the caller has to
-   * remember the name, find the lead, correct the stage and delete the activity
-   * - four steps for a slip - so in practice they leave it wrong, and the
-   * reports quietly fill with calls that did not go the way they say.
-   */
-  const undoLast = useCallback(async () => {
-    if (!lastCall) return;
+  async function pause() {
+    if (!sessionId) return;
+    setMoving("pause");
     try {
-      await apiClient.delete(`/api/crm/activities/${lastCall.activityId}`);
-      setQueue((q) => [lastCall.lead, ...q]);
-      setDone((n) => Math.max(0, n - 1));
-      // Put it back on the remaining count too — an undone call is a call that
-      // still has to be made, and leaving the number down by one would have the
-      // list quietly shrink every time somebody corrected a mis-tap.
-      setToCall((n) => n + 1);
-      setLastCall(null);
+      const r = await pauseRun(sessionId, pauseNote.trim() || undefined);
+      // Patched rather than re-read: reading the run re-claims the person on
+      // screen, which pausing has just released for colleagues.
+      const cur = runRef.current;
+      if (cur?.session) {
+        const s = { ...cur, session: { ...cur.session, paused_at: r.session.paused_at ?? new Date().toISOString() } };
+        runRef.current = s;
+        setRun(s);
+      }
+      setPauseOpen(false);
+      setPauseNote("");
+      toast.success("Paused — your place is kept", "Colleagues can ring the person on screen meanwhile.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not undo that");
+      toast.error("Could not pause", errText(e, ""));
+    } finally {
+      setMoving(null);
     }
-  }, [lastCall]);
-
-  // STOPPING AND PAUSING ARE DIFFERENT THINGS
-  //
-  // Ending a run is what makes tomorrow's screen offer a fresh start rather
-  // than the list somebody was halfway through. So a caller going to lunch
-  // must not end anything - the run stays open, marked as stepped-away, and
-  // "where you left off" still finds it.
-  //
-  // Both leave the screen, because in both cases the caller is going. The
-  // difference is only in what they come back to.
-  async function leave(how: "pause" | "end", note?: string) {
-    if (!sessionId) return router.push("/calling/start");
-    try {
-      await apiClient.post(`/api/crm/sessions/${sessionId}/${how}`, note ? { note } : {});
-    } catch {
-      // Already settled elsewhere, most likely in another tab. Either way the
-      // caller asked to leave, so leaving is the right thing to do.
-    }
-    router.push("/calling/start");
   }
 
+  async function resume() {
+    if (!sessionId) return;
+    setMoving("resume");
+    try {
+      applyRun(await resumeRun(sessionId));
+      toast("Back on — carrying on where you were");
+    } catch (e) {
+      toast.error("Could not resume", errText(e, ""));
+    } finally {
+      setMoving(null);
+    }
+  }
+
+  async function finish() {
+    if (!sessionId) return;
+    setMoving("finish");
+    try {
+      const r = await endRun(sessionId);
+      toast.success(
+        "Run finished",
+        `${r.summary.calls} call${r.summary.calls === 1 ? "" : "s"} logged · ${r.summary.connected} got through`
+      );
+      router.push("/calling/start");
+    } catch (e) {
+      toast.error("Could not finish the run", errText(e, ""));
+      setMoving(null);
+    }
+  }
 
   async function copyNumber() {
     if (!lead) return;
     try {
       await navigator.clipboard.writeText(lead.phone);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      toast.info(`Copied ${formatPhone(lead.phone)}`, "Dial it on your handset.");
     } catch {
-      // Clipboard is blocked outside a secure context; selecting the number by
-      // hand still works, and the caller can see it.
+      /* not in a secure context; the number is on screen */
     }
   }
 
-  const connected = useMemo(() => dispositions.filter((d) => d.counts_connected), [dispositions]);
-  const unanswered = useMemo(() => dispositions.filter((d) => !d.counts_connected), [dispositions]);
-  // Numbered in the order shown, so the label on a button matches the key.
-  const numbered = useMemo(() => [...connected, ...unanswered], [connected, unanswered]);
+  /* ----------------------------------------------------------- keyboard */
 
   /**
-   * Keyboard shortcuts.
-   *
-   * The difference between a good hour and a tiring one. A caller with the
-   * phone in one hand has one hand for the computer, and reaching for a mouse
-   * sixty times an hour is most of the fatigue in this job. Number keys pick an
-   * outcome, N jumps to the note, C copies the number, S skips, U undoes.
-   *
-   * Suppressed whenever focus is in a text field, or the first letter of a
-   * donor's name would trigger an outcome mid-sentence.
+   * Keyboard shortcuts, for a caller at a desk with one hand on the handset.
+   * Number keys log an outcome (see outcomeKeys for which, and why "do not
+   * call" has none), arrows move, S skips, U undoes, N jumps to the note.
+   * Suppressed while typing, or the first letter of a donor's name would log
+   * an outcome mid-sentence; and while a dialog is open.
    */
   useEffect(() => {
-    if (!shortcutsOn) return;
+    if (!shortcutsOn || isTouch) return;
     const onKey = (e: KeyboardEvent) => {
       const el = document.activeElement as HTMLElement | null;
-      const typing = el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+      const typing =
+        el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable);
       if (typing) {
         if (e.key === "Escape") el?.blur();
         return;
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      if (e.key === "?") {
+        e.preventDefault();
+        setHelpOpen((v) => !v);
+        return;
+      }
+      if (paused || ended) return;
+      // Back works from the end-of-run summary too, where nobody is on screen.
+      if (inRun && e.key === "ArrowLeft" && run?.has_prev) {
+        e.preventDefault();
+        void move("prev");
+        return;
+      }
+      if (!lead) return;
 
-      if (e.key >= "1" && e.key <= "9") {
-        const d = numbered[Number(e.key) - 1];
-        if (d) { e.preventDefault(); void logCall(d); }
+      if (/^[1-9]$/.test(e.key)) {
+        const slug = byKey.get(Number(e.key));
+        const d = slug ? dispositions.find((x) => x.slug === slug) : undefined;
+        if (d) {
+          e.preventDefault();
+          void logCall(d);
+        }
+        return;
+      }
+      if (inRun && e.key === "ArrowRight" && !finished) {
+        e.preventDefault();
+        void move(run?.item?.state === "pending" ? "skip" : "next");
         return;
       }
       const k = e.key.toLowerCase();
-      if (k === "n") { e.preventDefault(); noteRef.current?.focus(); }
-      else if (k === "c") { e.preventDefault(); void copyNumber(); }
-      else if (k === "s") { e.preventDefault(); setQueue((q) => q.slice(1)); reset(); }
-      else if (k === "u") { e.preventDefault(); void undoLast(); }
-      else if (k === "r") { e.preventDefault(); setRemOpen(true); }
-      else if (k === "w") {
-        // The send button is a real button in the DOM, so clicking it keeps
-        // one code path rather than duplicating the send logic for the
-        // keyboard - and it cannot drift out of step with the mouse.
+      if (k === "s" && inRun && run?.item?.state === "pending") {
         e.preventDefault();
-        (document.querySelector('[data-send-whatsapp]') as HTMLButtonElement | null)?.click();
+        void move("skip");
+      } else if (k === "u" && lastCall) {
+        e.preventDefault();
+        void undo(lastCall);
+      } else if (k === "n") {
+        e.preventDefault();
+        noteRef.current?.focus();
+      } else if (k === "c") {
+        e.preventDefault();
+        void copyNumber();
+      } else if (k === "r") {
+        e.preventDefault();
+        form.setRemOpen(true);
+      } else if (k === "w") {
+        // The real button, so the keyboard and the mouse share one code path.
+        e.preventDefault();
+        (document.querySelector("[data-send-whatsapp]") as HTMLButtonElement | null)?.click();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [shortcutsOn, numbered, logCall, undoLast]);
+  });
 
-  const history = useMemo(() => {
-    if (!lead) return null;
-    const count = lead.donation_count ?? 0;
-    if (!lead.person_id || !count) return null;
-    return { count, total: Number(lead.total_donated ?? 0), last: lead.last_donation_at };
-  }, [lead]);
+  /* ------------------------------------------------------------- render */
 
-  return (
-    <div className="max-w-4xl">
-      <PageHeader
-        eyebrow="Calling"
-        title={listName ?? "Calling"}
-        subtitle={
-          done > 0
-            ? `${done} logged · ${connectedCount} got through · ${number(toCall)} still to call`
-            : `${number(toCall)} to call`
-        }
-        actions={
-          <div className="flex flex-wrap gap-2">
-            {/* Finishing is a real action, not just closing the tab: it ends
-                the run so tomorrow's screen offers a fresh start rather than
-                a stale "where you left off" from three weeks ago. */}
-            {sessionId && (
-              <>
-                <Button
-                  variant="secondary"
-                  onClick={() => void leave("pause")}
-                  title="Keep your place. This list will be waiting when you come back, today or tomorrow."
-                >
-                  Pause
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() => void leave("end")}
-                  title="Done with this list for today. Tomorrow you start fresh."
-                >
-                  Stop for today
-                </Button>
-              </>
-            )}
-            <Link href="/calling/start" className={buttonSecondary}>
-              Switch list
-            </Link>
-            <Link href="/calling/reminders" className={buttonSecondary}>
-              Reminders
-            </Link>
-            <Button variant="secondary" icon="refresh" onClick={() => void load()}>
-              Refresh queue
-            </Button>
-          </div>
-        }
-      />
+  const here = sessionId ? runHref(sessionId) : `${CALL_SCREEN}?lead=${leadId}${back ? `&back=${encodeURIComponent(back)}` : ""}`;
 
-      {error && <Alert tone="danger">{error}</Alert>}
-
-      {/* ------------------------------------------- a lead has just donated */}
-      {conversions.map((c) => (
-        <Alert key={c.id} tone="good">
-          <p>
-            <span className="font-semibold">{c.name || c.phone}</span> donated
-            {c.converted_amount ? <> {currency(Number(c.converted_amount))}</> : null}
-            {c.purpose ? <span> — {c.purpose}</span> : null}
-            <span className="opacity-80">
-              {" "}
-              · {c.converted_via === "auto" ? "arrived on the site" : "recorded by hand"}
-            </span>
-          </p>
-          {/* The buttons sit under the sentence rather than beside it: at the
-              width of a phone a row of actions next to two lines of text has
-              nowhere to go but off the side of the screen. */}
-          <div className="mt-2 flex flex-wrap gap-2">
-            <Link href={`/leads/${c.id}`} className={buttonPrimary}>
-              Open
-            </Link>
-            <Button variant="secondary" onClick={() => void dismissConversions([c.id])}>
-              Got it
-            </Button>
-          </div>
-        </Alert>
-      ))}
-
-      {/* -------------------------------------------- a reminder has come due */}
-      {alerts.map((a) => (
-        <Alert
-          key={a.id + a.due_at}
-          tone="warn"
-          title={a.occasion ? `${a.lead_name || a.lead_phone} · ${a.occasion}` : a.lead_name || a.lead_phone}
-        >
-          <p>{a.title}</p>
-          <div className="mt-2 flex flex-wrap gap-2">
-            <LinkButton href={`tel:+91${a.lead_phone}`} variant="primary" icon="phone" className="tabular-nums">
-              Call {a.lead_phone}
-            </LinkButton>
-            <Button
-              variant="secondary"
-              onClick={() => void apiClient.put(`/api/crm/reminders/${a.id}`, { action: "snooze", minutes: 60 }).then(() => dismissAlert(a.id))}
-            >
-              In an hour
-            </Button>
-            <Button
-              variant="secondary"
-              icon="check"
-              onClick={() => void apiClient.put(`/api/crm/reminders/${a.id}`, { action: "done" }).then(() => dismissAlert(a.id))}
-            >
-              Done
-            </Button>
-          </div>
-        </Alert>
-      ))}
-
-      {/* Nothing has fired yet, but something is owed today. Quieter than an
-          alert, because it is not interrupting - just refusing to let a caller
-          finish a run unaware that a promise falls due. */}
-      {!alerts.length && dueCount > 0 && (
-        <Alert tone="info">
-          {/* The link fills the banner rather than sitting at the end of the
-              sentence, so the whole strip is the tap target on a phone. */}
-          <Link href="/calling/reminders" className="flex items-center justify-between gap-3">
-            <span>
-              {dueCount} reminder{dueCount === 1 ? "" : "s"} due today or overdue
-            </span>
-            <span className="inline-flex flex-none items-center gap-1 font-medium">
-              See them
-              <Icon name="arrowRight" size={13} />
-            </span>
-          </Link>
-        </Alert>
-      )}
-
-      {/* Undo sits above the fold, because a misclick is noticed instantly and
-          the fix has to be within reach at that moment. */}
-      {lastCall && (
-        <Alert
-          tone="info"
-          action={
-            <Button variant="secondary" icon="refresh" onClick={() => void undoLast()}>
-              Undo
-              <kbd className="ml-1 text-2xs opacity-60">U</kbd>
-            </Button>
-          }
-        >
-          Logged <span className="font-medium">{lastCall.label}</span> for{" "}
-          {lastCall.lead.name || lastCall.lead.phone}
-        </Alert>
-      )}
-
-      {loading && !lead && (
-        <Card>
-          <div className="space-y-3">
-            <Skeleton className="h-6 w-48" />
-            <Skeleton className="h-4 w-64" />
-            <Skeleton className="h-24 w-full" rounded="rounded-card" />
-          </div>
-        </Card>
-      )}
-
-      {!loading && !lead && (
+  if (loadError) {
+    return (
+      <div className="mx-auto max-w-2xl">
         <Card padded={false}>
           <EmptyState
-            icon="checkCircle"
-            title="Nothing left to call"
-            message={
-              done > 0
-                ? `You logged ${done} call${done === 1 ? "" : "s"}${listName ? ` on ${listName}` : ""}. Everything here is either done or scheduled for later.`
-                : listName
-                ? `Nothing in ${listName} is due right now. Another list may have work waiting.`
-                : "No leads are waiting for you. Add some from the leads screen, or pull a list out of your existing donors."
-            }
+            icon="alert"
+            title={inRun ? "That run can't be opened" : "That person can't be opened"}
+            message={loadError}
             action={
-              <div className="flex flex-wrap justify-center gap-2">
-                {sessionId && (
-                  <Button size="lg" onClick={() => void leave("end")}>
-                    Finish and pick another list
-                  </Button>
-                )}
-                <Link href="/leads" className={buttonSecondary}>
-                  Go to leads
-                </Link>
-              </div>
+              <Link href="/calling/start" className={buttonClass("primary", "lg")}>
+                Choose who to call
+              </Link>
             }
           />
         </Card>
+      </div>
+    );
+  }
+  if ((inRun && !run) || (!inRun && !single)) return <CallSkeleton />;
+
+  const itemDone = inRun && run?.item?.state === "done";
+  const loggedLabel = inRun ? (itemDone && run?.item?.outcome ? outcomeLabel(run.item.outcome) : null) : singleLogged;
+  const ahead = run?.counts.ahead ?? 0;
+
+  const nextPersonButton =
+    inRun && itemDone ? (
+      <Button size="lg" block iconRight="arrowRight" loading={moving === "next"} disabled={!!moving} onClick={() => void move("next")}>
+        {ahead > 0 ? "Next person" : "Finish this run"}
+      </Button>
+    ) : !inRun && singleLogged ? (
+      <Button
+        size="lg"
+        block
+        icon="arrowLeft"
+        onClick={() => (back ? router.push(back) : router.back())}
+      >
+        Done — go back
+      </Button>
+    ) : null;
+
+  /* ---------------------------------------------------------- header */
+
+  const helpButton = !isTouch && (
+    <div className="relative hidden sm:block">
+      <IconButton name="help" variant="secondary" label="Keyboard shortcuts (?)" onClick={() => setHelpOpen((v) => !v)} />
+      {helpOpen && (
+        <ShortcutHelp dispositions={dispositions} keys={keys} inRun={inRun} onClose={() => setHelpOpen(false)} />
       )}
+    </div>
+  );
 
-      {lead && (
-        <div className="space-y-4">
-          {/* -------------------------------------------------- who to call */}
-          <Card>
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="truncate text-xl font-semibold text-ink">
-                    {lead.name || "Name not known"}
-                  </h2>
-                  {lead.status_label && <Badge tone="info">{lead.status_label}</Badge>}
-                  {lead.call_attempts > 0 && (
-                    <Badge tone={lead.call_attempts >= 4 ? "warn" : "neutral"}>
-                      {lead.call_attempts} attempt{lead.call_attempts === 1 ? "" : "s"}
-                    </Badge>
-                  )}
-                </div>
-                <p className="mt-1 text-sm text-ink-muted">
-                  {[lead.city, lead.email].filter(Boolean).join(" · ") || "No other details"}
-                </p>
-                {/* The preacher who brought this donor in. A caller who can
-                    open with "Jagat Tarini Mataji gave us your name" is not
-                    making a cold call, which is why this sits with the name
-                    rather than buried in the record. */}
-                {lead.preacher_code && (
-                  <p className="mt-1 text-sm text-ink-soft">
-                    <span className="text-ink-muted">Known to:</span>{" "}
-                    <span className="font-medium">{lead.preacher_name || lead.preacher_code}</span>
-                  </p>
-                )}
-              </div>
-
-              {/* The number, big. On a phone it dials; at a desk it copies.
-                  Full width below the name at phone size, because this is the
-                  one control on the screen that must never be missed or
-                  mis-tapped. */}
-              <div className="flex w-full flex-col items-stretch gap-1.5 sm:w-auto sm:items-end">
-                {isTouch ? (
-                  <LinkButton
-                    href={`tel:+91${lead.phone}`}
-                    variant="primary"
-                    size="lg"
-                    icon="phone"
-                    className="tabular-nums text-lg"
-                  >
-                    {lead.phone}
-                  </LinkButton>
-                ) : (
-                  <Button
-                    size="lg"
-                    icon={copied ? "check" : "copy"}
-                    onClick={() => void copyNumber()}
-                    title="Copy the number so you can dial it on your handset"
-                    className="tabular-nums text-lg"
-                  >
-                    {lead.phone}
-                  </Button>
-                )}
-                <span className="text-2xs text-ink-faint sm:text-right">
-                  {isTouch ? "Tap to dial" : copied ? "Copied — dial it on your handset" : "Click to copy · C"}
-                </span>
-              </div>
-            </div>
-
-            {/* ------------------------------- what they have donated before */}
-            {history ? (
-              <div className="mt-4 rounded-card bg-brand-50 px-4 py-3">
-                <p className="text-sm text-ink-soft">
-                  <span className="font-semibold">{currency(history.total)}</span> donated across{" "}
-                  <span className="font-semibold">{history.count}</span> donation
-                  {history.count === 1 ? "" : "s"}
-                  {history.last && <> · last one {relativeDate(history.last)}</>}
-                </p>
-                {lead.person_id && (
-                  <Link
-                    href={`/people/${lead.person_id}`}
-                    className="mt-0.5 inline-block text-xs font-medium text-brand-700 hover:underline"
-                  >
-                    See their full history
-                  </Link>
-                )}
-              </div>
-            ) : lead.external_total_donated ? (
-              // From the office's own sheets, not from DRM. Shown because a
-              // caller ringing someone who has given three lakhs needs to know
-              // that; kept out of every DRM total because it is not money the
-              // calling raised.
-              <div className="mt-4 rounded-card bg-brand-50 px-4 py-3">
-                <p className="text-sm text-ink-soft">
-                  <span className="font-semibold">{currency(Number(lead.external_total_donated))}</span> on record in
-                  the temple accounts
-                  {Number(lead.external_account_count) > 1 && (
-                    <span className="text-ink-muted"> across {lead.external_account_count} accounts</span>
-                  )}
-                  {lead.external_last_donation_at && <> · last in {istYear(lead.external_last_donation_at)}</>}
-                </p>
-                <p className="mt-0.5 text-2xs text-ink-muted">
-                  From {lead.external_source || "an uploaded sheet"} — not counted in DRM&apos;s own totals.
-                </p>
-              </div>
-            ) : (
-              <p className="mt-4 rounded-card bg-sunken px-4 py-3 text-sm text-ink-soft">
-                No donation on record — this is a first conversation.
-                {lead.source_detail && <span className="text-ink-muted"> From: {lead.source_detail}</span>}
-              </p>
+  const header =
+    inRun && run?.session ? (
+      <RunHeader
+        label={run.session.label}
+        counts={run.counts}
+        finished={finished}
+        paused={paused}
+        actions={
+          <>
+            {!finished && !ended && (
+              <Button variant="secondary" icon="list" className="lg:hidden" onClick={() => setSheetOpen(true)}>
+                <span className="tabular-nums">{ahead}</span>
+                <span className="sr-only"> still ahead — see the run</span>
+              </Button>
             )}
-
-            {/* Why this lead is up now, and what was last said. */}
-            {(lead.follow_up_note || lead.remarks || lead.next_follow_up_at) && (
-              <div className="mt-3 space-y-1 text-sm">
-                {lead.next_follow_up_at && (
-                  <p className="text-ink-soft">
-                    <span className="text-ink-muted">Promised callback:</span> {dueLabel(lead.next_follow_up_at)}
-                    {lead.follow_up_note && <> — “{lead.follow_up_note}”</>}
-                  </p>
+            {helpButton}
+            {!ended && (
+              <DropdownMenu
+                items={[
+                  ...(!paused && !finished
+                    ? [{ label: "Pause", icon: "clock" as const, hint: "Keep your place, let go of this person", onSelect: () => setPauseOpen(true) }]
+                    : []),
+                  { label: "End this run", icon: "check" as const, hint: "Done with it — start fresh next time", onSelect: () => void finish() },
+                  { label: "Choose another list", icon: "list" as const, onSelect: () => router.push("/calling/start") },
+                  { label: "Promises due", icon: "bell" as const, onSelect: () => router.push("/calling/reminders") },
+                ]}
+                trigger={({ open, toggle }) => (
+                  <IconButton
+                    name="more"
+                    variant="secondary"
+                    label="Pause, end or switch run"
+                    onClick={toggle}
+                    aria-expanded={open}
+                    aria-haspopup="menu"
+                    loading={moving === "finish" || moving === "pause"}
+                  />
                 )}
-                {lead.remarks && (
-                  <p className="text-ink-soft">
-                    <span className="text-ink-muted">Last note:</span> “{lead.remarks}”
-                  </p>
-                )}
-              </div>
+              />
             )}
+          </>
+        }
+      />
+    ) : (
+      <div className="mb-4 flex items-center justify-between gap-3 border-b border-line-soft pb-4">
+        <div className="flex min-w-0 items-center gap-2">
+          <IconButton
+            name="arrowLeft"
+            variant="secondary"
+            label="Back"
+            onClick={() => (back ? router.push(back) : router.back())}
+          />
+          <div className="min-w-0">
+            <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-brand-600">Calling one person</p>
+            <h1 className="truncate text-lg font-semibold tracking-tight text-ink sm:text-2xl">
+              {single?.name || formatPhone(single?.phone) || "Call"}
+            </h1>
+          </div>
+        </div>
+        <div className="flex flex-none items-center gap-1.5">
+          {helpButton}
+          <Link href="/calling/start" className={buttonClass("secondary", "md")}>
+            Start a run
+          </Link>
+        </div>
+      </div>
+    );
 
-            {lead.tags.length > 0 && (
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {lead.tags.map((t) => (
-                  <Badge key={t}>{t}</Badge>
-                ))}
-              </div>
-            )}
-          </Card>
+  /* ---------------------------------------------------------- body */
 
-          {/* --------------------------------------------- send them the link
-              Sits between who-to-call and the outcome buttons on purpose: the
-              link is sent DURING the conversation, while the donor is still on
-              the line, not after the call has been written up. */}
-          <Card>
+  let body: ReactNode;
+  if (ended) {
+    body = (
+      <Card padded={false}>
+        <EmptyState
+          icon="checkCircle"
+          title="This run is finished"
+          message="It was ended, here or on another device. Pick up a list from the start screen."
+          action={
+            <Link href="/calling/start" className={buttonClass("primary", "lg")}>
+              Choose who to call
+            </Link>
+          }
+        />
+      </Card>
+    );
+  } else if (paused) {
+    body = (
+      <Card tone="warn" padded={false} className="p-4 sm:p-6">
+        <p className="text-lg font-semibold text-ink">Paused</p>
+        <p className="mt-1 text-sm text-ink-soft">
+          Your place is kept. While you were away, colleagues could ring the person you were on — if one did, you
+          move straight past them when you carry on.
+        </p>
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+          <Button size="lg" icon="phoneOutgoing" loading={moving === "resume"} onClick={() => void resume()}>
+            Resume
+          </Button>
+          <Link href="/calling/start" className={buttonClass("secondary", "lg")}>
+            Back to the start screen
+          </Link>
+        </div>
+      </Card>
+    );
+  } else if (finished && sessionId) {
+    body = (
+      <RunSummaryCard
+        label={run?.session?.label ?? "this run"}
+        summary={summary}
+        skipped={run?.counts.skipped ?? 0}
+        busy={moving === "revisit" ? "revisit" : moving === "finish" ? "finish" : null}
+        onRevisit={() => void move("revisit")}
+        onFinish={() => void finish()}
+        onChooseAnother={() => router.push("/calling/start")}
+      />
+    );
+  } else if (lead) {
+    body = (
+      <div className="space-y-4">
+        <LeadCard lead={lead} outcomeLabel={outcomeLabel} onEdit={() => setEditing(true)} isTouch={isTouch} />
+
+        {/* The outcome buttons before the send panel: on a phone, after the
+            call, the next thing is the outcome, and sixty scrolls an hour past
+            a panel used on a few calls is real fatigue. */}
+        <OutcomePanel
+          form={form}
+          dispositions={dispositions}
+          keys={keys}
+          saving={saving}
+          onLog={(d) => void logCall(d)}
+          shortcutsOn={shortcutsOn}
+          onShortcutsChange={(on) => {
+            setShortcutsOn(on);
+            writePref(SHORTCUTS_KEY, on);
+          }}
+          showKeys={!isTouch}
+          noteRef={noteRef}
+          logged={loggedLabel}
+          after={nextPersonButton}
+        />
+
+        {/* Sent DURING the conversation, while the donor is on the line. The
+            QR sits with the link because, from the caller's side, "send them
+            something" is one decision. */}
+        <div ref={sendRef}>
+          <Card padded={false} className="p-4 sm:p-5">
             <SendLink
               leadId={lead.id}
               leadName={lead.name}
               expectedAmount={lead.expected_amount}
               compact
+              onSent={() => toast.success("WhatsApp opened with the link", "Press send there.")}
             />
-            <p className="mt-2 text-2xs text-ink-faint">
-              Opens WhatsApp on this computer in their chat, with the message ready. Press send there.
-            </p>
-
-            {/* The QR sits with the link rather than in its own card: from the
-                caller's side "send them something" is one decision, and a
-                donor who asks for a QR has usually just been offered a link. */}
             <div className="mt-3 border-t border-line-soft pt-3">
               <SendQr
                 leadId={lead.id}
                 leadName={lead.name}
                 expectedAmount={lead.expected_amount}
                 sessionId={sessionId}
+                onShared={() => toast.success("QR shared", "Press send in WhatsApp. A payment to it is matched to them.")}
               />
             </div>
           </Card>
+        </div>
 
-          {/* ------------------------------------------------ log the outcome */}
-          <Card>
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-sm font-semibold text-ink">How did it go?</p>
-                <p className="mt-0.5 text-xs text-ink-muted">
-                  One tap — or the number key beside it — logs the call and brings up the next person.
-                </p>
+        {inRun && (
+          <label className="flex min-h-11 items-center justify-between gap-3 rounded-card border border-line-soft bg-surface px-4 py-2 text-sm text-ink-soft">
+            <span>
+              Move on by itself after I log a call
+              <span className="block text-xs text-ink-muted">Except &ldquo;Will pay by QR&rdquo; — the QR comes first.</span>
+            </span>
+            <Toggle
+              on={autoAdvance}
+              label="Move on by itself after logging"
+              onChange={(on) => {
+                setAutoAdvance(on);
+                writePref(AUTO_ADVANCE_KEY, on);
+                toast.info(on ? "Will move on after each call" : "Will stay on the person after logging");
+              }}
+            />
+          </label>
+        )}
+      </div>
+    );
+  } else {
+    body = (
+      <Card padded={false}>
+        <EmptyState icon="inbox" title="Nobody on screen" message="Move on, or pick a list from the start screen." />
+      </Card>
+    );
+  }
+
+  /* ---------------------------------------------------------- nav bar */
+
+  const navLeft = inRun ? (
+    <NavButton
+      variant="secondary"
+      icon="arrowLeft"
+      disabled={!run?.has_prev || !!moving || !!saving || paused || ended}
+      loading={moving === "prev"}
+      onClick={() => void move("prev")}
+    >
+      Previous
+    </NavButton>
+  ) : (
+    <NavButton variant="secondary" icon="arrowLeft" onClick={() => (back ? router.push(back) : router.back())}>
+      Back
+    </NavButton>
+  );
+
+  const navRight = inRun ? (
+    finished || paused || ended ? null : itemDone ? (
+      <NavButton
+        iconRight="arrowRight"
+        disabled={!!moving}
+        loading={moving === "next"}
+        onClick={() => void move("next")}
+      >
+        {ahead > 0 ? "Next person" : "To the summary"}
+      </NavButton>
+    ) : (
+      <NavButton
+        variant="secondary"
+        iconRight="arrowRight"
+        disabled={!!moving || !!saving}
+        loading={moving === "skip"}
+        onClick={() => void move("skip")}
+      >
+        Skip for now
+      </NavButton>
+    )
+  ) : lead ? (
+    <Link href={`/leads/${lead.id}`} className={buttonClass("secondary", "lg", "flex-1 sm:flex-none")}>
+      Full record
+    </Link>
+  ) : null;
+
+  return (
+    <div className="mx-auto max-w-6xl">
+      {header}
+
+      <CallBanners back={here} />
+
+      {/* Undo sits above the fold too: the toast that offers it fades, and a
+          slip noticed a minute later still needs a way back. */}
+      {lastCall && (
+        <Alert
+          tone="info"
+          onDismiss={() => setLastCall(null)}
+          action={
+            <Button size="sm" variant="secondary" icon="refresh" onClick={() => void undo(lastCall)}>
+              Undo
+              {!isTouch && <kbd className="ml-1 text-2xs opacity-60">U</kbd>}
+            </Button>
+          }
+        >
+          Logged <span className="font-medium">{lastCall.label}</span> for {lastCall.name}
+        </Alert>
+      )}
+
+      <div className={inRun ? "grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]" : ""}>
+        <div className="min-w-0">{body}</div>
+
+        {inRun && isDesktop && (
+          <aside className="min-w-0">
+            <Card padded={false} className="sticky top-20 p-4">
+              <div className="mb-2 flex items-baseline justify-between gap-2">
+                <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">This run</p>
+                <span className="text-xs tabular-nums text-ink-muted">{ahead} ahead</span>
               </div>
-              {/* On/off rather than a link that says its own state: "shortcuts
-                  on" as a button left it ambiguous whether the words described
-                  the setting or what pressing it would do. */}
-              <div className="flex flex-none items-center gap-2">
-                <span className="hidden text-2xs text-ink-muted sm:inline">Shortcuts</span>
-                <SegmentedControl
-                  size="sm"
-                  options={[
-                    { value: "on", label: "On" },
-                    { value: "off", label: "Off" },
-                  ]}
-                  value={shortcutsOn ? "on" : "off"}
-                  onChange={(v) => setShortcutsOn(v === "on")}
+              <div className="scroll-slim max-h-[calc(100vh-12rem)] overflow-y-auto">
+                <UpNextList
+                  items={items}
+                  position={run?.session?.position ?? 0}
+                  loading={!items}
+                  jumping={jumping}
+                  onJump={(p) => void move("jump", p)}
                 />
               </div>
-            </div>
-
-            {/* How much, when the outcome is that they gave.
-                Optional and inline rather than a dialog: a caller has somebody
-                on the line. Left blank it falls back to whatever the lead was
-                expected to give, and the conversion is still recorded - a
-                donation with no figure beats a donation DRM denies happened,
-                which is what used to occur. */}
-            <div className="mt-4 flex flex-wrap items-end gap-2">
-              <Field label="If they gave on this call, how much?" htmlFor="donated-amount">
-                {/* The box is narrow, the label is not: sizing the Field
-                    itself would wrap "how much?" onto a third line at phone
-                    width, so the width goes on the input's own box. */}
-                <div className="w-40">
-                  <Input
-                    id="donated-amount"
-                    value={donatedAmount}
-                    onChange={(e) => setDonatedAmount(e.target.value.replace(/\D/g, ""))}
-                    placeholder="₹ optional"
-                    inputMode="numeric"
-                    className="tabular-nums"
-                  />
-                </div>
-              </Field>
-              {!!donatedAmount && (
-                <span className="pb-2.5 text-2xs text-good">
-                  recorded when you pick an outcome that means they donated
-                </span>
-              )}
-            </div>
-
-            <div className="mt-4">
-              <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Got through</p>
-              {/* The large size, deliberately: these are the buttons the whole
-                  screen exists for, and they are pressed with a thumb while
-                  the caller is still holding the phone. */}
-              <div className="flex flex-wrap gap-2">
-                {connected.map((d, i) => (
-                  <Button
-                    key={d.slug}
-                    size="lg"
-                    variant={variantFor(d)}
-                    disabled={saving}
-                    onClick={() => void logCall(d)}
-                  >
-                    {d.label}
-                    {shortcutsOn && i < 9 && (
-                      <kbd className="ml-2 text-2xs font-normal opacity-60">{i + 1}</kbd>
-                    )}
-                  </Button>
-                ))}
-              </div>
-            </div>
-
-            <div className="mt-4">
-              <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
-                Didn&apos;t get through
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {unanswered.map((d, i) => {
-                  const n = connected.length + i + 1;
-                  return (
-                    <Button
-                      key={d.slug}
-                      size="lg"
-                      variant="secondary"
-                      disabled={saving}
-                      onClick={() => void logCall(d)}
-                    >
-                      {d.label}
-                      {shortcutsOn && n <= 9 && <kbd className="ml-2 text-2xs font-normal opacity-60">{n}</kbd>}
-                    </Button>
-                  );
-                })}
-              </div>
-              <p className="mt-2 text-xs text-ink-muted">
-                These come back round automatically — you don&apos;t need to set a date.
-              </p>
-            </div>
-
-            {/* ------------------------------------------ the optional extras */}
-            <div className="mt-5 space-y-3 border-t border-line-soft pt-4">
-              {/* The raw element and the shared class string rather than
-                  <Textarea>, because the N shortcut focuses this box through a
-                  ref and the component does not take one. Same styling either
-                  way - textareaClass is what <Textarea> is built from. */}
-              <textarea
-                ref={noteRef}
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                rows={2}
-                placeholder="What they said (optional) — press N"
-                className={`${textareaClass} resize-y`}
-              />
-
-              <div>
-                <p className="mb-1.5 text-xs text-ink-muted">Call back on:</p>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {WHEN_PRESETS.map((p) => {
-                    const iso = atTenAm(p.days);
-                    const active = followUp === iso;
-                    return (
-                      <button
-                        key={p.label}
-                        type="button"
-                        aria-pressed={active}
-                        onClick={() => {
-                          setFollowUp(active ? null : iso);
-                          setCustomDate("");
-                        }}
-                        className={chipClass(active)}
-                      >
-                        {active && <Icon name="check" size={11} />}
-                        {p.label}
-                      </button>
-                    );
-                  })}
-                  {/* Boxed rather than given a width class: the shared input
-                      style is w-full, and a second width utility beside it is
-                      a coin-toss over which one CSS applies. */}
-                  <div className="w-44">
-                    <Input
-                      type="date"
-                      value={customDate}
-                      onChange={(e) => {
-                        setCustomDate(e.target.value);
-                        setFollowUp(null);
-                      }}
-                      aria-label="Call back on another date"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* ------------------------------------------ the reminder box */}
-              {remOpen ? (
-                <div className="rounded-card border border-brand-200 bg-brand-50 p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs font-semibold text-ink-soft">They named a moment</p>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      icon="x"
-                      onClick={() => { setRemOpen(false); setRemWhen(""); }}
-                    >
-                      Remove
-                    </Button>
-                  </div>
-                  <p className="mt-0.5 text-2xs text-ink-muted">
-                    A promise the donor made at a moment they chose. Pick when it should reach you.
-                  </p>
-                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                    <Input
-                      value={remOccasion}
-                      onChange={(e) => setRemOccasion(e.target.value)}
-                      placeholder="Occasion — Govardhan Puja"
-                      aria-label="Occasion"
-                    />
-                    <Input
-                      type="datetime-local"
-                      value={remWhen}
-                      onChange={(e) => setRemWhen(e.target.value)}
-                      aria-label="When to remind you"
-                    />
-                    <Input
-                      type="number"
-                      value={remAmount}
-                      onChange={(e) => setRemAmount(e.target.value)}
-                      placeholder="₹ they said"
-                      aria-label="Amount they said"
-                      className="tabular-nums"
-                    />
-                  </div>
-                  <div className="mt-2">
-                    <AlertPicker
-                      value={remAlerts}
-                      onChange={setRemAlerts}
-                      options={ALERT_OPTIONS}
-                      emptyWarning="Nothing ticked means nothing will alert you — it will only sit on the reminders board."
-                    />
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {[
-                      { label: "This evening 6pm", h: 18, d: 0 },
-                      { label: "Tomorrow 10am", h: 10, d: 1 },
-                      { label: "Saturday 10am", h: 10, d: (6 - istWeekday() + 7) % 7 || 7 },
-                    ].map((p) => (
-                      <button
-                        key={p.label}
-                        type="button"
-                        onClick={() => setRemWhen(istInput(p.d, p.h))}
-                        className={chipClass(remWhen === istInput(p.d, p.h))}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                /* A plain button rather than <Button>: every button in the
-                   system is whitespace-nowrap so a row of them stays aligned,
-                   and this label is a sentence - at the width of a phone it
-                   has to be allowed to wrap rather than push the card
-                   sideways. */
-                <button
-                  type="button"
-                  onClick={() => setRemOpen(true)}
-                  className="inline-flex items-start gap-1.5 text-left text-xs font-medium text-brand-700 underline-offset-2 hover:underline"
-                >
-                  <Icon name="bell" size={13} className="mt-0.5" />
-                  <span>
-                    They said they&apos;ll donate at a particular time — remind me
-                    <kbd className="ml-1 text-2xs text-ink-faint">R</kbd>
-                  </span>
-                </button>
-              )}
-
-              {showMore ? (
-                <div className="flex flex-wrap items-end gap-2">
-                  <Field label="Roughly how long, in minutes" htmlFor="call-minutes">
-                    <div className="w-28">
-                      <Input
-                        id="call-minutes"
-                        type="number"
-                        min={0}
-                        value={duration}
-                        onChange={(e) => setDuration(e.target.value)}
-                        className="tabular-nums"
-                      />
-                    </div>
-                  </Field>
-                  <span className="pb-2.5 text-xs text-ink-faint">Self-reported — nothing is timing the call</span>
-                </div>
-              ) : (
-                <Button size="sm" variant="ghost" icon="clock" onClick={() => setShowMore(true)}>
-                  Add call length
-                </Button>
-              )}
-            </div>
-          </Card>
-
-          {/* -------------------------------------------------------- skip it */}
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <Button
-              variant="secondary"
-              iconRight="arrowRight"
-              onClick={() => {
-                setQueue((q) => q.slice(1));
-                reset();
-              }}
-            >
-              Skip for now
-              <kbd className="ml-1 text-2xs opacity-60">S</kbd>
-            </Button>
-            <Link href={`/leads/${lead.id}`} className={buttonSecondary}>
-              Open full record
-            </Link>
-          </div>
-
-          {/* Who is coming up, so the caller can see the run ahead of them. */}
-          {queue.length > 1 && (
-            <Card>
-              <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Up next</p>
-              <ul className="divide-y divide-line-soft">
-                {queue.slice(1, 6).map((l) => (
-                  <li key={l.id} className="flex items-center justify-between gap-3 py-2 text-sm">
-                    <span className="truncate text-ink-soft">{l.name || l.phone}</span>
-                    <span className="whitespace-nowrap text-xs text-ink-faint">
-                      {l.next_follow_up_at ? dueLabel(l.next_follow_up_at) : "never called"}
-                    </span>
-                  </li>
-                ))}
-              </ul>
             </Card>
-          )}
-        </div>
+          </aside>
+        )}
+      </div>
+
+      <NavBar left={navLeft} right={navRight} />
+
+      {/* ------------------------------------------------------- dialogs */}
+      {sheetOpen && inRun && (
+        <Modal title={`${run?.session?.label ?? "This run"} · ${ahead} ahead`} onClose={() => setSheetOpen(false)}>
+          <UpNextList
+            items={items}
+            position={run?.session?.position ?? 0}
+            loading={!items}
+            jumping={jumping}
+            onJump={(p) => void move("jump", p)}
+          />
+        </Modal>
+      )}
+
+      {pauseOpen && (
+        <Modal
+          title="Pause this run"
+          onClose={() => setPauseOpen(false)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setPauseOpen(false)}>
+                Keep calling
+              </Button>
+              <Button loading={moving === "pause"} onClick={() => void pause()}>
+                Pause
+              </Button>
+            </>
+          }
+        >
+          <p className="mb-3 text-sm text-ink-soft">
+            Your place is kept for today or tomorrow. The person on screen is let go, so a colleague can ring them
+            meanwhile.
+          </p>
+          <Field label="A note for yourself" htmlFor="pause-note" hint="Optional — “lunch”, “back after aarti”">
+            <Input
+              id="pause-note"
+              value={pauseNote}
+              onChange={(e) => setPauseNote(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void pause()}
+              maxLength={200}
+            />
+          </Field>
+        </Modal>
+      )}
+
+      {editing && lead && (
+        <ContactEditor
+          lead={lead}
+          onClose={() => setEditing(false)}
+          onSaved={async () => {
+            try {
+              if (inRun) await reloadRun();
+              else await reloadSingle();
+            } catch {
+              /* saved; the screen catches up on the next move */
+            }
+          }}
+        />
       )}
     </div>
   );

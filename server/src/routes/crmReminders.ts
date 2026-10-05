@@ -354,6 +354,13 @@ router.post('/leads/:id/reminders', async (req, res) => {
        VALUES ($1,$2,'reminder',$3,$4)`,
       [req.params.id, req.user?.userId ?? null, due, title]
     );
+    // A promise holds the lead until it is due, the same as one made on a
+    // call - otherwise the queue reads an empty callback date as "ring now".
+    await pool.query(
+      `UPDATE leads SET next_follow_up_at = GREATEST(COALESCE(next_follow_up_at, $2::timestamptz), $2::timestamptz)
+        WHERE id = $1`,
+      [req.params.id, due]
+    );
 
     res.status(201).json(result.rows[0]);
   } catch (err) {

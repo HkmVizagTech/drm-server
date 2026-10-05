@@ -1098,11 +1098,11 @@ CREATE TABLE IF NOT EXISTS calling_sessions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- One open session per caller per list. The WHERE makes it a partial index, so
--- finished sessions pile up as history without colliding.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_calling_sessions_open
-  ON calling_sessions(user_id, COALESCE(list_id, '00000000-0000-0000-0000-000000000000'::uuid))
-  WHERE ended_at IS NULL;
+-- One open session per caller per source - see idx_calling_sessions_open_key
+-- further down. The per-list index that used to live here is dropped there:
+-- recreating it on every boot would fail the moment a caller had two non-list
+-- sessions open (both have list_id NULL), and this file is applied as one
+-- transaction, so that would roll back every other change in it.
 
 CREATE INDEX IF NOT EXISTS idx_calling_sessions_user ON calling_sessions(user_id, last_active_at DESC);
 
@@ -1952,3 +1952,111 @@ CREATE TABLE IF NOT EXISTS collections (
 -- Finding a donor again, and the reconciliation search.
 CREATE INDEX IF NOT EXISTS idx_collections_phone ON collections(donor_phone);
 CREATE INDEX IF NOT EXISTS idx_collections_reference ON collections(reference) WHERE reference IS NOT NULL;
+
+
+-- ===========================================================================
+-- CALLING SESSIONS THAT REMEMBER THEIR PLACE
+--
+-- WHAT WAS WRONG WITH "A SESSION IS A TALLY"
+-- A run at a list used to be a counter and nothing else. The screen fetched
+-- the top 25 of the queue, called the first one "current", and every Skip
+-- happened in the browser - so a refresh brought the skipped people straight
+-- back, there was no Previous at all (there was nothing to go back TO), and
+-- two callers working the same list were handed the same 25 people in the
+-- same order and rang them a minute apart.
+--
+-- WHAT A SESSION IS NOW
+-- A source (a list, Nearly gave, today's follow-ups, a hand-picked selection
+-- from the leads screen) plus an ordered snapshot of who it found, taken when
+-- the caller pressed Start. Next, Previous, Skip and "go back to the ones I
+-- skipped" are moves along that snapshot, and the position is on the server,
+-- so it survives a refresh, a lunch break and a different phone.
+--
+-- A LIST IS STILL A QUESTION
+-- The snapshot is not the list. Lists stay saved filters, counted fresh; the
+-- snapshot only fixes the ORDER for one caller's run so Previous means
+-- something. Every step re-checks the person against reality before handing
+-- them over (still callable, not on somebody else's call, not rung by a
+-- colleague since the snapshot), so a stale snapshot can only ever SKIP a
+-- person, never put a wrong one in front of the caller.
+-- ===========================================================================
+
+ALTER TABLE calling_sessions ADD COLUMN IF NOT EXISTS source JSONB;
+-- 'list:<id>', 'everything', 'mine', 'nearly_gave', 'follow_ups',
+-- 'reminders', 'selection'. One open session per caller per key - so the
+-- Janmashtami list and today's follow-ups can both be half done at once, and
+-- coming back to either one resumes it.
+ALTER TABLE calling_sessions ADD COLUMN IF NOT EXISTS source_key VARCHAR(60);
+ALTER TABLE calling_sessions ADD COLUMN IF NOT EXISTS source_label VARCHAR(200);
+-- Position of the person on screen in calling_session_items. 0 = not started;
+-- one past the last item = reached the end.
+ALTER TABLE calling_sessions ADD COLUMN IF NOT EXISTS position INT NOT NULL DEFAULT 0;
+
+-- Sessions from before this existed were runs at a list, or at Everything.
+UPDATE calling_sessions
+   SET source_key = COALESCE('list:' || list_id::text, 'everything'),
+       source = COALESCE(source, CASE WHEN list_id IS NULL THEN '{"kind":"everything"}'::jsonb
+                                      ELSE jsonb_build_object('kind','list','list_id',list_id) END)
+ WHERE source_key IS NULL;
+
+-- The old uniqueness was per list, which made every non-list source collide
+-- with Everything (all of them have list_id NULL). Replaced by the key.
+DROP INDEX IF EXISTS idx_calling_sessions_open;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calling_sessions_open_key
+  ON calling_sessions(user_id, source_key)
+  WHERE ended_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS calling_session_items (
+  session_id UUID NOT NULL REFERENCES calling_sessions(id) ON DELETE CASCADE,
+  position   INT  NOT NULL,
+  lead_id    UUID NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+  -- pending  - not reached yet, or reached and still on screen
+  -- done     - a call was logged for them in this session
+  -- skipped  - passed over; "Go back to skipped" returns them to pending
+  -- taken    - somebody else has them (on a call now, or rang them since the
+  --            snapshot), or they stopped being callable. `note` says which.
+  state      VARCHAR(10) NOT NULL DEFAULT 'pending',
+  outcome    VARCHAR(30),
+  note       VARCHAR(200),
+  visited_at TIMESTAMPTZ,
+  done_at    TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (session_id, position),
+  UNIQUE (session_id, lead_id)
+);
+CREATE INDEX IF NOT EXISTS idx_session_items_lead ON calling_session_items(lead_id);
+CREATE INDEX IF NOT EXISTS idx_session_items_state ON calling_session_items(session_id, state, position);
+
+-- WHO IS ON THE PHONE TO THIS PERSON RIGHT NOW
+-- Set when a caller's session lands on a lead, refreshed while the screen is
+-- open, cleared when they move on. Expires by itself, so a caller whose
+-- laptop died mid-call does not lock the lead for ever. Two callers on the
+-- same list are handed different people because the second one's session
+-- steps past anybody claimed by the first.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS claimed_by UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS claimed_until TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_leads_claimed ON leads(claimed_by) WHERE claimed_by IS NOT NULL;
+
+-- ===========================================================================
+-- HAND-PICKED LIST MEMBERS
+--
+-- A list is a saved filter, and that stays the rule. But the office also
+-- needs "these twelve, plus Gopal, but not the Rao family", which no filter
+-- can say. So a list may name people to ADD to whatever its filter finds and
+-- people to LEAVE OUT of it - and a list built entirely by hand
+-- (members_only) is just a list whose filter finds nobody.
+--
+-- Still counted fresh: a hand-added member who goes do-not-call drops out of
+-- "to call" exactly like everybody else.
+-- ===========================================================================
+ALTER TABLE calling_lists ADD COLUMN IF NOT EXISTS members_only BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS calling_list_members (
+  list_id  UUID NOT NULL REFERENCES calling_lists(id) ON DELETE CASCADE,
+  lead_id  UUID NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+  kind     VARCHAR(8) NOT NULL DEFAULT 'include',  -- include | exclude
+  added_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (list_id, lead_id)
+);
+CREATE INDEX IF NOT EXISTS idx_list_members_lead ON calling_list_members(lead_id);

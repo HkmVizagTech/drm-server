@@ -41,61 +41,56 @@ export interface ListRow {
   source: string | null;
   city: string | null;
   min_external_total: string | null;
+  members_only?: boolean;
 }
 
 /**
- * Turn a list's saved filter into SQL.
+ * Whether lead `l` belongs to list `cl`, as SQL - THE one definition.
  *
- * Exported because the queue in crm.ts needs exactly this predicate - if the
- * two ever drifted apart, the count on the list card and the leads the caller
- * is handed would disagree, which is the one thing this design exists to stop.
+ * There used to be three: one here with bound parameters, one inlined in the
+ * leads screen's filter for "See them", and one inside the list cards' count.
+ * They agreed only because nobody had changed one of them yet. Every reader
+ * now goes through this, so adding a filter field (or hand-picked members)
+ * changes the queue, the count and the leads screen together.
  *
- * Returns nothing for a null list, which is how "Everything" is expressed: no
- * extra conditions, the old global queue.
+ * Hand-picked members: an 'include' row adds a person whatever the filter
+ * says; an 'exclude' row removes them from what the filter found. A
+ * members_only list finds nobody by filter, so it is exactly its includes.
+ */
+export const LIST_MATCH = (cl: string, l: string) => `(
+  (
+    NOT ${cl}.members_only
+    AND (${cl}.import_batch_id IS NULL OR ${l}.import_batch_id = ${cl}.import_batch_id)
+    AND (${cl}.tag         IS NULL OR ${cl}.tag = ANY(${l}.tags))
+    AND (${cl}.preacher_id IS NULL OR ${l}.preacher_id = ${cl}.preacher_id)
+    AND (${cl}.status_slug IS NULL OR ${l}.status = ${cl}.status_slug)
+    AND (${cl}.source      IS NULL OR ${l}.source = ${cl}.source)
+    -- Loose on purpose: sheets carry "Vizag", "Visakhapatnam" and "VIZAG" in
+    -- the same column.
+    AND (${cl}.city        IS NULL OR ${l}.city ILIKE '%' || ${cl}.city || '%')
+    AND (${cl}.min_external_total IS NULL OR ${l}.external_total_donated >= ${cl}.min_external_total)
+    AND NOT EXISTS (SELECT 1 FROM calling_list_members xm
+                     WHERE xm.list_id = ${cl}.id AND xm.lead_id = ${l}.id AND xm.kind = 'exclude')
+  )
+  OR EXISTS (SELECT 1 FROM calling_list_members im
+              WHERE im.list_id = ${cl}.id AND im.lead_id = ${l}.id AND im.kind = 'include')
+)`;
+
+/**
+ * A list's membership as an extra AND clause on a query over `leads l`.
+ *
+ * Returns nothing for a null list, which is how "Everything" is expressed.
  */
 export function listPredicate(
   list: ListRow | null,
   startIdx: number
 ): { sql: string; values: unknown[]; next: number } {
   if (!list) return { sql: '', values: [], next: startIdx };
-
-  const conds: string[] = [];
-  const values: unknown[] = [];
-  let i = startIdx;
-
-  if (list.import_batch_id) {
-    conds.push(`l.import_batch_id = $${i++}`);
-    values.push(list.import_batch_id);
-  }
-  if (list.tag) {
-    conds.push(`$${i++} = ANY(l.tags)`);
-    values.push(list.tag);
-  }
-  if (list.preacher_id) {
-    conds.push(`l.preacher_id = $${i++}`);
-    values.push(list.preacher_id);
-  }
-  if (list.status_slug) {
-    conds.push(`l.status = $${i++}`);
-    values.push(list.status_slug);
-  }
-  if (list.source) {
-    conds.push(`l.source = $${i++}`);
-    values.push(list.source);
-  }
-  if (list.city) {
-    // Loose on purpose: sheets carry "Vizag", "Visakhapatnam" and "VIZAG" in
-    // the same column, and a list that matched only one of them would quietly
-    // leave most of the city out.
-    conds.push(`l.city ILIKE $${i++}`);
-    values.push(`%${list.city}%`);
-  }
-  if (list.min_external_total !== null && list.min_external_total !== undefined) {
-    conds.push(`l.external_total_donated >= $${i++}`);
-    values.push(list.min_external_total);
-  }
-
-  return { sql: conds.length ? ` AND ${conds.join(' AND ')}` : '', values, next: i };
+  return {
+    sql: ` AND EXISTS (SELECT 1 FROM calling_lists cl WHERE cl.id = $${startIdx}::uuid AND ${LIST_MATCH('cl', 'l')})`,
+    values: [list.id],
+    next: startIdx + 1,
+  };
 }
 
 /**
@@ -111,14 +106,21 @@ export const CALLABLE = `
   AND l.invalid_reason IS NULL`;
 
 /**
- * "Due now" - never scheduled, or scheduled for today or earlier.
+ * "Due now" - never scheduled, or scheduled for any time up to the end of
+ * today (Indian time - the database session runs on IST, so date_trunc('day')
+ * is IST midnight).
  *
- * The one-day window is the queue's own: a callback set for this evening should
- * appear in this morning's work, because a caller who sees it only after six
- * o'clock will not be at their desk.
+ * It used to be "before this moment tomorrow", a rolling 24 hours. So a
+ * callback booked for "tomorrow 10am" at 11am today was already due - the
+ * caller said "I'll ring you tomorrow" and the queue handed the person back
+ * within the hour. Today means today.
  */
 export const DUE_NOW = `
-  (l.next_follow_up_at IS NULL OR l.next_follow_up_at < NOW() + INTERVAL '1 day')`;
+  (l.next_follow_up_at IS NULL OR l.next_follow_up_at < date_trunc('day', NOW()) + INTERVAL '1 day')`;
+
+/** Not on another caller's call right now. $n is the caller's own id. */
+export const NOT_CLAIMED_BY_OTHERS = (n: number) => `
+  (l.claimed_by IS NULL OR l.claimed_by = $${n}::uuid OR l.claimed_until < NOW())`;
 
 /** How many times a number is tried before the queue gives up on it. */
 export async function maxAttempts(): Promise<number> {
@@ -160,7 +162,8 @@ router.get('/lists', async (req, res) => {
               b.filename AS batch_filename, b.sheet_name AS batch_sheet,
               a.id IS NOT NULL AS assigned_to_me,
               a.note AS assignment_note,
-              c.total, c.to_call, c.never_called, c.called, c.converted,
+              c.total, c.to_call, c.to_call_all, c.never_called, c.called, c.converted,
+              mem.added_by_hand, mem.left_out,
               sess.id AS session_id,
               sess.calls_logged AS session_calls,
               sess.last_active_at AS session_last_active
@@ -170,28 +173,32 @@ router.get('/lists', async (req, res) => {
          LEFT JOIN lead_import_batches b ON cl.import_batch_id = b.id
          LEFT JOIN calling_list_assignments a ON a.list_id = cl.id AND a.user_id = $1::uuid
          LEFT JOIN calling_sessions sess
-                ON sess.list_id = cl.id AND sess.user_id = $1::uuid AND sess.ended_at IS NULL
+                ON sess.source_key = 'list:' || cl.id::text AND sess.user_id = $1::uuid AND sess.ended_at IS NULL
          LEFT JOIN LATERAL (
            SELECT COUNT(*)::int AS total,
-                  -- to_call is the number that matters, and it is deliberately
-                  -- the exact thing the queue would hand over right now: open,
-                  -- dialable, not out of attempts, and either never scheduled
-                  -- or due. Anything looser would promise a caller work the
-                  -- queue then refuses to give them.
-                  COUNT(*) FILTER (WHERE ${CALLABLE} AND ${DUE_NOW} AND l.call_attempts < $3)::int AS to_call,
+                  -- to_call is the number that matters, and it is exactly what
+                  -- a session started on this list would hand THIS person:
+                  -- open, dialable, not out of attempts, due by the end of
+                  -- today, and theirs or nobody's. It used to leave out that
+                  -- last part, so a caller saw "40 to call" on the card and
+                  -- was handed 12 - the other 28 belonged to colleagues.
+                  COUNT(*) FILTER (WHERE ${CALLABLE} AND ${DUE_NOW} AND l.call_attempts < $3
+                                     AND (l.assigned_to = $1::uuid OR l.assigned_to IS NULL))::int AS to_call,
+                  -- The same for the whole team, for the admin's view of a
+                  -- list's progress.
+                  COUNT(*) FILTER (WHERE ${CALLABLE} AND ${DUE_NOW} AND l.call_attempts < $3)::int AS to_call_all,
                   COUNT(*) FILTER (WHERE l.last_contacted_at IS NULL)::int AS never_called,
                   COUNT(*) FILTER (WHERE l.last_contacted_at IS NOT NULL)::int AS called,
                   COUNT(*) FILTER (WHERE l.converted_at IS NOT NULL)::int AS converted
              FROM leads l
              LEFT JOIN crm_statuses s ON l.status = s.slug
-            WHERE (cl.import_batch_id IS NULL OR l.import_batch_id = cl.import_batch_id)
-              AND (cl.tag         IS NULL OR cl.tag = ANY(l.tags))
-              AND (cl.preacher_id IS NULL OR l.preacher_id = cl.preacher_id)
-              AND (cl.status_slug IS NULL OR l.status = cl.status_slug)
-              AND (cl.source      IS NULL OR l.source = cl.source)
-              AND (cl.city        IS NULL OR l.city ILIKE '%' || cl.city || '%')
-              AND (cl.min_external_total IS NULL OR l.external_total_donated >= cl.min_external_total)
+            WHERE ${LIST_MATCH('cl', 'l')}
          ) c ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT COUNT(*) FILTER (WHERE m.kind = 'include')::int AS added_by_hand,
+                  COUNT(*) FILTER (WHERE m.kind = 'exclude')::int AS left_out
+             FROM calling_list_members m WHERE m.list_id = cl.id
+         ) mem ON TRUE
         WHERE ($2::boolean OR cl.active)
         ORDER BY assigned_to_me DESC, cl.active DESC, c.to_call DESC NULLS LAST, cl.name`,
       [userId, includeRetired, await maxAttempts()]
@@ -215,8 +222,8 @@ router.post('/lists', authorize('admin', 'accountant'), async (req, res) => {
     const r = await pool.query(
       `INSERT INTO calling_lists
          (name, description, import_batch_id, tag, preacher_id, status_slug, source, city,
-          min_external_total, origin, created_by)
-       VALUES ($1,$2,$3::uuid,$4,$5::uuid,$6,$7,$8,$9::numeric,$10,$11::uuid)
+          min_external_total, origin, created_by, members_only)
+       VALUES ($1,$2,$3::uuid,$4,$5::uuid,$6,$7,$8,$9::numeric,$10,$11::uuid,$12::boolean)
        RETURNING *`,
       [
         name,
@@ -232,8 +239,13 @@ router.post('/lists', authorize('admin', 'accountant'), async (req, res) => {
           : Number(b.min_external_total),
         str(b.origin, 12) ?? 'manual',
         req.user?.userId ?? null,
+        b.members_only === true,
       ]
     );
+    // A list made from a selection on the leads screen arrives with its
+    // people, so "make a list of these" is one action rather than two.
+    const leadIds = uuids(b.lead_ids);
+    if (leadIds.length) await addMembers(r.rows[0].id, leadIds, 'include', req.user?.userId ?? null);
     res.status(201).json(r.rows[0]);
   } catch (err) {
     console.error('crm.createList error:', err);
@@ -241,28 +253,256 @@ router.post('/lists', authorize('admin', 'accountant'), async (req, res) => {
   }
 });
 
+/**
+ * PUT /lists/:id - rename, retire, or change what the list selects.
+ *
+ * The filter fields used to be fixed at creation, so a list built on the
+ * wrong city had to be retired and rebuilt - losing everybody's place in it.
+ * A field sent as "" or null clears it; a field not sent is left alone.
+ */
 router.put('/lists/:id', authorize('admin', 'accountant'), async (req, res) => {
   const b = req.body ?? {};
+  const has = (k: string) => Object.prototype.hasOwnProperty.call(b, k);
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  const set = (col: string, v: unknown, cast = '') => {
+    values.push(v);
+    sets.push(`${col} = $${values.length}${cast}`);
+  };
+  if (has('name')) {
+    const n = str(b.name, 160);
+    if (!n) return res.status(400).json({ error: 'A list needs a name' });
+    set('name', n);
+  }
+  if (has('description')) set('description', str(b.description, 2000));
+  if (typeof b.active === 'boolean') set('active', b.active, '::boolean');
+  if (typeof b.members_only === 'boolean') set('members_only', b.members_only, '::boolean');
+  if (has('tag')) set('tag', str(b.tag, 40));
+  if (has('preacher_id')) set('preacher_id', str(b.preacher_id, 36), '::uuid');
+  if (has('status_slug')) set('status_slug', str(b.status_slug, 40));
+  if (has('source')) set('source', str(b.source, 40));
+  if (has('city')) set('city', str(b.city, 80));
+  if (has('import_batch_id')) set('import_batch_id', str(b.import_batch_id, 36), '::uuid');
+  if (has('min_external_total'))
+    set(
+      'min_external_total',
+      b.min_external_total === '' || b.min_external_total === null || !Number.isFinite(Number(b.min_external_total))
+        ? null
+        : Number(b.min_external_total),
+      '::numeric'
+    );
   try {
+    if (!sets.length) {
+      const r = await pool.query(`SELECT * FROM calling_lists WHERE id = $1`, [req.params.id]);
+      if (!r.rows.length) return res.status(404).json({ error: 'No such list' });
+      return res.json(r.rows[0]);
+    }
+    values.push(req.params.id);
     const r = await pool.query(
-      `UPDATE calling_lists SET
-         name        = COALESCE($1, name),
-         description = COALESCE($2, description),
-         active      = COALESCE($3::boolean, active),
-         updated_at  = NOW()
-       WHERE id = $4 RETURNING *`,
-      [
-        str(b.name, 160),
-        str(b.description, 2000),
-        typeof b.active === 'boolean' ? b.active : null,
-        req.params.id,
-      ]
+      `UPDATE calling_lists SET ${sets.join(', ')}, updated_at = NOW()
+        WHERE id = $${values.length} RETURNING *`,
+      values
     );
     if (!r.rows.length) return res.status(404).json({ error: 'No such list' });
     res.json(r.rows[0]);
   } catch (err) {
     console.error('crm.updateList error:', err);
     res.status(500).json({ error: 'Could not save that list' });
+  }
+});
+
+/**
+ * GET /lists/preview - how many people a filter would find, before saving it.
+ *
+ * Run through LIST_MATCH against a throwaway row built from the query, so the
+ * number on the form is computed by the same SQL the saved list will use.
+ */
+router.get('/lists/preview', async (req, res) => {
+  const q = req.query as Record<string, unknown>;
+  const minExt = Number(q.min_external_total);
+  try {
+    const r = await pool.query(
+      `WITH cl AS (
+         SELECT '00000000-0000-0000-0000-000000000000'::uuid AS id,
+                $1::uuid AS import_batch_id, $2::text AS tag, $3::uuid AS preacher_id,
+                $4::text AS status_slug, $5::text AS source, $6::text AS city,
+                $7::numeric AS min_external_total, FALSE AS members_only
+       )
+       SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE ${CALLABLE} AND ${DUE_NOW} AND l.call_attempts < $8)::int AS to_call
+         FROM leads l
+         LEFT JOIN crm_statuses s ON l.status = s.slug, cl
+        WHERE ${LIST_MATCH('cl', 'l')}`,
+      [
+        str(q.import_batch_id, 36),
+        str(q.tag, 40),
+        str(q.preacher_id, 36),
+        str(q.status_slug, 40),
+        str(q.source, 40),
+        str(q.city, 80),
+        q.min_external_total !== undefined && q.min_external_total !== '' && Number.isFinite(minExt) ? minExt : null,
+        await maxAttempts(),
+      ]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('crm.previewList error:', err);
+    res.status(500).json({ error: 'Could not count that' });
+  }
+});
+
+/* ------------------------------------------------------------- members */
+
+function uuids(v: unknown): string[] {
+  const re = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return Array.isArray(v) ? [...new Set(v.map(String).filter((x) => re.test(x)))].slice(0, 5000) : [];
+}
+
+async function addMembers(listId: string, leadIds: string[], kind: 'include' | 'exclude', by: string | null) {
+  const r = await pool.query(
+    `INSERT INTO calling_list_members (list_id, lead_id, kind, added_by)
+     SELECT $1::uuid, id, $3, $4::uuid FROM leads WHERE id = ANY($2::uuid[])
+     ON CONFLICT (list_id, lead_id) DO UPDATE SET kind = EXCLUDED.kind, added_by = EXCLUDED.added_by, created_at = NOW()
+     RETURNING lead_id`,
+    [listId, leadIds, kind, by]
+  );
+  return r.rowCount ?? 0;
+}
+
+/**
+ * POST /lists/:id/members - add people to a list by hand, or leave them out.
+ *
+ * { lead_ids, action: 'include' | 'exclude' | 'remove' }. 'remove' forgets
+ * the hand-made decision, so the person is in or out by the filter again.
+ */
+router.post('/lists/:id/members', authorize('admin', 'accountant'), async (req, res) => {
+  const ids = uuids(req.body?.lead_ids);
+  const action = String(req.body?.action ?? 'include');
+  if (!ids.length) return res.status(400).json({ error: 'Pick at least one person' });
+  try {
+    const list = await pool.query(`SELECT id FROM calling_lists WHERE id = $1`, [req.params.id]);
+    if (!list.rows.length) return res.status(404).json({ error: 'No such list' });
+    let changed = 0;
+    if (action === 'remove') {
+      const r = await pool.query(`DELETE FROM calling_list_members WHERE list_id = $1 AND lead_id = ANY($2::uuid[])`, [
+        req.params.id,
+        ids,
+      ]);
+      changed = r.rowCount ?? 0;
+    } else if (action === 'include' || action === 'exclude') {
+      changed = await addMembers(String(req.params.id), ids, action, req.user?.userId ?? null);
+    } else return res.status(400).json({ error: `Unknown action "${action}"` });
+    res.json({ requested: ids.length, changed });
+  } catch (err) {
+    console.error('crm.listMembers error:', err);
+    res.status(500).json({ error: 'Could not change who is on that list' });
+  }
+});
+
+/** GET /lists/:id/members - the hand-made decisions, for the list editor. */
+router.get('/lists/:id/members', async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT m.lead_id, m.kind, m.created_at, l.name, l.phone, u.name AS added_by_name
+         FROM calling_list_members m
+         JOIN leads l ON l.id = m.lead_id
+         LEFT JOIN users u ON u.id = m.added_by
+        WHERE m.list_id = $1
+        ORDER BY m.kind, lower(l.name) NULLS LAST
+        LIMIT 2000`,
+      [req.params.id]
+    );
+    res.json({ members: r.rows });
+  } catch (err) {
+    console.error('crm.getListMembers error:', err);
+    res.status(500).json({ error: 'Could not load that list' });
+  }
+});
+
+/**
+ * POST /lists/:id/split - share a list out between callers.
+ *
+ * Deals the list's callable people round-robin, in the order the queue would
+ * ring them, so every caller gets a fair share of the urgent ones rather than
+ * one person getting all the overdue promises. Only people nobody owns are
+ * dealt unless `include_assigned` is set: taking a colleague's leads off them
+ * is a decision, not a side effect.
+ *
+ * Also hands the list itself to each of them, so it is first on their start
+ * screen tomorrow.
+ */
+router.post('/lists/:id/split', authorize('admin', 'accountant'), async (req, res) => {
+  const userIds = uuids(req.body?.user_ids);
+  if (!userIds.length) return res.status(400).json({ error: 'Pick who to share it between' });
+  const includeAssigned = req.body?.include_assigned === true;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const people = await client.query(
+      `SELECT id FROM users WHERE id = ANY($1::uuid[]) AND active IS DISTINCT FROM FALSE`,
+      [userIds]
+    );
+    const valid = userIds.filter((u) => people.rows.some((r) => r.id === u));
+    if (!valid.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'None of those people can take calls' });
+    }
+
+    const leads = await client.query(
+      `SELECT l.id FROM leads l
+         LEFT JOIN crm_statuses s ON l.status = s.slug
+         JOIN calling_lists cl ON cl.id = $1::uuid
+        WHERE ${LIST_MATCH('cl', 'l')}
+          AND ${CALLABLE}
+          AND ($2::boolean OR l.assigned_to IS NULL)
+        ORDER BY CASE WHEN l.next_follow_up_at < NOW() THEN 0
+                      WHEN l.next_follow_up_at IS NOT NULL THEN 1
+                      WHEN l.last_contacted_at IS NULL THEN 2 ELSE 3 END,
+                 l.next_follow_up_at ASC NULLS LAST, l.created_at ASC`,
+      [req.params.id, includeAssigned]
+    );
+
+    const buckets = new Map<string, string[]>(valid.map((u) => [u, []]));
+    leads.rows.forEach((r, n) => buckets.get(valid[n % valid.length])!.push(r.id));
+
+    for (const [uid, ids] of buckets) {
+      if (ids.length) {
+        await client.query(
+          `UPDATE leads SET assigned_to = $1::uuid, assigned_at = NOW(), updated_at = NOW()
+            WHERE id = ANY($2::uuid[])`,
+          [uid, ids]
+        );
+        await client.query(
+          `INSERT INTO lead_activities (lead_id, user_id, kind, to_value, note)
+           SELECT id, $2::uuid, 'assignment', $1::text, 'Shared out from a calling list'
+             FROM unnest($3::uuid[]) AS id`,
+          [uid, req.user?.userId ?? null, ids]
+        );
+      }
+      await client.query(
+        `INSERT INTO calling_list_assignments (list_id, user_id, assigned_by)
+         VALUES ($1,$2,$3) ON CONFLICT (list_id, user_id) DO NOTHING`,
+        [req.params.id, uid, req.user?.userId ?? null]
+      );
+    }
+    await client.query('COMMIT');
+
+    const names = await pool.query(`SELECT id, name FROM users WHERE id = ANY($1::uuid[])`, [valid]);
+    res.json({
+      dealt: leads.rows.length,
+      shares: valid.map((u) => ({
+        user_id: u,
+        name: names.rows.find((r) => r.id === u)?.name ?? null,
+        count: buckets.get(u)!.length,
+      })),
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    console.error('crm.splitList error:', err);
+    res.status(500).json({ error: 'Could not share that list out' });
+  } finally {
+    client.release();
   }
 });
 
@@ -324,177 +564,6 @@ router.get('/lists/:id/assignees', async (req, res) => {
   } catch (err) {
     console.error('crm.listAssignees error:', err);
     res.status(500).json({ error: 'Could not load who this list is for' });
-  }
-});
-
-/* ---------------------------------------------------------------- sessions */
-
-/**
- * POST /sessions - open or resume a run at a list.
- *
- * Idempotent by design. Pressing Start calling twice, or opening it in a second
- * tab, must not create a second session and split the day's tally in half - so
- * an open session for this caller and list is returned as it stands.
- *
- * list_id omitted means Everything, which is stored as NULL and made unique by
- * the partial index's COALESCE to the zero UUID.
- */
-router.post('/sessions', async (req, res) => {
-  const listId = str(req.body?.list_id, 36);
-  try {
-    if (listId) {
-      const exists = await pool.query(`SELECT id FROM calling_lists WHERE id = $1 AND active`, [listId]);
-      if (!exists.rows.length) return res.status(404).json({ error: 'That list is not available' });
-    }
-
-    const r = await pool.query(
-      `INSERT INTO calling_sessions (user_id, list_id)
-       VALUES ($1,$2::uuid)
-       ON CONFLICT (user_id, COALESCE(list_id, '00000000-0000-0000-0000-000000000000'::uuid))
-         WHERE ended_at IS NULL
-       DO UPDATE SET last_active_at = NOW()
-       RETURNING *`,
-      [req.user?.userId ?? null, listId]
-    );
-    res.status(201).json({ session: r.rows[0], resumed: r.rows[0].calls_logged > 0 });
-  } catch (err) {
-    console.error('crm.openSession error:', err);
-    res.status(500).json({ error: 'Could not start that calling session' });
-  }
-});
-
-/**
- * GET /sessions/current - what this caller had open, if anything.
- *
- * This is what makes "stop today, continue tomorrow" real: the caller opens
- * DRM and the screen already knows which list they were on and how far they
- * got, without them having to remember.
- */
-router.get('/sessions/current', async (req, res) => {
-  try {
-    const r = await pool.query(
-      `SELECT s.*, cl.name AS list_name, cl.import_batch_id,
-              s.paused_at IS NOT NULL AS paused
-         FROM calling_sessions s
-         LEFT JOIN calling_lists cl ON s.list_id = cl.id
-        WHERE s.user_id = $1 AND s.ended_at IS NULL
-        ORDER BY s.last_active_at DESC
-        LIMIT 1`,
-      [req.user?.userId ?? null]
-    );
-    res.json({ session: r.rows[0] ?? null });
-  } catch (err) {
-    console.error('crm.currentSession error:', err);
-    res.status(500).json({ error: 'Could not load your calling session' });
-  }
-});
-
-/**
- * POST /sessions/:id/pause - stepping away, not stopping.
- *
- * WHY THIS IS NOT "END"
- * Ending a run is what makes tomorrow's screen offer a fresh start instead of
- * the list somebody was halfway through, so a caller going to lunch must not
- * end anything. Pausing keeps the run open - it is still the one "where you
- * left off" finds - and only records that they stepped away and when.
- *
- * Resuming is just opening the session again, which POST /sessions already
- * does, so there is no separate resume route to forget to call.
- */
-router.post('/sessions/:id/pause', async (req, res) => {
-  try {
-    const r = await pool.query(
-      `UPDATE calling_sessions SET
-         paused_at = NOW(),
-         pause_note = $3,
-         last_active_at = NOW()
-       WHERE id = $1 AND user_id = $2 AND ended_at IS NULL
-       RETURNING *`,
-      [req.params.id, req.user?.userId ?? null, str(req.body?.note, 200)]
-    );
-    if (!r.rows.length) return res.status(404).json({ error: 'That run is already finished' });
-    res.json({ session: r.rows[0] });
-  } catch (err) {
-    console.error('crm.pauseSession error:', err);
-    res.status(500).json({ error: 'Could not pause that' });
-  }
-});
-
-/** POST /sessions/:id/resume - back at the desk. */
-router.post('/sessions/:id/resume', async (req, res) => {
-  try {
-    const r = await pool.query(
-      `UPDATE calling_sessions SET paused_at = NULL, pause_note = NULL, last_active_at = NOW()
-        WHERE id = $1 AND user_id = $2 AND ended_at IS NULL
-        RETURNING *`,
-      [req.params.id, req.user?.userId ?? null]
-    );
-    if (!r.rows.length) return res.status(404).json({ error: 'That run is already finished' });
-    res.json({ session: r.rows[0] });
-  } catch (err) {
-    console.error('crm.resumeSession error:', err);
-    res.status(500).json({ error: 'Could not resume that' });
-  }
-});
-
-/** POST /sessions/:id/end - stopping for the day. */
-router.post('/sessions/:id/end', async (req, res) => {
-  try {
-    const r = await pool.query(
-      `UPDATE calling_sessions SET ended_at = NOW()
-        WHERE id = $1 AND user_id = $2 AND ended_at IS NULL
-        RETURNING *`,
-      [req.params.id, req.user?.userId ?? null]
-    );
-    if (!r.rows.length) return res.status(404).json({ error: 'That session is already finished' });
-    res.json({ session: r.rows[0] });
-  } catch (err) {
-    console.error('crm.endSession error:', err);
-    res.status(500).json({ error: 'Could not finish that session' });
-  }
-});
-
-/**
- * GET /sessions/history - the caller's recent shifts.
- *
- * Read from the activity log rather than from the session counters, because
- * the log is the thing reports are built on and a history screen that
- * disagreed with the reports would be worse than no history screen.
- */
-router.get('/sessions/history', async (req, res) => {
-  // Only an admin may ask about somebody else. The user ids are handed out
-  // freely by /config to populate dropdowns, so without this any caller could
-  // read a colleague's last thirty shifts by pasting their id into the query.
-  const asked = str(req.query.user_id, 36);
-  const userId =
-    asked && req.user?.role === 'admin' ? asked : req.user?.userId ?? null;
-  try {
-    const rows = await pool.query(
-      `SELECT s.id, s.started_at, s.last_active_at, s.ended_at,
-              cl.name AS list_name,
-              COUNT(a.id)::int AS calls,
-              -- The stored column, not a recomputation from the disposition
-              -- table. The schema says why: a caller can mark a call connected
-              -- that ended in an outcome the temple later reclassifies, and
-              -- the connected/unanswered split must not shift under old
-              -- reports. Deriving it here made every past shift in this screen
-              -- change the moment somebody edited a disposition in Settings,
-              -- while the dashboard and the caller report kept the real
-              -- numbers - two screens, two answers, same shift.
-              COUNT(a.id) FILTER (WHERE a.connected)::int AS connected
-         FROM calling_sessions s
-         LEFT JOIN calling_lists cl ON s.list_id = cl.id
-         LEFT JOIN lead_activities a ON a.session_id = s.id AND a.kind = 'call'
-        WHERE s.user_id = $1
-        GROUP BY s.id, cl.name
-        ORDER BY s.last_active_at DESC
-        LIMIT 30`,
-      [userId]
-    );
-    res.json({ sessions: rows.rows });
-  } catch (err) {
-    console.error('crm.sessionHistory error:', err);
-    res.status(500).json({ error: 'Could not load your calling history' });
   }
 });
 

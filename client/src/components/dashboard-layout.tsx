@@ -27,6 +27,8 @@ import { Sidebar, navLocation } from "./sidebar";
 import { ReminderBell } from "./reminder-bell";
 import { CallingAlertsProvider } from "./calling-alerts";
 import { Icon } from "./icons";
+import { GlobalSearch } from "./global-search";
+import { Toaster } from "./toast";
 
 function Breadcrumb() {
   const pathname = usePathname();
@@ -62,12 +64,15 @@ function Breadcrumb() {
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
+  // On a phone the search box takes the whole bar, so it opens on demand.
+  const [searching, setSearching] = useState(false);
   const pathname = usePathname();
 
   // Close on navigation. Without this, tapping a link on a phone leaves the
   // drawer covering the page you just asked for.
   useEffect(() => {
     setOpen(false);
+    setSearching(false);
   }, [pathname]);
 
   // Escape closes it, and the body doesn't scroll behind an open drawer.
@@ -149,13 +154,33 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               <Breadcrumb />
             </div>
 
-            <div className="ml-auto flex items-center gap-1">
+            {/* Search: in the bar from tablet width up; behind an icon on a
+                phone, where it opens as its own row below the bar. */}
+            <div className="ml-auto hidden w-full max-w-md md:block">
+              <GlobalSearch />
+            </div>
+
+            <div className="ml-auto flex items-center gap-1 md:ml-2">
+              <button
+                onClick={() => setSearching((v) => !v)}
+                aria-label="Search"
+                aria-expanded={searching}
+                className="grid h-9 w-9 place-items-center rounded-control text-ink-soft transition-colors hover:bg-sunken md:hidden"
+              >
+                <Icon name={searching ? "x" : "search"} size={18} />
+              </button>
               <ReminderBell />
             </div>
           </header>
+          {searching && (
+            <div className="sticky top-14 z-30 border-b border-line-soft bg-surface px-4 py-2 md:hidden">
+              <GlobalSearch autoFocus />
+            </div>
+          )}
 
           <div className="mx-auto max-w-[1400px] px-4 pb-8 pt-5 sm:px-6 sm:pt-6">{children}</div>
         </main>
+        <Toaster />
       </div>
     </CallingAlertsProvider>
   );

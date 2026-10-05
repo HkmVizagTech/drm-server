@@ -130,7 +130,14 @@ export const navGroups: NavGroup[] = [
  * /calling/lists, and without that rule every calling screen would claim to be
  * "Overview".
  */
+// Screens that are not in the nav but belong to an entry that is. The call
+// screen is reached from "Start calling"; without this it matched /calling
+// and lit up "Overview", with a breadcrumb reading "Overview > Details".
+const NAV_ALIASES: [prefix: string, href: string][] = [["/calling/queue", "/calling/start"]];
+
 export function navLocation(pathname: string): { group: string; item: NavItem } | null {
+  const alias = NAV_ALIASES.find(([p]) => pathname === p || pathname.startsWith(`${p}/`));
+  if (alias) pathname = alias[1];
   let best: { group: string; item: NavItem } | null = null;
   for (const group of navGroups) {
     for (const item of group.items) {

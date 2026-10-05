@@ -14,7 +14,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
+import { callHref, runHref, startRun } from "@/lib/calling";
+import { toast } from "@/components/toast";
 import { useAuth } from "@/lib/auth-context";
 import { currency, dueLabel, istDayPlus, istInputToISO, istInstant, number, shortDate } from "@/lib/format";
 import {
@@ -26,8 +29,8 @@ import {
   CardHeader,
   EmptyState,
   Field,
+  Icon,
   Input,
-  LinkButton,
   Modal,
   PageHeader,
   SearchInput,
@@ -36,6 +39,7 @@ import {
   Skeleton,
   Textarea,
   Toolbar,
+  buttonClass,
 } from "@/components/ui";
 import { ALERT_OPTIONS, DEFAULT_ALERTS } from "@/lib/reminders";
 
@@ -148,26 +152,42 @@ export default function FollowUpsPage() {
     return s ? `&${s}` : "";
   }, [assignee, batch, preacher, search]);
 
+  const fetchBuckets = useCallback(async () => {
+    const results = await Promise.all(
+      BUCKETS.map((b) =>
+        apiClient.get<{ leads: Lead[] }>(`/api/crm/leads?${b.query}&sort=due&limit=100${extra}`)
+      )
+    );
+    return Object.fromEntries(BUCKETS.map((b, i) => [b.key, results[i].leads])) as Record<string, Lead[]>;
+  }, [extra]);
+
+  /** After an action on a row: the board as it now stands. */
   const load = useCallback(async () => {
-    setLoading(true);
     try {
-      const results = await Promise.all(
-        BUCKETS.map((b) =>
-          apiClient.get<{ leads: Lead[] }>(`/api/crm/leads?${b.query}&sort=due&limit=100${extra}`)
-        )
-      );
-      setData(Object.fromEntries(BUCKETS.map((b, i) => [b.key, results[i].leads])));
+      setData(await fetchBuckets());
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load follow-ups");
-    } finally {
-      setLoading(false);
     }
-  }, [extra]);
+  }, [fetchBuckets]);
 
+  // On open and on every change of filter. The answer is applied in the
+  // callback, and dropped if the filters moved on before it arrived - typing
+  // in the search box fires several of these, and the last one must win.
   useEffect(() => {
-    void load();
-  }, [load]);
+    let live = true;
+    fetchBuckets()
+      .then((d) => {
+        if (!live) return;
+        setData(d);
+        setError(null);
+      })
+      .catch((e) => live && setError(e instanceof Error ? e.message : "Could not load follow-ups"))
+      .finally(() => live && setLoading(false));
+    return () => {
+      live = false;
+    };
+  }, [fetchBuckets]);
 
   useEffect(() => {
     apiClient
@@ -178,14 +198,46 @@ export default function FollowUpsPage() {
       .catch(() => undefined);
   }, []);
 
-  async function push(id: string, days: number) {
-    await apiClient.post(`/api/crm/leads/${id}/follow-up`, { at: inDays(days) });
-    await load();
+  async function push(l: Lead, days: number) {
+    try {
+      await apiClient.post(`/api/crm/leads/${l.id}/follow-up`, { at: inDays(days) });
+      toast(`${l.name || l.phone} moved to ${days === 1 ? "tomorrow" : "next week"}`);
+      await load();
+    } catch (e) {
+      toast.error("Could not move that callback", e instanceof Error ? e.message : undefined);
+    }
   }
 
-  async function drop(id: string) {
-    await apiClient.put(`/api/crm/leads/${id}`, { next_follow_up_at: null });
-    await load();
+  async function drop(l: Lead) {
+    try {
+      await apiClient.put(`/api/crm/leads/${l.id}`, { next_follow_up_at: null });
+      toast(`Callback for ${l.name || l.phone} dropped`);
+      await load();
+    } catch (e) {
+      toast.error("Could not drop that callback", e instanceof Error ? e.message : undefined);
+    }
+  }
+
+  // "Start calling these" is a run over the follow-ups that are due - the
+  // same people as the two top buckets, one after another on the call screen,
+  // with the order and the place kept by the server.
+  const router = useRouter();
+  const [starting, setStarting] = useState(false);
+  async function callThese() {
+    setStarting(true);
+    try {
+      const s = await startRun({ kind: "follow_ups" });
+      if (s.empty || !s.session) {
+        toast.info("Nobody to call right now", "No callbacks are due, or a colleague has them.");
+        setStarting(false);
+        return;
+      }
+      if (s.resumed) toast.info("Carrying on where you left off");
+      router.push(runHref(s.session.id));
+    } catch (e) {
+      toast.error("Could not start calling", e instanceof Error ? e.message : undefined);
+      setStarting(false);
+    }
   }
 
   const overdueCount = data.overdue?.length ?? 0;
@@ -224,9 +276,9 @@ export default function FollowUpsPage() {
             <Button variant="secondary" icon="bell" onClick={() => setAdding(true)}>
               Someone promised to give
             </Button>
-            <LinkButton href="/calling/queue" variant="primary" icon="phoneOutgoing">
-              Start calling
-            </LinkButton>
+            <Button icon="phoneOutgoing" loading={starting} onClick={() => void callThese()}>
+              Start calling these
+            </Button>
           </>
         }
       />
@@ -359,20 +411,40 @@ export default function FollowUpsPage() {
                         </p>
                       </div>
 
-                      <div className="flex items-center gap-1.5">
-                        <LinkButton href={`tel:+91${l.phone}`} variant="primary" size="xs" icon="phone">
+                      {/* A row of four on a phone, each a thumb tall; back to
+                          a compact strip at a desk. Call goes through the call
+                          screen, so its outcome is logged and the board
+                          updates, instead of a bare tel: link DRM never hears
+                          about. */}
+                      <div className="grid w-full grid-cols-4 gap-1.5 sm:flex sm:w-auto sm:items-center">
+                        <Link
+                          href={callHref(l.id, "/follow-ups")}
+                          className={buttonClass("primary", "sm", "max-sm:h-11 max-sm:text-sm")}
+                        >
+                          <Icon name="phone" size={14} />
                           Call
-                        </LinkButton>
-                        <Button variant="secondary" size="xs" onClick={() => void push(l.id, 1)}>
+                        </Link>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          className="max-sm:h-11 max-sm:px-1"
+                          onClick={() => void push(l, 1)}
+                        >
                           Tomorrow
                         </Button>
-                        <Button variant="secondary" size="xs" onClick={() => void push(l.id, 7)}>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          className="max-sm:h-11 max-sm:px-1"
+                          onClick={() => void push(l, 7)}
+                        >
                           Next week
                         </Button>
                         <Button
                           variant="ghost"
-                          size="xs"
-                          onClick={() => void drop(l.id)}
+                          size="sm"
+                          className="max-sm:h-11"
+                          onClick={() => void drop(l)}
                           title="Remove the callback without changing the lead"
                         >
                           Drop
@@ -397,9 +469,10 @@ export default function FollowUpsPage() {
                 : "Follow-ups appear here as callers book them during calls, and you can add one yourself when a donor rings the temple."
             }
             action={
-              <LinkButton href="/calling/queue" variant="primary" icon="phoneOutgoing">
-                Start calling
-              </LinkButton>
+              <Link href="/calling/start" className={buttonClass("primary", "md")}>
+                <Icon name="phoneOutgoing" size={15} />
+                Choose who to call
+              </Link>
             }
           />
         </Card>
@@ -411,6 +484,7 @@ export default function FollowUpsPage() {
           onClose={() => setAdding(false)}
           onDone={async () => {
             setAdding(false);
+            toast.success("Promise recorded", "You will be alerted before the day.");
             await load();
           }}
         />

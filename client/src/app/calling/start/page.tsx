@@ -1,296 +1,345 @@
 "use client";
 
-// Where a shift begins.
+// Where a shift begins: whom do you want to call?
 //
 // WHAT THIS REPLACES
-// "Start calling" used to go straight to the queue, which handed over whatever
-// was most overdue across every lead in DRM. The order was right; the unit of
-// work was wrong. A caller sits down to work THE JANMASHTAMI SHEET, not "the
-// queue", and when they stop at forty they need to open the same sheet
-// tomorrow and carry on at forty-one.
+// "Start calling" used to go straight to one global queue, and this screen
+// only offered the uploaded lists beside it. But callers do not think in lists
+// alone. They think "ring the people who nearly gave this week", "ring
+// everyone who promised for today", "ring my own leads" - so each of those is
+// a card here, with the number it will actually hold, and one tap starts it.
 //
-// So this screen asks one question - which list - and answers the two things a
-// caller needs to choose: how much is left in each, and where they were.
+// THE NUMBERS ARE EXACT
+// Every count comes from the server running the same query the run would
+// snapshot, so "14" on a card is fourteen people on the call screen - not an
+// estimate that turns out to be six. A card with nobody behind it says so and
+// cannot be started, rather than opening an empty call screen.
 //
-// THE RESUME BANNER IS THE POINT
-// If there is an unfinished run, it is the first thing on the screen and one
-// press away from continuing. Everything else here is for the day you start
-// something new.
+// CARRYING ON COMES FIRST
+// An unfinished run is the first thing on the screen and one tap from
+// continuing. Starting the same source again also carries on with it - the
+// server never splits a morning's place in two - so "Start over" is the only
+// way to throw a place away, and it asks twice.
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { apiClient } from "@/lib/api";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
-import { currency, number, relativeDate } from "@/lib/format";
+import { number, relativeDate } from "@/lib/format";
+import {
+  endRun,
+  getSources,
+  runHref,
+  startRun,
+  type ListSourceCard,
+  type OpenRun,
+  type RunSource,
+  type SourceCard,
+  type SourceKind,
+  type SourcesResponse,
+} from "@/lib/calling";
 import {
   Alert,
   Badge,
   Button,
   Card,
-  EmptyState,
+  Icon,
   PageHeader,
   Skeleton,
-  buttonPrimary,
-  buttonSecondary,
+  Spinner,
+  buttonClass,
+  type IconName,
 } from "@/components/ui";
+import { toast } from "@/components/toast";
 
-interface CallingList {
-  id: string;
-  name: string;
-  description: string | null;
-  active: boolean;
-  origin: string;
-  tag: string | null;
-  city: string | null;
-  preacher_code: string | null;
-  preacher_name: string | null;
-  batch_filename: string | null;
-  batch_sheet: string | null;
-  min_external_total: string | null;
-  assigned_to_me: boolean;
-  assignment_note: string | null;
-  total: number;
-  to_call: number;
-  never_called: number;
-  called: number;
-  converted: number;
-  session_id: string | null;
-  session_calls: number | null;
-  session_last_active: string | null;
-}
+/** How each fixed source is described, in the order they matter. */
+const FIXED: Record<
+  Exclude<SourceKind, "list" | "selection">,
+  { icon: IconName; blurb: string; empty: string }
+> = {
+  nearly_gave: {
+    icon: "sparkle",
+    blurb: "Tried to give on a website and didn't finish. The warmest calls you can make.",
+    empty: "Nobody nearly gave lately",
+  },
+  reminders: {
+    icon: "bell",
+    blurb: "Donors who named a day for their donation — and it has come.",
+    empty: "No promises due today",
+  },
+  follow_ups: {
+    icon: "calendar",
+    blurb: "Callbacks booked for today, and any that are late.",
+    empty: "No callbacks due today",
+  },
+  mine: {
+    icon: "user",
+    blurb: "Everyone assigned to you who is due a call.",
+    empty: "Nobody of yours is due today",
+  },
+  everything: {
+    icon: "users",
+    blurb: "Every lead you can see that is due, most overdue first.",
+    empty: "Nobody due today",
+  },
+};
+const ORDER: (keyof typeof FIXED)[] = ["nearly_gave", "reminders", "follow_ups", "mine", "everything"];
 
-interface CurrentSession {
-  id: string;
-  list_id: string | null;
-  list_name: string | null;
-  calls_logged: number;
-  connected: number;
-  started_at: string;
-  last_active_at: string;
-}
-
-/** What a list is made of, said in the words the office uses. */
-function describe(l: CallingList): string {
-  const bits: string[] = [];
-  if (l.batch_filename) {
-    bits.push(l.batch_sheet ? `${l.batch_filename} · ${l.batch_sheet}` : l.batch_filename);
-  }
-  if (l.tag) bits.push(`tagged ${l.tag}`);
-  if (l.preacher_code) bits.push(`${l.preacher_name || l.preacher_code}'s donors`);
-  if (l.city) bits.push(l.city);
-  if (l.min_external_total) bits.push(`given over ${currency(Number(l.min_external_total))}`);
-  return bits.join(" · ");
+function sourceFor(kind: SourceKind, listId: string | null): RunSource {
+  return kind === "list" && listId ? { kind, list_id: listId } : { kind };
 }
 
 export default function StartCallingPage() {
-  const router = useRouter();
-  const { user } = useAuth();
-  const [lists, setLists] = useState<CallingList[]>([]);
-  const [current, setCurrent] = useState<CurrentSession | null>(null);
-  const [everything, setEverything] = useState<number | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [starting, setStarting] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // useSearchParams (for ?list=) needs a Suspense boundary in this Next.
+  return (
+    <Suspense fallback={<StartSkeleton />}>
+      <StartCalling />
+    </Suspense>
+  );
+}
 
-  const load = useCallback(async () => {
+function StartSkeleton() {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      {[0, 1, 2, 3, 4, 5].map((i) => (
+        <Card key={i}>
+          <Skeleton className="h-4 w-2/5" />
+          <Skeleton className="mt-3 h-8 w-16" />
+          <Skeleton className="mt-3 h-3 w-4/5" />
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function StartCalling() {
+  const router = useRouter();
+  const params = useSearchParams();
+  const autoList = params.get("list");
+  const { user } = useAuth();
+  const canManage = user?.role === "admin" || user?.role === "accountant";
+
+  const [data, setData] = useState<SourcesResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  /** The key of the card being started, so only that card spins. */
+  const [starting, setStarting] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
     try {
-      const [l, s, q] = await Promise.all([
-        apiClient.get<{ lists: CallingList[] }>("/api/crm/lists"),
-        apiClient.get<{ session: CurrentSession | null }>("/api/crm/sessions/current"),
-        // Asked for one lead only: this is just to put a number on the
-        // Everything card, and pulling twenty-five leads to count them would
-        // be wasteful on a screen nobody is calling from yet.
-        apiClient.get<{ to_call: number }>("/api/crm/queue?limit=1"),
-      ]);
-      setLists(l.lists);
-      setCurrent(s.session);
-      setEverything(q.to_call);
+      setData(await getSources());
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load your calling lists");
-    } finally {
-      setLoading(false);
+      setError(e instanceof Error ? e.message : "Could not work out who there is to call");
     }
   }, []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    getSources()
+      .then(setData)
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not work out who there is to call"));
+  }, []);
 
-  async function start(listId: string | null) {
-    setStarting(listId ?? "all");
-    setError(null);
-    try {
-      // Opening a session is idempotent on the server, so this is also the
-      // resume path - pressing Continue and pressing Start on the same list do
-      // the same thing, and neither can split a day's tally into two sessions.
-      const r = await apiClient.post<{ session: { id: string } }>("/api/crm/sessions", {
-        list_id: listId ?? undefined,
+  const start = useCallback(
+    /** Resolves true once it has navigated to the run. */
+    async (key: string, source: RunSource, opts: { restart?: boolean } = {}): Promise<boolean> => {
+      setStarting(key);
+      try {
+        const s = await startRun(source, opts);
+        if (s.empty || !s.session) {
+          toast.info("Nobody to call there right now", "Everyone in it is called, booked for later, or with a colleague.");
+          setStarting(null);
+          void reload();
+          return false;
+        }
+        if (s.adopted?.created) {
+          toast.success(
+            `Added ${number(s.adopted.created)} new ${s.adopted.created === 1 ? "person" : "people"} from the website`
+          );
+        }
+        if (opts.restart) toast.success("Started over from the top");
+        else if (s.resumed) toast.info("Carrying on where you left off");
+        router.push(runHref(s.session.id));
+        return true;
+      } catch (e) {
+        toast.error("Could not start calling", e instanceof Error ? e.message : undefined);
+        setStarting(null);
+        return false;
+      }
+    },
+    [router, reload]
+  );
+
+  // ?list=<id>: the "Call this list" buttons elsewhere land here and start it.
+  // Once per visit, even if the effect runs twice.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!autoList || autoStarted.current) return;
+    autoStarted.current = true;
+    void Promise.resolve()
+      .then(() => start(`list:${autoList}`, { kind: "list", list_id: autoList }))
+      // Not navigated means it found nobody (or failed): drop ?list= so a
+      // refresh does not try, and toast, all over again.
+      .then((went) => {
+        if (!went) router.replace("/calling/start", { scroll: false });
       });
-      const q = listId ? `?list=${listId}&session=${r.session.id}` : `?session=${r.session.id}`;
-      router.push(`/calling/queue${q}`);
+  }, [autoList, start, router]);
+
+  async function finishRun(run: OpenRun) {
+    try {
+      const r = await endRun(run.id);
+      toast.success(`Finished ${run.label}`, `${r.summary.calls} call${r.summary.calls === 1 ? "" : "s"} logged`);
+      await reload();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not start calling");
-      setStarting(null);
+      toast.error("Could not finish that", e instanceof Error ? e.message : undefined);
     }
   }
 
-  const assigned = lists.filter((l) => l.assigned_to_me);
-  const others = lists.filter((l) => !l.assigned_to_me);
+  const openByKey = new Map((data?.open ?? []).map((o) => [o.key, o]));
+  const fixed = ORDER.map((k) => data?.sources.find((s) => s.kind === k)).filter((s): s is SourceCard => !!s);
+  const firstName = user?.name?.split(" ")[0];
 
   return (
     <div>
       <PageHeader
-        eyebrow="Overview"
-        title={user?.name ? `Ready when you are, ${user.name.split(" ")[0]}` : "Start calling"}
-        subtitle="Pick a list. You can stop whenever you like and pick up from the same place."
+        eyebrow="Calling"
+        title="Whom do you want to call?"
+        subtitle={`${firstName ? `Ready when you are, ${firstName}. ` : ""}Pick who to ring. Stop whenever you like — your place is kept.`}
         actions={
-          <div className="flex flex-wrap gap-2">
-            <Link href="/calling/lists" className={buttonSecondary}>
-              Manage lists
-            </Link>
-            <Link href="/calling" className={buttonSecondary}>
+          <>
+            {canManage && (
+              <Link href="/calling/lists" className={buttonClass("secondary", "md")}>
+                Manage lists
+              </Link>
+            )}
+            <Link href="/calling" className={buttonClass("secondary", "md")}>
               Overview
             </Link>
-          </div>
+          </>
         }
       />
 
-      {error && <Alert tone="danger">{error}</Alert>}
-
-      {/* ------------------------------------------------------------ resume */}
-      {current && (
-        <Card tone="brand" className="mb-5">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="min-w-0">
-              <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-brand-700">
-                Where you left off
-              </p>
-              <p className="mt-1 text-lg font-semibold text-ink">
-                {current.list_name || "Everything"}
-              </p>
-              <p className="mt-0.5 text-sm text-ink-soft">
-                {number(current.calls_logged)} call{current.calls_logged === 1 ? "" : "s"} logged
-                {current.connected > 0 && ` · ${number(current.connected)} got through`}
-                {" · last "}
-                {relativeDate(current.last_active_at)}
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {/* The one thing this screen exists to offer, at the size that
-                  says so — a caller coming back from lunch should not have to
-                  hunt for it among four same-sized buttons. */}
-              <Button
-                size="lg"
-                icon="phoneOutgoing"
-                onClick={() => void start(current.list_id)}
-                disabled={starting !== null}
-                // Spins only for the run it actually started: `start` keys the
-                // flag by list id, with "all" standing in for the global queue,
-                // so matching on that is what stops every button on the screen
-                // spinning when one of them is pressed.
-                loading={starting === (current.list_id ?? "all")}
-              >
-                Continue
-              </Button>
-              <Button
-                variant="secondary"
-                size="lg"
-                onClick={async () => {
-                  try {
-                    await apiClient.post(`/api/crm/sessions/${current.id}/end`, {});
-                    await load();
-                  } catch (e) {
-                    setError(e instanceof Error ? e.message : "Could not finish that");
-                  }
-                }}
-              >
-                Finish it
-              </Button>
-            </div>
-          </div>
-        </Card>
+      {error && (
+        <Alert tone="danger" action={<Button size="sm" variant="secondary" onClick={() => void reload()}>Try again</Button>}>
+          {error}
+        </Alert>
       )}
 
-      {loading ? (
-        <div className="grid gap-3 sm:grid-cols-2">
-          {[0, 1, 2, 3].map((i) => (
-            <Card key={i}>
-              <Skeleton className="h-4 w-2/5" />
-              <Skeleton className="mt-2 h-3 w-3/5" />
-              <Skeleton rounded="rounded-pill" className="mt-4 h-1.5 w-full" />
-            </Card>
-          ))}
-        </div>
-      ) : (
+      {autoList && starting === `list:${autoList}` && (
+        <Alert tone="info">
+          <span className="inline-flex items-center gap-2">
+            <Spinner size={14} /> Opening that list…
+          </span>
+        </Alert>
+      )}
+
+      {!data && !error && <StartSkeleton />}
+
+      {data && (
         <>
-          {assigned.length > 0 && (
-            <section className="mb-6">
+          {/* ----------------------------------------------- carry on */}
+          {data.open.length > 0 && (
+            <section className="mb-7">
               <h2 className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
-                Given to you
+                Carry on where you left off
               </h2>
               <div className="grid gap-3 sm:grid-cols-2">
-                {assigned.map((l) => (
-                  <ListCard key={l.id} list={l} starting={starting} onStart={() => void start(l.id)} />
+                {data.open.map((r) => (
+                  <OpenRunCard
+                    key={r.id}
+                    run={r}
+                    busy={starting !== null}
+                    restarting={starting === `restart:${r.id}`}
+                    onContinue={() => router.push(runHref(r.id))}
+                    onRestart={
+                      r.kind === "selection"
+                        ? undefined
+                        : () => void start(`restart:${r.id}`, sourceFor(r.kind, r.list_id), { restart: true })
+                    }
+                    onFinish={() => void finishRun(r)}
+                  />
                 ))}
               </div>
             </section>
           )}
 
-          <section className="mb-6">
+          {/* ------------------------------------------------ who to ring */}
+          <section className="mb-7">
             <h2 className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
-              {assigned.length ? "Other lists" : "Lists"}
+              {data.open.length ? "Or start something new" : "Who to ring"}
             </h2>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {fixed.map((s) => {
+                const meta = FIXED[s.kind as keyof typeof FIXED];
+                const fresh = s.kind === "nearly_gave" ? s.new_attempts ?? 0 : 0;
+                return (
+                  <SourceTile
+                    key={s.key}
+                    icon={meta.icon}
+                    label={s.label}
+                    count={s.count}
+                    blurb={meta.blurb}
+                    extra={
+                      fresh > 0
+                        ? `${number(fresh)} new from the website will be added`
+                        : undefined
+                    }
+                    empty={meta.empty}
+                    // Starting Nearly gave adds the new website attempts
+                    // first, so it is worth starting even when it holds
+                    // nobody yet.
+                    enabled={s.count > 0 || fresh > 0}
+                    emphasis={s.kind === "nearly_gave"}
+                    open={openByKey.get(s.key)}
+                    starting={starting === s.key}
+                    busy={starting !== null}
+                    onStart={() => void start(s.key, { kind: s.kind })}
+                  />
+                );
+              })}
+            </div>
+          </section>
 
-            {!others.length && !assigned.length ? (
+          {/* ----------------------------------------------------- lists */}
+          <section>
+            <h2 className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Your lists</h2>
+            {data.lists.length === 0 ? (
               <Card>
-                <EmptyState
-                  icon="list"
-                  title="No lists yet"
-                  message="A list is made every time you apply an uploaded sheet. You can also build one by hand from a tag, a preacher or a city."
-                  action={
-                    <div className="flex flex-wrap justify-center gap-2">
-                      <Link href="/calling/uploads" className={buttonPrimary}>Upload a sheet</Link>
-                      <Link href="/calling/lists" className={buttonSecondary}>Build a list</Link>
-                    </div>
-                  }
-                />
+                <p className="text-sm text-ink-muted">
+                  No calling lists yet. A list is made when an uploaded sheet is applied, or built from a tag, a
+                  preacher or a city.
+                </p>
+                {canManage && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Link href="/calling/uploads" className={buttonClass("secondary", "md")}>
+                      Upload a sheet
+                    </Link>
+                    <Link href="/calling/lists" className={buttonClass("secondary", "md")}>
+                      Build a list
+                    </Link>
+                  </div>
+                )}
               </Card>
             ) : (
-              <div className="grid gap-3 sm:grid-cols-2">
-                {others.map((l) => (
-                  <ListCard key={l.id} list={l} starting={starting} onStart={() => void start(l.id)} />
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                {data.lists.map((l: ListSourceCard) => (
+                  <SourceTile
+                    key={l.key}
+                    icon="list"
+                    label={l.label}
+                    count={l.count}
+                    blurb={l.description || undefined}
+                    badge={l.assigned_to_me ? "Assigned to you" : undefined}
+                    empty="Nobody due in this list today"
+                    enabled={l.count > 0}
+                    open={openByKey.get(l.key)}
+                    starting={starting === l.key}
+                    busy={starting !== null}
+                    onStart={() => void start(l.key, { kind: "list", list_id: l.list_id })}
+                    seeHref={`/leads?list=${l.list_id}&callable=true`}
+                  />
                 ))}
               </div>
             )}
-          </section>
-
-          {/* Kept, and kept last. Calling everything is the old behaviour and
-              still the right answer on a quiet day when the follow-ups matter
-              more than any one sheet. */}
-          <section>
-            <h2 className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
-              Or call everyone
-            </h2>
-            <Card className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <p className="font-medium text-ink">Everything that is due</p>
-                <p className="mt-0.5 text-sm text-ink-soft">
-                  Every lead of yours across all lists, most overdue first.
-                  {everything !== null && ` ${number(everything)} ready now.`}
-                </p>
-              </div>
-              <Button
-                variant="secondary"
-                size="lg"
-                onClick={() => void start(null)}
-                disabled={starting !== null}
-                loading={starting === "all"}
-              >
-                {starting === "all" ? "Starting…" : "Start"}
-              </Button>
-            </Card>
           </section>
         </>
       )}
@@ -298,68 +347,202 @@ export default function StartCallingPage() {
   );
 }
 
-function ListCard({
-  list,
-  starting,
-  onStart,
+/* ------------------------------------------------------------- the cards */
+
+function OpenRunCard({
+  run,
+  busy,
+  restarting,
+  onContinue,
+  onRestart,
+  onFinish,
 }: {
-  list: CallingList;
-  starting: string | null;
-  onStart: () => void;
+  run: OpenRun;
+  busy: boolean;
+  restarting: boolean;
+  onContinue: () => void;
+  onRestart?: () => void;
+  onFinish: () => void;
 }) {
-  const detail = describe(list);
-  // Against the whole list rather than against what is left, so the bar only
-  // ever moves forward. Measured on "has been called at least once", which is
-  // the question a progress bar is actually answering.
-  const pct = list.total ? Math.round((list.called / list.total) * 100) : 0;
-  const done = list.to_call === 0;
+  // "Start over" throws a place away, so it takes a second tap within a few
+  // seconds - the same rule as "never call them" on the call screen.
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = window.setTimeout(() => setArmed(false), 4000);
+    return () => window.clearTimeout(t);
+  }, [armed]);
+
+  const pct = run.total ? Math.round(((run.done + run.skipped) / run.total) * 100) : 0;
+  const donePct = run.total ? (run.done / run.total) * 100 : 0;
+  const skipPct = run.total ? (run.skipped / run.total) * 100 : 0;
 
   return (
-    <Card className={done ? "opacity-70" : undefined}>
+    <Card tone="brand" padded={false} className="p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate font-medium text-ink">{list.name}</p>
-          {detail && <p className="mt-0.5 truncate text-xs text-ink-muted">{detail}</p>}
+          <p className="truncate text-base font-semibold text-ink">{run.label}</p>
+          <p className="mt-0.5 text-xs text-ink-muted">Last active {relativeDate(run.last_active_at).toLowerCase()}</p>
         </div>
-        {list.session_id && <Badge tone="brand" dot>In progress</Badge>}
+        {run.paused && (
+          <Badge tone="warn" dot>
+            Paused
+          </Badge>
+        )}
       </div>
-
-      {list.assignment_note && (
-        <Alert tone="warn" className="mt-2 mb-0">
-          {list.assignment_note}
-        </Alert>
-      )}
 
       <div className="mt-3">
-        <div className="flex items-baseline justify-between text-sm">
-          <span className="font-semibold tabular-nums text-ink">
-            {done ? "All done" : `${number(list.to_call)} to call`}
-          </span>
-          <span className="text-xs tabular-nums text-ink-muted">
-            {number(list.called)} of {number(list.total)} reached
-          </span>
+        <div className="flex h-2 w-full overflow-hidden rounded-pill bg-surface" aria-label={`${pct}% through`}>
+          <span className="h-full bg-brand-600" style={{ width: `${donePct}%` }} />
+          <span className="h-full bg-warn" style={{ width: `${skipPct}%` }} />
         </div>
-        <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-pill bg-sunken">
-          <div
-            className="h-full rounded-pill bg-brand-600 transition-[width] duration-500"
-            style={{ width: `${pct}%` }}
-          />
-        </div>
+        <p className="mt-1.5 text-xs text-ink-soft">
+          <span className="font-semibold tabular-nums text-ink">{number(run.done)}</span> of{" "}
+          <span className="tabular-nums">{number(run.total)}</span> called
+          {run.skipped > 0 && (
+            <>
+              {" "}
+              · <span className="tabular-nums text-warn">{number(run.skipped)}</span> skipped
+            </>
+          )}
+          {" "}· <span className="tabular-nums">{number(run.pending)}</span> to go
+        </p>
       </div>
 
-      <div className="mt-3 flex items-center justify-between gap-2">
-        <span className="text-xs text-ink-muted">
-          {list.converted > 0 && `${number(list.converted)} donated`}
-        </span>
-        <div className="flex gap-2">
-          <Link href={`/leads?list=${list.id}`} className={buttonSecondary}>
-            See them
-          </Link>
-          <Button onClick={onStart} disabled={starting !== null || done} loading={starting === list.id}>
-            {starting === list.id ? "Starting…" : list.session_id ? "Continue" : "Start"}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button size="lg" icon="phoneOutgoing" disabled={busy} onClick={onContinue} className="flex-1 sm:flex-none">
+          Continue
+        </Button>
+        {onRestart && (
+          <Button
+            size="sm"
+            variant={armed ? "dangerSoft" : "ghost"}
+            disabled={busy && !restarting}
+            loading={restarting}
+            onClick={() => {
+              if (!armed) return setArmed(true);
+              setArmed(false);
+              onRestart();
+            }}
+          >
+            {armed ? "Tap again to start over" : "Start over"}
           </Button>
-        </div>
+        )}
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onFinish} title="Done with it - it stops showing here">
+          Finish it
+        </Button>
       </div>
+    </Card>
+  );
+}
+
+function SourceTile({
+  icon,
+  label,
+  count,
+  blurb,
+  extra,
+  badge,
+  empty,
+  enabled,
+  emphasis = false,
+  open,
+  starting,
+  busy,
+  onStart,
+  seeHref,
+}: {
+  icon: IconName;
+  label: string;
+  count: number;
+  blurb?: string;
+  /** A second line that matters ("3 new from the website will be added"). */
+  extra?: string;
+  badge?: string;
+  /** Why it cannot be started, said in place of the count. */
+  empty: string;
+  enabled: boolean;
+  /** Nearly gave: the warmest list, so it stands out. */
+  emphasis?: boolean;
+  open?: OpenRun;
+  starting: boolean;
+  busy: boolean;
+  onStart: () => void;
+  seeHref?: string;
+}) {
+  return (
+    <Card
+      padded={false}
+      tone={emphasis && enabled ? "warn" : undefined}
+      interactive={enabled && !busy}
+      className={`flex flex-col ${enabled ? "" : "opacity-60"} ${emphasis && enabled ? "ring-1 ring-amber-300" : ""}`}
+    >
+      {/* The whole card is the button: on a phone a tile is tapped anywhere,
+          and a small "Start" in its corner is the part people miss. */}
+      <button
+        type="button"
+        disabled={!enabled || busy}
+        onClick={onStart}
+        className="flex min-h-28 w-full flex-1 flex-col items-stretch rounded-card p-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55 disabled:cursor-not-allowed"
+      >
+        <span className="flex items-start justify-between gap-3">
+          <span className="flex min-w-0 items-center gap-2">
+            <span
+              className={`grid h-8 w-8 flex-none place-items-center rounded-control ${
+                emphasis && enabled ? "bg-surface text-warn" : "bg-brand-50 text-brand-700"
+              }`}
+            >
+              <Icon name={icon} size={16} />
+            </span>
+            <span className="truncate font-semibold text-ink">{label}</span>
+          </span>
+          {starting ? (
+            <Spinner size={18} label="Starting" />
+          ) : enabled ? (
+            <Icon name="arrowRight" size={16} className="mt-1 flex-none text-brand-700" />
+          ) : null}
+        </span>
+
+        {badge && (
+          <span className="mt-2">
+            <Badge tone="brand" icon="user">
+              {badge}
+            </Badge>
+          </span>
+        )}
+
+        <span className="mt-2 flex items-baseline gap-2">
+          {enabled ? (
+            <>
+              <span className="text-2xl font-semibold tabular-nums text-ink">{number(count)}</span>
+              <span className="text-sm text-ink-muted">to call</span>
+            </>
+          ) : (
+            <span className="text-sm font-medium text-ink-muted">{empty}</span>
+          )}
+        </span>
+
+        {extra && (
+          <span className="mt-1 inline-flex items-center gap-1 text-sm font-medium text-amber-900">
+            <Icon name="plus" size={13} />
+            {extra}
+          </span>
+        )}
+        {blurb && <span className="mt-1 line-clamp-2 text-xs text-ink-muted">{blurb}</span>}
+        {open && (
+          <span className="mt-2 text-xs font-medium text-brand-700">
+            In progress · {number(open.done)} of {number(open.total)} called — tap to carry on
+          </span>
+        )}
+      </button>
+      {seeHref && (
+        <div className="border-t border-line-soft px-4 py-2">
+          <Link href={seeHref} className="inline-flex min-h-8 items-center gap-1 text-xs font-medium text-brand-700 hover:underline">
+            See who is in it
+            <Icon name="arrowRight" size={12} />
+          </Link>
+        </div>
+      )}
     </Card>
   );
 }

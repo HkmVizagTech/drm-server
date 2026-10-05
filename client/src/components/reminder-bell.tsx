@@ -21,9 +21,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { currency } from "@/lib/format";
-import { Badge, Button, IconButton, LinkButton, buttonClass } from "@/components/ui";
+import { callHref, formatPhone } from "@/lib/calling";
+import { Badge, Button, Icon, IconButton, buttonClass } from "@/components/ui";
+import { toast } from "./toast";
 import { useCallingAlerts } from "./calling-alerts";
 
 // The cadence - a minute - lives with the timer that uses it, in
@@ -48,14 +51,17 @@ export function ReminderBell() {
   // the same alerts, since fetching one is what marks it delivered.
   const { alerts, conversions, dueCount, dismissAlert, dismissConversions, refresh } = useCallingAlerts();
   const [open, setOpen] = useState(false);
-  const [canNotify, setCanNotify] = useState<"unsupported" | "granted" | "denied" | "default">("unsupported");
+  // Read once, lazily. Only ever drawn inside the open panel, which is never
+  // part of the server's HTML, so reading the browser here cannot make the
+  // first render disagree with it.
+  const [canNotify, setCanNotify] = useState<"unsupported" | "granted" | "denied" | "default">(() =>
+    typeof window !== "undefined" && "Notification" in window
+      ? (Notification.permission as "granted" | "denied" | "default")
+      : "unsupported"
+  );
   const panelRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (typeof window !== "undefined" && "Notification" in window) {
-      setCanNotify(Notification.permission as "granted" | "denied" | "default");
-    }
-  }, []);
+  // Where a "Call" from here should come back to once the outcome is logged.
+  const pathname = usePathname();
 
   // Open by itself when something new arrives — the whole point of an alert is
   // that the caller does not have to go looking for it.
@@ -78,9 +84,11 @@ export function ReminderBell() {
     dismissAlert(id);
     try {
       await apiClient.put(`/api/crm/reminders/${id}`, { action, minutes });
+      toast(action === "done" ? "Reminder done" : `Snoozed for ${minutes === 60 ? "an hour" : `${minutes} minutes`}`);
       void refresh();
-    } catch {
-      /* the board is the source of truth; a failed snooze just reappears */
+    } catch (e) {
+      // The board is the source of truth; a failed snooze just reappears.
+      toast.error("Could not update that reminder", e instanceof Error ? e.message : undefined);
     }
   }
 
@@ -192,9 +200,16 @@ export function ReminderBell() {
                       </p>
                     )}
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      <LinkButton href={`tel:+91${a.lead_phone}`} variant="primary" size="xs" icon="phone">
-                        Call {a.lead_phone}
-                      </LinkButton>
+                      {/* Through the call screen rather than a bare tel:
+                          link, so the outcome of the call is recorded. */}
+                      <Link
+                        href={callHref(a.lead_id, pathname || undefined)}
+                        onClick={() => setOpen(false)}
+                        className={buttonClass("primary", "xs")}
+                      >
+                        <Icon name="phone" size={13} />
+                        Call {formatPhone(a.lead_phone)}
+                      </Link>
                       <Button size="xs" variant="secondary" onClick={() => void act(a.id, "snooze", 15)}>
                         15 min
                       </Button>

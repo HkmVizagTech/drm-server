@@ -13,7 +13,8 @@
     "test:promises": "tsx scripts/test-promises.ts",
     "test:access": "tsx scripts/test-role-access.ts",
     "test:time": "tsx scripts/test-time-and-exports.ts",
-    "test:credits": "tsx scripts/test-credits.ts"
+    "test:credits": "tsx scripts/test-credits.ts",
+    "test:sessions": "tsx scripts/test-sessions.ts"
   },
   "keywords": [],
   "author": "",

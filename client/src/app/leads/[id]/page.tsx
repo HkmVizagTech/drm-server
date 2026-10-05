@@ -33,8 +33,12 @@ import {
   Select,
   Skeleton,
   Textarea,
+  buttonClass,
 } from "@/components/ui";
 import { SendLink } from "@/components/send-link";
+import { toast } from "@/components/toast";
+import { ContactEditor } from "@/components/calling/contact-editor";
+import { callHref, formatPhone, telHref } from "@/lib/calling";
 import { ALERT_OPTIONS, DEFAULT_ALERTS, alertSummary, cleanAlerts } from "@/lib/reminders";
 
 interface Preacher { id: string; code: string; name: string | null }
@@ -42,6 +46,7 @@ interface Preacher { id: string; code: string; name: string | null }
 interface Lead {
   id: string;
   phone: string;
+  alt_phone: string | null;
   name: string | null;
   email: string | null;
   city: string | null;
@@ -126,6 +131,11 @@ export default function LeadDetailPage() {
   // offered a button that answers 403.
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+  // Handing a lead to somebody else is the office's call (admin or
+  // accountant), not a caller's - a caller sees who has it, but no dropdown
+  // that would quietly move a colleague's donor.
+  const canAssign = isAdmin || user?.role === "accountant";
+  const [editingContact, setEditingContact] = useState(false);
 
   const [lead, setLead] = useState<Lead | null>(null);
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -146,29 +156,32 @@ export default function LeadDetailPage() {
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  type Loaded = { lead: Lead; activities: Activity[]; donations: Donation[]; reminders: Reminder[] };
+  const apply = useCallback((d: Loaded) => {
+    setLead(d.lead);
+    setActivities(d.activities);
+    setDonations(d.donations);
+    setReminders(d.reminders ?? []);
+    setError(null);
+  }, []);
+
   const load = useCallback(async () => {
     try {
-      const d = await apiClient.get<{
-        lead: Lead;
-        activities: Activity[];
-        donations: Donation[];
-        reminders: Reminder[];
-      }>(`/api/crm/leads/${id}`);
-      setLead(d.lead);
-      setActivities(d.activities);
-      setDonations(d.donations);
-      setReminders(d.reminders ?? []);
-      setError(null);
+      apply(await apiClient.get<Loaded>(`/api/crm/leads/${id}`));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load that lead");
-    } finally {
-      setLoading(false);
     }
-  }, [id]);
+  }, [id, apply]);
 
+  // The first load is applied in the callback rather than through load(), so
+  // the effect itself sets no state.
   useEffect(() => {
-    void load();
-  }, [load]);
+    apiClient
+      .get<Loaded>(`/api/crm/leads/${id}`)
+      .then(apply)
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load that lead"))
+      .finally(() => setLoading(false));
+  }, [id, apply]);
 
   useEffect(() => {
     apiClient.get<typeof config>("/api/crm/config").then(setConfig).catch(() => undefined);
@@ -178,20 +191,26 @@ export default function LeadDetailPage() {
       .catch(() => undefined);
   }, []);
 
-  async function patch(body: Record<string, unknown>) {
+  async function patch(body: Record<string, unknown>, done = "Saved") {
     try {
       await apiClient.put(`/api/crm/leads/${id}`, body);
+      toast(done);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that");
+      toast.error("Could not save that", e instanceof Error ? e.message : undefined);
     }
   }
 
   async function addNote() {
     if (!note.trim()) return;
-    await apiClient.post(`/api/crm/leads/${id}/note`, { note: note.trim() });
-    setNote("");
-    await load();
+    try {
+      await apiClient.post(`/api/crm/leads/${id}/note`, { note: note.trim() });
+      setNote("");
+      toast("Note added");
+      await load();
+    } catch (e) {
+      toast.error("Could not add that note", e instanceof Error ? e.message : undefined);
+    }
   }
 
   // Shaped like the page it is about to become - header, then the two
@@ -220,7 +239,7 @@ export default function LeadDetailPage() {
       <PageHeader
         eyebrow="Calling"
         title={lead.name || "Name not known"}
-        subtitle={`${lead.phone}${lead.city ? ` · ${lead.city}` : ""}${lead.email ? ` · ${lead.email}` : ""}`}
+        subtitle={`${formatPhone(lead.phone)}${lead.alt_phone ? ` · also ${formatPhone(lead.alt_phone)}` : ""}${lead.city ? ` · ${lead.city}` : ""}${lead.email ? ` · ${lead.email}` : ""}`}
         actions={
           <>
             <Button variant="secondary" icon="arrowLeft" onClick={() => router.back()}>
@@ -235,9 +254,16 @@ export default function LeadDetailPage() {
             <Button variant="secondary" icon="bell" onClick={() => setRemindOpen(true)}>
               Remind me
             </Button>
-            <LinkButton href={`tel:+91${lead.phone}`} variant="primary" icon="phone">
-              Call {lead.phone}
-            </LinkButton>
+            <Button variant="secondary" icon="edit" onClick={() => setEditingContact(true)}>
+              Name and numbers
+            </Button>
+            {/* Through the call screen, so the outcome is logged here instead
+                of the call happening somewhere DRM never hears about. Back
+                returns to this page. */}
+            <Link href={callHref(lead.id, `/leads/${lead.id}`)} className={buttonClass("primary", "md")}>
+              <Icon name="phone" size={15} />
+              Call {formatPhone(lead.phone)}
+            </Link>
           </>
         }
       />
@@ -249,7 +275,11 @@ export default function LeadDetailPage() {
           tone="danger"
           title="This person asked not to be called."
           action={
-            <Button variant="secondary" size="sm" onClick={() => void patch({ do_not_call: false })}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void patch({ do_not_call: false }, "They can be called again")}
+            >
               They have asked to be called again
             </Button>
           }
@@ -333,26 +363,85 @@ export default function LeadDetailPage() {
         {/* ------------------------------------------------------ the details */}
         <div className="space-y-5">
           <Card>
+            <CardHeader
+              title="Numbers"
+              icon="phone"
+              action={
+                <Button variant="ghost" size="xs" icon="edit" onClick={() => setEditingContact(true)}>
+                  Edit
+                </Button>
+              }
+            />
+            <div className="flex flex-col gap-2">
+              <Link
+                href={callHref(lead.id, `/leads/${lead.id}`)}
+                className={buttonClass("primary", "md", "justify-start tabular-nums")}
+              >
+                <Icon name="phone" size={15} />
+                {formatPhone(lead.phone)}
+                <span className="ml-auto text-xs font-normal opacity-80">Call and log</span>
+              </Link>
+              {lead.alt_phone ? (
+                // The other number is a plain dial: it is usually a spouse's
+                // or an office line, rung when the main one does not answer,
+                // and the outcome is logged against the main call screen.
+                <LinkButton
+                  href={telHref(lead.alt_phone)}
+                  variant="secondary"
+                  icon="phone"
+                  className="justify-start tabular-nums"
+                >
+                  {formatPhone(lead.alt_phone)}
+                  <span className="ml-auto text-xs font-normal text-ink-muted">Other number</span>
+                </LinkButton>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setEditingContact(true)}
+                  className="text-left text-xs font-medium text-brand-700 hover:underline"
+                >
+                  Add another number
+                </button>
+              )}
+            </div>
+          </Card>
+
+          <Card>
             <CardHeader title="Where this lead stands" />
             <div className="space-y-3">
               <Field label="Stage">
-                <Select value={lead.status} onChange={(v) => void patch({ status: v })} ariaLabel="Stage">
+                <Select
+                  value={lead.status}
+                  onChange={(v) =>
+                    void patch({ status: v }, `Moved to ${config?.statuses.find((s) => s.slug === v)?.label ?? v}`)
+                  }
+                  ariaLabel="Stage"
+                >
                   {config?.statuses.map((s) => (
                     <option key={s.slug} value={s.slug}>{s.label}</option>
                   ))}
                 </Select>
               </Field>
               <Field label="Assigned to">
-                <Select
-                  value={lead.assigned_to ?? ""}
-                  onChange={(v) => void patch({ assigned_to: v || null })}
-                  ariaLabel="Assigned to"
-                >
-                  <option value="">Nobody</option>
-                  {config?.users.map((u) => (
-                    <option key={u.id} value={u.id}>{u.name}</option>
-                  ))}
-                </Select>
+                {canAssign ? (
+                  <Select
+                    value={lead.assigned_to ?? ""}
+                    onChange={(v) =>
+                      void patch(
+                        { assigned_to: v || null },
+                        v ? `Assigned to ${config?.users.find((u) => u.id === v)?.name ?? "them"}` : "Unassigned"
+                      )
+                    }
+                    ariaLabel="Assigned to"
+                  >
+                    <option value="">Nobody</option>
+                    {config?.users.map((u) => (
+                      <option key={u.id} value={u.id}>{u.name}</option>
+                    ))}
+                  </Select>
+                ) : (
+                  <p className="text-sm text-ink">{lead.assigned_to_name ?? "Nobody yet"}</p>
+                )}
               </Field>
               {/* The stored value is a UTC instant, so slicing its first ten
                   characters showed the UTC day: a callback at 20:00Z is half
@@ -366,7 +455,10 @@ export default function LeadDetailPage() {
                   type="date"
                   value={istDateKey(lead.next_follow_up_at)}
                   onChange={(e) =>
-                    void patch({ next_follow_up_at: e.target.value ? istInstant(e.target.value, "10:00").toISOString() : null })
+                    void patch(
+                      { next_follow_up_at: e.target.value ? istInstant(e.target.value, "10:00").toISOString() : null },
+                      e.target.value ? `Callback booked for ${shortDate(e.target.value)}` : "Callback cleared"
+                    )
                   }
                 />
               </Field>
@@ -375,7 +467,7 @@ export default function LeadDetailPage() {
               <Field label="Known to (preacher)">
                 <Select
                   value={lead.preacher_id ?? ""}
-                  onChange={(v) => void patch({ preacher_id: v || null })}
+                  onChange={(v) => void patch({ preacher_id: v || null }, "Preacher saved")}
                   ariaLabel="Known to (preacher)"
                   placeholder="Nobody in particular"
                   options={[
@@ -392,7 +484,10 @@ export default function LeadDetailPage() {
                   id="lead-expected"
                   type="number"
                   defaultValue={lead.expected_amount ?? ""}
-                  onBlur={(e) => e.target.value !== (lead.expected_amount ?? "") && void patch({ expected_amount: e.target.value })}
+                  onBlur={(e) =>
+                    e.target.value !== (lead.expected_amount ?? "") &&
+                    void patch({ expected_amount: e.target.value }, "Expected amount saved")
+                  }
                 />
               </Field>
             </div>
@@ -546,14 +641,19 @@ export default function LeadDetailPage() {
                       size="sm"
                       disabled={!donatedAmount}
                       onClick={async () => {
-                        await apiClient.post(`/api/crm/leads/${id}/donated`, {
-                          amount: Number(donatedAmount),
-                          note: donatedNote || undefined,
-                        });
-                        setDonatedOpen(false);
-                        setDonatedAmount("");
-                        setDonatedNote("");
-                        await load();
+                        try {
+                          await apiClient.post(`/api/crm/leads/${id}/donated`, {
+                            amount: Number(donatedAmount),
+                            note: donatedNote || undefined,
+                          });
+                          toast.success(`Donation of ${currency(Number(donatedAmount))} recorded`);
+                          setDonatedOpen(false);
+                          setDonatedAmount("");
+                          setDonatedNote("");
+                          await load();
+                        } catch (e) {
+                          toast.error("Could not record that donation", e instanceof Error ? e.message : undefined);
+                        }
                       }}
                     >
                       Record it
@@ -614,11 +714,18 @@ export default function LeadDetailPage() {
         </div>
       </div>
 
+      {editingContact && (
+        <ContactEditor lead={lead} onClose={() => setEditingContact(false)} onSaved={load} />
+      )}
+
       {removing && (
         <RemoveLeadDialog
           leadId={lead.id}
           onClose={() => setRemoving(false)}
-          onDone={() => router.push("/leads")}
+          onDone={() => {
+            toast("Lead removed");
+            router.push("/leads");
+          }}
         />
       )}
 
@@ -636,6 +743,7 @@ export default function LeadDetailPage() {
           onClose={() => setRemindOpen(false)}
           onDone={async () => {
             setRemindOpen(false);
+            toast.success("Promise recorded", "You will be alerted before it falls due.");
             await load();
           }}
         />

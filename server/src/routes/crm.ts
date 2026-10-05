@@ -41,7 +41,7 @@ import {
 } from '../utils/export';
 // The queue's filter lives with the lists it belongs to, so a change to what
 // counts as callable changes the queue and every list's count together.
-import { CALLABLE, DUE_NOW, listPredicate, loadList, maxAttempts } from './crmLists';
+import { CALLABLE, DUE_NOW, LIST_MATCH, NOT_CLAIMED_BY_OTHERS, listPredicate, loadList, maxAttempts } from './crmLists';
 
 const router = Router();
 router.use(authenticate);
@@ -402,6 +402,14 @@ async function leadScopeFor(user?: { role?: string; userId?: string }): Promise<
   return user?.userId ?? null;
 }
 
+/**
+ * "Due to call now" is a question about the person asking: the list card's
+ * figure is their share, so "See them" has to be too - theirs or nobody's.
+ */
+function callableScope(q: Record<string, unknown>, user?: { userId?: string }): string | null {
+  return q.callable === 'true' ? user?.userId ?? null : null;
+}
+
 /** The SQL that narrows to one caller, appended to a built filter. */
 function withScope(f: Filters, scope: string | null): Filters {
   if (!scope) return f;
@@ -428,19 +436,17 @@ function buildLeadFilters(q: Record<string, unknown>, startIdx = 1): Filters {
   // joined, so the leads screen and the queue select exactly the same people -
   // "See them" on a list card has to show what the caller is about to be given.
   if (q.list) {
-    conditions.push(`l.id IN (
-      SELECT l2.id FROM leads l2, calling_lists cl
-       WHERE cl.id = $${i}::uuid
-         AND (cl.import_batch_id IS NULL OR l2.import_batch_id = cl.import_batch_id)
-         AND (cl.tag         IS NULL OR cl.tag = ANY(l2.tags))
-         AND (cl.preacher_id IS NULL OR l2.preacher_id = cl.preacher_id)
-         AND (cl.status_slug IS NULL OR l2.status = cl.status_slug)
-         AND (cl.source      IS NULL OR l2.source = cl.source)
-         AND (cl.city        IS NULL OR l2.city ILIKE '%' || cl.city || '%')
-         AND (cl.min_external_total IS NULL OR l2.external_total_donated >= cl.min_external_total)
-    )`);
+    conditions.push(`EXISTS (SELECT 1 FROM calling_lists cl WHERE cl.id = $${i}::uuid AND ${LIST_MATCH('cl', 'l')})`);
     values.push(String(q.list));
     i++;
+  }
+  // "Due" for a calling list's "See them": exactly what a session on it would
+  // hand over (callable, attempts left, due by the end of today).
+  // The viewer's own share (theirs or nobody's) is added by the handlers,
+  // which know who is asking; see callableScope.
+  if (q.callable === 'true') {
+    conditions.push(`${CALLABLE} AND ${DUE_NOW}
+      AND l.call_attempts < COALESCE((SELECT (value #>> '{}')::int FROM crm_settings WHERE key = 'max_attempts'), 6)`);
   }
   if (q.status) {
     conditions.push(`l.status = ANY($${i++})`);
@@ -832,10 +838,19 @@ function buildAbandonedQuery(
   // Set aside is per PERSON. Dismissing one of somebody's four attempts used
   // to promote the next one into the list on the following load, taking the
   // value at stake up rather than down.
-  scope.push(`NOT EXISTS (
+  //
+  // But only the attempts up to when they were set aside. It used to hide the
+  // phone for ever, so somebody set aside in March who tried again in
+  // October - a new, warm attempt - never appeared, and nothing said why.
+  //
+  // `set_aside=true` turns the view round: only the people set aside, so the
+  // decision can be seen and undone.
+  const setAsideRule = `EXISTS (
     SELECT 1 FROM abandoned_attempts d
      WHERE d.phone = a.phone AND d.dismissed_at IS NOT NULL
-  )`);
+       AND a.attempted_at <= d.dismissed_at
+  )`;
+  scope.push(q.set_aside === 'true' ? setAsideRule : `NOT ${setAsideRule}`);
 
   scope.push(`a.source_site = ANY($${i++}::text[])`);
   values.push(wanted);
@@ -926,6 +941,14 @@ function buildAbandonedQuery(
              ) AS gave_anyway,
              ld.id AS lead_id,
              ld.status AS lead_status,
+             -- So the screen can say "do not call" and hide the Call button,
+             -- and know whether the lead is somebody else's before offering
+             -- to open it.
+             ld.do_not_call AS lead_do_not_call,
+             ld.assigned_to AS lead_assigned_to,
+             ld.last_outcome AS lead_last_outcome,
+             ld.last_contacted_at AS lead_last_contacted_at,
+             (SELECT MAX(d.dismissed_at) FROM abandoned_attempts d WHERE d.phone = l.phone) AS set_aside_at,
              u.name AS assigned_to_name
         FROM latest l
         LEFT JOIN leads ld ON ld.phone = l.phone
@@ -1187,6 +1210,172 @@ router.post('/leads/abandoned/:id/dismiss', async (req, res) => {
   }
 });
 
+/** POST /leads/abandoned/:id/restore - undo "Set aside". */
+router.post('/leads/abandoned/:id/restore', async (req, res) => {
+  try {
+    const r = await pool.query(
+      `UPDATE abandoned_attempts SET dismissed_at = NULL, dismissed_by = NULL
+        WHERE phone = (SELECT phone FROM abandoned_attempts WHERE id = $1)
+          AND dismissed_at IS NOT NULL
+        RETURNING id`,
+      [req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Nothing to bring back' });
+    res.json({ restored: true, attempts: r.rows.length });
+  } catch (err) {
+    console.error('crm.restoreAbandoned error:', err);
+    res.status(500).json({ error: 'Could not bring that back' });
+  }
+});
+
+export interface AdoptResult {
+  created: number;
+  already_yours: number;
+  already_others: number;
+  do_not_call: number;
+  gave_anyway: number;
+  /** Leads ready to ring, in the order they were picked. */
+  lead_ids: string[];
+}
+
+/**
+ * Turn rows of the Nearly gave view into leads, many at once.
+ *
+ * The same rules as adopting one, applied to each: never somebody who has
+ * since given (the view's gave_anyway), never re-opening a do-not-call, and
+ * never taking a lead a colleague already owns - that one is counted and
+ * left where it is. `assignTo` null leaves new leads unassigned, which is
+ * what a session wants: the claim on whoever is on screen keeps two callers
+ * apart without making the whole list one person's.
+ */
+export async function adoptAbandonedRows(
+  rows: Record<string, unknown>[],
+  opts: { assignTo: string | null; userId: string | null }
+): Promise<AdoptResult> {
+  const out: AdoptResult = { created: 0, already_yours: 0, already_others: 0, do_not_call: 0, gave_anyway: 0, lead_ids: [] };
+  for (const r of rows) {
+    if (r.gave_anyway) {
+      out.gave_anyway++;
+      continue;
+    }
+    if (r.lead_id) {
+      if (r.lead_do_not_call) {
+        out.do_not_call++;
+        continue;
+      }
+      // Somebody else's lead stays theirs - whoever is adopting, and whoever
+      // it is being handed to. Only the acting person's own leads, or the
+      // person they are handing to's, count as "already yours".
+      if (r.lead_assigned_to && r.lead_assigned_to !== opts.userId && r.lead_assigned_to !== opts.assignTo) {
+        out.already_others++;
+        continue;
+      }
+      // Already a lead and free (or already theirs): claim it if asked to.
+      if (!r.lead_assigned_to && opts.assignTo) {
+        await pool.query(
+          `UPDATE leads SET assigned_to = $2::uuid, assigned_at = NOW(),
+                  tags = ARRAY(SELECT DISTINCT unnest(tags || '{abandoned}'::text[])), updated_at = NOW()
+            WHERE id = $1 AND assigned_to IS NULL`,
+          [r.lead_id, opts.assignTo]
+        );
+      }
+      out.already_yours++;
+      out.lead_ids.push(String(r.lead_id));
+      continue;
+    }
+    const phone = normalizePhone(r.phone);
+    if (!isDialable(phone)) continue;
+    const { lead, created } = await upsertLead(
+      {
+        phone,
+        name: r.name,
+        email: r.email,
+        source: 'website',
+        source_detail: `Unfinished donation${r.source_page ? ` on ${r.source_page}` : ''}`,
+        source_site: r.source_site,
+        expected_amount: r.amount ?? null,
+        assigned_to: opts.assignTo,
+        tags: ['abandoned'],
+      },
+      opts.userId
+    );
+    if (created) {
+      out.created++;
+      await pool.query(
+        `INSERT INTO lead_activities (lead_id, user_id, kind, note, occurred_at)
+         VALUES ($1,$2,'import',$3,COALESCE($4::timestamptz, NOW()))`,
+        [
+          lead.id,
+          opts.userId,
+          `Started a donation of ${r.amount ?? '?'}${r.purpose ? ` for ${r.purpose}` : ''} and did not complete it` +
+            (Number(r.attempts_in_view) > 1 ? ` (${r.attempts_in_view} attempts)` : ''),
+          r.attempted_at ?? null,
+        ]
+      );
+    } else out.already_yours++;
+    if (!lead.do_not_call) out.lead_ids.push(String(lead.id));
+  }
+  return out;
+}
+
+/**
+ * The Nearly gave rows a request is talking about: the ticked ones (`ids`,
+ * attempt ids as the list returned them) or, with `all`, everybody the
+ * filters find - "select all 212 matching", not just the 50 on screen.
+ */
+export async function abandonedRowsFor(
+  q: Record<string, unknown>,
+  ids: string[] | null
+): Promise<Record<string, unknown>[]> {
+  const sites = String(q.sites ?? '').split(',').filter(Boolean) as SiteKey[];
+  const wanted = sites.length ? sites : (['hkmv', 'annadan'] as SiteKey[]);
+  const viewDays = Math.min(365, Math.max(1, Number(q.days) || 30));
+  const { base, values, order } = buildAbandonedQuery({ ...q, set_aside: undefined }, wanted, viewDays);
+  const r = await pool.query(
+    `${base}
+     SELECT * FROM resolved l
+      WHERE ${ids ? `l.id = ANY($${values.length + 1}::uuid[])` : 'NOT gave_anyway'}
+      ORDER BY ${order}
+      LIMIT 2000`,
+    ids ? [...values, ids] : values
+  );
+  return r.rows;
+}
+
+/**
+ * POST /leads/abandoned/adopt-bulk - add many of them as leads at once.
+ *
+ * { ids?: attempt ids, all?: true, filters: {the list's own query},
+ *   assign: 'me' | 'none' | <user id, admin only> }
+ *
+ * Answers with what happened to each kind of row, so the screen can say
+ * "38 added, 4 were already yours, 2 belong to Arjun, 1 asked not to be
+ * called" instead of a bare success.
+ */
+router.post('/leads/abandoned/adopt-bulk', async (req, res) => {
+  const b = req.body ?? {};
+  const ids = Array.isArray(b.ids) ? b.ids.map(String).slice(0, 2000) : null;
+  if (!b.all && !ids?.length) return res.status(400).json({ error: 'Pick at least one person' });
+
+  const me = req.user?.userId ?? null;
+  const elevated = req.user?.role === 'admin' || req.user?.role === 'accountant';
+  let assignTo: string | null = me;
+  if (b.assign === 'none') assignTo = null;
+  else if (b.assign && b.assign !== 'me') {
+    if (!elevated) return res.status(403).json({ error: 'Only an admin can hand leads to somebody else' });
+    assignTo = str(b.assign, 36);
+  }
+
+  try {
+    const rows = await abandonedRowsFor((b.filters ?? {}) as Record<string, unknown>, b.all ? null : ids);
+    const result = await adoptAbandonedRows(rows, { assignTo, userId: me });
+    res.json({ requested: b.all ? rows.length : ids!.length, ...result });
+  } catch (err) {
+    console.error('crm.adoptAbandonedBulk error:', err);
+    res.status(500).json({ error: 'Could not add those as leads' });
+  }
+});
+
 /**
  * POST /leads/abandoned/adopt - turn one of them into a lead, ready to ring.
  *
@@ -1255,6 +1444,29 @@ router.post('/leads/abandoned/adopt', async (req, res) => {
   }
 });
 
+/**
+ * GET /leads/ids - every lead the leads screen's filters find, as ids.
+ *
+ * What "Select all 1,240 matching" sends to the bulk actions, the list
+ * builder and "Call these now". Built with the same filter and the same scope
+ * as the screen, so the selection is exactly what the person was looking at.
+ */
+router.get('/leads/ids', async (req, res) => {
+  const sort = SORTS[String(req.query.sort || '')] || SORTS.due;
+  try {
+    const f = withScope(
+      withScope(buildLeadFilters(req.query as Record<string, unknown>), await leadScopeFor(req.user)),
+      callableScope(req.query as Record<string, unknown>, req.user)
+    );
+    const r = await pool.query(`SELECT l.id ${LEAD_JOINS} ${f.where} ORDER BY ${sort} LIMIT 5001`, f.values);
+    const ids = r.rows.map((x) => x.id);
+    res.json({ ids: ids.slice(0, 5000), truncated: ids.length > 5000 });
+  } catch (err) {
+    console.error('crm.leadIds error:', err);
+    res.status(500).json({ error: 'Could not select those leads' });
+  }
+});
+
 router.get('/leads', async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(200, Number(req.query.limit) || 50);
@@ -1262,8 +1474,8 @@ router.get('/leads', async (req, res) => {
 
   try {
     const f = withScope(
-      buildLeadFilters(req.query as Record<string, unknown>),
-      await leadScopeFor(req.user)
+      withScope(buildLeadFilters(req.query as Record<string, unknown>), await leadScopeFor(req.user)),
+      callableScope(req.query as Record<string, unknown>, req.user)
     );
     const [rows, total] = await Promise.all([
       pool.query(
@@ -1298,7 +1510,7 @@ router.get('/leads/:id', async (req, res) => {
     // of the refusal.
     if (!lead.rows.length) return res.status(404).json({ error: 'Lead not found' });
 
-    const [activities, donations, reminders] = await Promise.all([
+    const [activities, donations, reminders, nearlyGave] = await Promise.all([
       pool.query(
         `SELECT a.*, u.name AS user_name, d.label AS disposition_label
            FROM lead_activities a
@@ -1335,6 +1547,15 @@ router.get('/leads/:id', async (req, res) => {
           LIMIT 50`,
         [req.params.id]
       ),
+      // What they last tried to give on a website, so a call opened from a
+      // list says "you were giving ₹2,000 for Annadan on Tuesday" just as a
+      // call inside a run does.
+      pool.query(
+        `SELECT a.amount, a.purpose, a.source_site, a.source_page, a.attempted_at, a.status
+           FROM abandoned_attempts a WHERE a.phone = $1
+          ORDER BY a.attempted_at DESC LIMIT 1`,
+        [lead.rows[0].phone]
+      ),
     ]);
 
     res.json({
@@ -1342,6 +1563,7 @@ router.get('/leads/:id', async (req, res) => {
       activities: activities.rows,
       donations: donations.rows,
       reminders: reminders.rows,
+      nearly_gave: nearlyGave.rows[0] ?? null,
     });
   } catch (err) {
     console.error('crm.getLead error:', err);
@@ -1739,13 +1961,57 @@ router.post('/calls/outside', async (req, res) => {
 router.put('/leads/:id', async (req, res) => {
   const b = req.body ?? {};
   try {
-    const before = await pool.query(`SELECT status, assigned_to FROM leads WHERE id = $1`, [req.params.id]);
+    const before = await pool.query(`SELECT status, assigned_to, phone, alt_phone FROM leads WHERE id = $1`, [req.params.id]);
     if (!before.rows.length) return res.status(404).json({ error: 'Lead not found' });
+
+    // A caller limited to their own leads may edit only those (and unowned
+    // ones) - the same rule that decides what they can open.
+    const scope = await leadScopeFor(req.user);
+    if (scope && before.rows[0].assigned_to && before.rows[0].assigned_to !== scope) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    // THE NUMBER ITSELF CAN NOW BE CORRECTED.
+    // It could not, because the phone is the lead's identity - so a sheet
+    // with one digit wrong left a lead nobody could ring and nobody could
+    // fix, short of deleting it and losing its history. Changing it is
+    // allowed when the new number is dialable and is not already somebody
+    // else's lead; that second case is answered with who has it, because the
+    // likely truth is that they are the same person entered twice.
+    let newPhone: string | null = null;
+    if (b.phone !== undefined && b.phone !== null && String(b.phone).trim() !== '') {
+      const p = normalizePhone(b.phone);
+      if (!isDialable(p)) return res.status(400).json({ error: 'That is not a 10-digit mobile number' });
+      if (p !== before.rows[0].phone) {
+        const clash = await pool.query(`SELECT id, name FROM leads WHERE phone = $1 AND id <> $2`, [p, req.params.id]);
+        if (clash.rows.length) {
+          return res.status(409).json({
+            error: `${clash.rows[0].name ?? 'Another lead'} already has that number`,
+            lead_id: clash.rows[0].id,
+          });
+        }
+        newPhone = p;
+      }
+    }
+    let altPhone: string | null | undefined;
+    if (b.alt_phone === null || (typeof b.alt_phone === 'string' && b.alt_phone.trim() === '')) altPhone = null;
+    else if (b.alt_phone !== undefined) {
+      const a = normalizePhone(b.alt_phone);
+      if (!isDialable(a)) return res.status(400).json({ error: 'The other number is not a 10-digit mobile number' });
+      altPhone = a;
+    }
 
     const result = await pool.query(
       `UPDATE leads SET
          name              = COALESCE($1, name),
-         alt_phone         = COALESCE($2, alt_phone),
+         alt_phone         = CASE WHEN $16::boolean THEN $2 ELSE alt_phone END,
+         phone             = COALESCE($15, phone),
+         -- A corrected number is a dialable one.
+         invalid_reason    = CASE WHEN $15::text IS NOT NULL THEN NULL ELSE invalid_reason END,
+         person_id         = CASE WHEN $15::text IS NULL THEN person_id
+                                  ELSE COALESCE((SELECT p.id FROM people p
+                                                  WHERE right(regexp_replace(p.phone,'\D','','g'), 10) = $15
+                                                  LIMIT 1), person_id) END,
          email             = COALESCE($3, email),
          city              = COALESCE($4, city),
          status            = COALESCE($5, status),
@@ -1771,7 +2037,7 @@ router.put('/leads/:id', async (req, res) => {
        WHERE id = $13 RETURNING *`,
       [
         str(b.name),
-        str(b.alt_phone, 15),
+        altPhone ?? null,
         str(b.email),
         str(b.city, 120),
         str(b.status, 30),
@@ -1784,10 +2050,19 @@ router.put('/leads/:id', async (req, res) => {
         typeof b.do_not_call === 'boolean' ? b.do_not_call : null,
         req.params.id,
         b.preacher_id === null ? 'clear' : str(b.preacher_id, 36),
+        newPhone,
+        altPhone !== undefined,
       ]
     );
 
     const lead = result.rows[0];
+    if (newPhone) {
+      await pool.query(
+        `INSERT INTO lead_activities (lead_id, user_id, kind, from_value, to_value, note)
+         VALUES ($1,$2,'note',$3,$4,$5)`,
+        [lead.id, req.user?.userId ?? null, before.rows[0].phone, newPhone, `Number corrected from ${before.rows[0].phone} to ${newPhone}`]
+      );
+    }
     // Only the transitions worth reading later. An edit to a spelling is not
     // history; a lead moving from interested to not interested is.
     if (b.status && b.status !== before.rows[0].status) {
@@ -1807,6 +2082,9 @@ router.put('/leads/:id', async (req, res) => {
 
     res.json(lead);
   } catch (err) {
+    if ((err as { code?: string }).code === '23505') {
+      return res.status(409).json({ error: 'Another lead already has that number' });
+    }
     console.error('crm.updateLead error:', err);
     res.status(500).json({ error: 'Could not save that lead' });
   }
@@ -1862,7 +2140,11 @@ async function logCallForLead(
               -- Needed by the conversion block below, and worth having in the
               -- undo payload: undoing a call that recorded a donation has to
               -- be able to put the lead back to not having one.
-              converted_at, converted_amount, converted_via, expected_amount
+              converted_at, converted_amount, converted_via, expected_amount,
+              -- And the rest of what a call can change, so Undo puts it all
+              -- back: the "said they'd pay by QR" flag, and the conversion's
+              -- note and seen-marker.
+              awaiting_qr_at, converted_note, conversion_seen_at
          FROM leads WHERE id = $1 FOR UPDATE`,
       [leadId]
     );
@@ -1959,7 +2241,13 @@ async function logCallForLead(
          --     with names nobody needs to ring again.
          next_follow_up_at = CASE
              WHEN $4::timestamptz IS NOT NULL THEN $4::timestamptz
-             WHEN $5::boolean THEN COALESCE(next_follow_up_at, NOW() + ($9::int || ' days')::interval)
+             -- A callback still ahead is kept. One already in the past is
+             -- NOT: keeping it is what left a "No answer" on an overdue
+             -- callback overdue for ever - first in the queue every time,
+             -- rung again within the minute.
+             WHEN $5::boolean THEN CASE
+               WHEN next_follow_up_at > NOW() THEN next_follow_up_at
+               ELSE NOW() + ($9::int || ' days')::interval END
              ELSE NULL END,
          follow_up_note    = CASE WHEN $4::timestamptz IS NOT NULL THEN $6 ELSE follow_up_note END,
          do_not_call       = do_not_call OR $7::boolean,
@@ -1993,16 +2281,20 @@ async function logCallForLead(
     // matcher reads. The most recent unmatched one for this lead: a caller
     // choosing this outcome has just pressed send, and marking an older share
     // they never mentioned would put weight on the wrong row.
+    // What Undo needs beyond the lead row: which share was flagged and what
+    // it said before, and which promises "Donated now" closed.
+    const undoExtra: Record<string, unknown> = {};
     if (disposition === 'will_pay_qr') {
-      await client.query(
-        `UPDATE qr_shares SET awaiting_payment_at = NOW()
-          WHERE id = (
-            SELECT id FROM qr_shares
-             WHERE lead_id = $1::uuid AND matched_at IS NULL
-             ORDER BY created_at DESC LIMIT 1
-          )`,
+      const share = await client.query(
+        `SELECT id, awaiting_payment_at FROM qr_shares
+          WHERE lead_id = $1::uuid AND matched_at IS NULL
+          ORDER BY created_at DESC LIMIT 1`,
         [leadId]
       );
+      if (share.rows.length) {
+        undoExtra.qr_share = { id: share.rows[0].id, awaiting_payment_at: share.rows[0].awaiting_payment_at };
+        await client.query(`UPDATE qr_shares SET awaiting_payment_at = NOW() WHERE id = $1`, [share.rows[0].id]);
+      }
     }
 
     // "Donated now" moved the stage and recorded nothing else.
@@ -2035,11 +2327,13 @@ async function logCallForLead(
       );
       // And the chase stops, exactly as it does on every other path money
       // arrives by.
-      await client.query(
+      const closed = await client.query(
         `UPDATE lead_reminders SET status = 'done', completed_at = NOW(), updated_at = NOW()
-          WHERE lead_id = $1 AND status = 'open'`,
+          WHERE lead_id = $1 AND status = 'open'
+          RETURNING id`,
         [leadId]
       );
+      if (closed.rows.length) undoExtra.closed_reminders = closed.rows.map((r) => r.id);
     }
 
     if (nextStatus !== lead.rows[0].status) {
@@ -2099,7 +2393,32 @@ async function logCallForLead(
            VALUES ($1,$2,'reminder',$3,$4)`,
           [leadId, user?.userId ?? null, remDue, reminder.title]
         );
+        // A promise holds the lead until it is due. Without this, "I'll give
+        // at Govardhan Puja" with no callback date left next_follow_up_at
+        // empty - which the queue reads as "ring now" - so the donor who had
+        // just promised was handed to the next caller the same afternoon.
+        await client.query(
+          `UPDATE leads SET next_follow_up_at = GREATEST(COALESCE(next_follow_up_at, $2::timestamptz), $2::timestamptz)
+            WHERE id = $1`,
+          [leadId, remDue]
+        );
       }
+    }
+
+    // This person is done in the caller's session.
+    if (activeSession) {
+      await client.query(
+        `UPDATE calling_session_items SET state = 'done', outcome = $3, done_at = NOW(), note = NULL
+          WHERE session_id = $1 AND lead_id = $2`,
+        [activeSession, leadId, disposition]
+      );
+    }
+
+    if (Object.keys(undoExtra).length) {
+      await client.query(
+        `UPDATE lead_activities SET undo_payload = undo_payload || $2::jsonb WHERE id = $1`,
+        [activity.rows[0].id, JSON.stringify({ _extra: undoExtra })]
+      );
     }
 
     await client.query('COMMIT');
@@ -2173,7 +2492,7 @@ router.post('/leads/:id/follow-up', async (req, res) => {
 router.post('/leads/bulk', authorize('admin', 'accountant'), async (req, res) => {
   const { ids, action } = req.body ?? {};
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'Select at least one lead' });
-  if (ids.length > 2000) return res.status(400).json({ error: 'Too many at once - filter down and work in batches' });
+  if (ids.length > 5000) return res.status(400).json({ error: 'Too many at once - filter down and work in batches' });
 
   try {
     let result;
@@ -2689,17 +3008,19 @@ router.get('/queue', async (req, res) => {
           AND l.call_attempts < $1
           AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL)
           AND ${DUE_NOW}
+          AND ${NOT_CLAIMED_BY_OTHERS(4 + pred.values.length)}
           ${pred.sql}
         ORDER BY
           -- Overdue promises first, then today, then never-touched, then age.
           CASE WHEN l.next_follow_up_at < NOW() THEN 0
                WHEN l.next_follow_up_at IS NOT NULL THEN 1
-               WHEN l.last_contacted_at IS NULL THEN 2
-               ELSE 3 END,
+               WHEN l.last_contacted_at IS NULL AND 'abandoned' = ANY(l.tags) THEN 2
+               WHEN l.last_contacted_at IS NULL THEN 3
+               ELSE 4 END,
           l.next_follow_up_at ASC NULLS LAST,
           l.created_at ASC
         LIMIT $3`,
-      [attempts, mine ? req.user?.userId ?? null : null, limit, ...pred.values]
+      [attempts, mine ? req.user?.userId ?? null : null, limit, ...pred.values, req.user?.userId ?? null]
     );
 
     // How much of this list is left, counted the same way. Sent with the queue
@@ -2781,6 +3102,11 @@ router.delete('/activities/:id', async (req, res) => {
          converted_at      = $9::timestamptz,
          converted_amount  = $10::numeric,
          converted_via     = $11,
+         -- Payloads written before these were captured do not have them; the
+         -- lead keeps what it has rather than being blanked.
+         awaiting_qr_at     = CASE WHEN $13::boolean THEN $14::timestamptz ELSE awaiting_qr_at END,
+         converted_note     = CASE WHEN $13::boolean THEN $15::text ELSE converted_note END,
+         conversion_seen_at = CASE WHEN $13::boolean THEN $16::timestamptz ELSE conversion_seen_at END,
          updated_at        = NOW()
        WHERE id = $12`,
       [
@@ -2796,8 +3122,38 @@ router.delete('/activities/:id', async (req, res) => {
         before.converted_amount ?? null,
         before.converted_via ?? null,
         a.lead_id,
+        Object.prototype.hasOwnProperty.call(before, 'awaiting_qr_at'),
+        before.awaiting_qr_at ?? null,
+        before.converted_note ?? null,
+        before.conversion_seen_at ?? null,
       ]
     );
+
+    // What the call did outside the lead row.
+    const extra = (before._extra ?? {}) as { qr_share?: { id: string; awaiting_payment_at: string | null }; closed_reminders?: string[] };
+    if (extra.qr_share?.id) {
+      await client.query(`UPDATE qr_shares SET awaiting_payment_at = $2::timestamptz WHERE id = $1 AND matched_at IS NULL`, [
+        extra.qr_share.id,
+        extra.qr_share.awaiting_payment_at ?? null,
+      ]);
+    }
+    // "Donated now" closed every open promise; undoing it opens them again.
+    // Without this an undone slip silently cancelled the donor's reminders.
+    if (extra.closed_reminders?.length) {
+      await client.query(
+        `UPDATE lead_reminders SET status = 'open', completed_at = NULL, updated_at = NOW()
+          WHERE id = ANY($1::uuid[]) AND status = 'done'`,
+        [extra.closed_reminders]
+      );
+    }
+    // Back to "still to ring" in the session it was logged from.
+    if (a.session_id) {
+      await client.query(
+        `UPDATE calling_session_items SET state = 'pending', outcome = NULL, done_at = NULL
+          WHERE session_id = $1 AND lead_id = $2 AND state = 'done'`,
+        [a.session_id, a.lead_id]
+      );
+    }
 
     // The status change and the reminder were part of the same action, so they
     // go with it. Bounded to the second either side of the call rather than
@@ -2809,12 +3165,16 @@ router.delete('/activities/:id', async (req, res) => {
                              AND $2::timestamptz + INTERVAL '2 seconds'`,
       [a.lead_id, a.created_at]
     );
+    // The reminder a call made is written in the same transaction, so it has
+    // exactly the call's timestamp. Matching on that rather than a window
+    // around it: a window also caught a promise made on the PREVIOUS call a
+    // second earlier, so undoing a slip deleted the donor's real promise.
+    const extraPre = (before._extra ?? {}) as { closed_reminders?: string[] };
     await client.query(
       `DELETE FROM lead_reminders
-        WHERE lead_id = $1
-          AND created_at BETWEEN $2::timestamptz - INTERVAL '2 seconds'
-                             AND $2::timestamptz + INTERVAL '2 seconds'`,
-      [a.lead_id, a.created_at]
+        WHERE lead_id = $1 AND created_at = $2::timestamptz
+          AND NOT (id = ANY($3::uuid[]))`,
+      [a.lead_id, a.created_at, extraPre.closed_reminders ?? []]
     );
     // Take the call back off the session's tally, or the counter on the
     // caller's screen creeps upward every time somebody fixes a slip. GREATEST
@@ -3092,7 +3452,20 @@ router.post('/leads/sync-abandoned', authorize('admin', 'accountant'), async (re
       return last !== undefined && last >= new Date(String(d.attemptedAt));
     });
     const recoveredPhones = new Set(recovered.map((d) => String(d.phone)));
-    const stillOwed = unique.filter((d) => !recoveredPhones.has(String(d.phone)));
+    // Somebody set aside on the Nearly gave screen stays set aside here too,
+    // unless they have tried again since. The bulk import used to ignore that
+    // and turn every one of them back into a lead.
+    const setAside = await pool.query(
+      `SELECT phone, MAX(dismissed_at) AS at FROM abandoned_attempts
+        WHERE phone = ANY($1::text[]) AND dismissed_at IS NOT NULL GROUP BY phone`,
+      [phones]
+    );
+    const setAsideAt = new Map(setAside.rows.map((r) => [r.phone, new Date(r.at)]));
+    const stillOwed = unique.filter((d) => {
+      if (recoveredPhones.has(String(d.phone))) return false;
+      const at = setAsideAt.get(String(d.phone));
+      return !(at && new Date(String(d.attemptedAt)) <= at);
+    });
 
     const existing = await pool.query(`SELECT phone FROM leads WHERE phone = ANY($1::text[])`, [
       stillOwed.map((d) => String(d.phone)),
@@ -3175,4 +3548,7 @@ router.post('/leads/sync-abandoned', authorize('admin', 'accountant'), async (re
 });
 
 export default router;
-export { reconcileConversions, normalizePhone as normalizeLeadPhone, isDialable };
+export {
+  reconcileConversions, normalizePhone as normalizeLeadPhone, isDialable,
+  LEAD_COLUMNS, LEAD_JOINS, buildLeadFilters, withScope, leadScopeFor,
+};

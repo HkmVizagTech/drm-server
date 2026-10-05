@@ -15,7 +15,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
+import { callHref, runHref, startRun } from "@/lib/calling";
+import { toast } from "@/components/toast";
 import { currency, IST, number, shortDate } from "@/lib/format";
 import { alertSummary } from "@/lib/reminders";
 import {
@@ -28,11 +31,12 @@ import {
   DropdownMenu,
   EmptyState,
   Field,
-  LinkButton,
+  Icon,
   PageHeader,
   SegmentedControl,
   Skeleton,
   Toolbar,
+  buttonClass,
   buttonPrimary,
 } from "@/components/ui";
 import { ExportButton } from "@/components/export-button";
@@ -79,6 +83,14 @@ const SNOOZE = [
   { label: "Next week", minutes: 60 * 24 * 7 },
 ];
 
+/** What the toast says after each action on a reminder. */
+const DONE_WORDS: Record<string, string> = {
+  done: "Marked done",
+  dismiss: "Dropped",
+  reopen: "Reopened",
+  snooze: "Snoozed",
+};
+
 function whenText(iso: string): string {
   const d = new Date(iso);
   const mins = Math.round((d.getTime() - Date.now()) / 60_000);
@@ -113,27 +125,61 @@ export default function RemindersPage() {
   }, [mine, showDone]);
 
   const load = useCallback(async () => {
-    setLoading(true);
     try {
       setBoard(await apiClient.get<Board>(`/api/crm/reminders?${filterParams()}`));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load reminders");
-    } finally {
-      setLoading(false);
     }
   }, [filterParams]);
 
+  // On open and whenever the filters change. Applied in the callback, and
+  // dropped if a newer filter has already asked again.
   useEffect(() => {
-    void load();
-  }, [load]);
+    let live = true;
+    apiClient
+      .get<Board>(`/api/crm/reminders?${filterParams()}`)
+      .then((b) => {
+        if (!live) return;
+        setBoard(b);
+        setError(null);
+      })
+      .catch((e) => live && setError(e instanceof Error ? e.message : "Could not load reminders"))
+      .finally(() => live && setLoading(false));
+    return () => {
+      live = false;
+    };
+  }, [filterParams]);
 
-  async function act(id: string, action: string, minutes?: number) {
+  async function act(r: Reminder, action: string, minutes?: number) {
     try {
-      await apiClient.put(`/api/crm/reminders/${id}`, { action, minutes });
+      await apiClient.put(`/api/crm/reminders/${r.id}`, { action, minutes });
+      const snoozed = action === "snooze" ? SNOOZE.find((s) => s.minutes === minutes)?.label.toLowerCase() : null;
+      toast(`${DONE_WORDS[action] ?? "Updated"}${snoozed ? ` for ${snoozed}` : ""} — ${r.lead_name || r.lead_phone}`);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not update that reminder");
+      toast.error("Could not update that reminder", e instanceof Error ? e.message : undefined);
+    }
+  }
+
+  // "Call everyone due" is a run over the promises that have come due, one
+  // after another on the call screen, in the order the server keeps.
+  const router = useRouter();
+  const [starting, setStarting] = useState(false);
+  async function callEveryone() {
+    setStarting(true);
+    try {
+      const s = await startRun({ kind: "reminders" });
+      if (s.empty || !s.session) {
+        toast.info("Nobody to call right now", "No promises are due, or a colleague has them.");
+        setStarting(false);
+        return;
+      }
+      if (s.resumed) toast.info("Carrying on where you left off");
+      router.push(runHref(s.session.id));
+    } catch (e) {
+      toast.error("Could not start calling", e instanceof Error ? e.message : undefined);
+      setStarting(false);
     }
   }
 
@@ -153,12 +199,9 @@ export default function RemindersPage() {
               params={filterParams()}
               filename="reminders"
             />
-            {/* A next/link anchor wearing the button class rather than
-                LinkButton: LinkButton is a plain <a>, which would drop out of
-                the client router. */}
-            <Link href="/calling/queue" className={buttonPrimary}>
-              Start calling
-            </Link>
+            <Button icon="phoneOutgoing" loading={starting} onClick={() => void callEveryone()}>
+              Call everyone due
+            </Button>
           </>
         }
       />
@@ -202,8 +245,8 @@ export default function RemindersPage() {
             title="No reminders yet"
             message="When a donor says they will give on a particular day or at a festival, set a reminder during the call — the box is right under the outcome buttons on the calling screen."
             action={
-              <Link href="/calling/queue" className={buttonPrimary}>
-                Go to the calling screen
+              <Link href="/calling/start" className={buttonPrimary}>
+                Choose who to call
               </Link>
             }
           />
@@ -272,18 +315,25 @@ export default function RemindersPage() {
 
                         {r.status === "open" ? (
                           <div className="flex items-center gap-1.5">
-                            <LinkButton href={`tel:+91${r.lead_phone}`} variant="primary" size="sm" icon="phone">
+                            {/* Through the call screen, so what they said is
+                                logged against the promise's donor. */}
+                            <Link
+                              href={callHref(r.lead_id, "/calling/reminders")}
+                              className={buttonClass("primary", "sm", "max-sm:h-11 max-sm:px-4")}
+                            >
+                              <Icon name="phone" size={14} />
                               Call
-                            </LinkButton>
+                            </Link>
                             <DropdownMenu
                               items={SNOOZE.map((s) => ({
                                 label: s.label,
-                                onSelect: () => void act(r.id, "snooze", s.minutes),
+                                onSelect: () => void act(r, "snooze", s.minutes),
                               }))}
                               trigger={({ open, toggle }) => (
                                 <Button
                                   variant="secondary"
                                   size="sm"
+                                  className="max-sm:h-11"
                                   onClick={toggle}
                                   aria-expanded={open}
                                   aria-haspopup="menu"
@@ -292,13 +342,14 @@ export default function RemindersPage() {
                                 </Button>
                               )}
                             />
-                            <Button variant="secondary" size="sm" onClick={() => void act(r.id, "done")}>
+                            <Button variant="secondary" size="sm" className="max-sm:h-11" onClick={() => void act(r, "done")}>
                               Done
                             </Button>
                             <Button
                               variant="secondary"
                               size="sm"
-                              onClick={() => void act(r.id, "dismiss")}
+                              className="max-sm:h-11"
+                              onClick={() => void act(r, "dismiss")}
                               title="Not happening — take it off the list without marking it done"
                             >
                               Drop
@@ -309,7 +360,7 @@ export default function RemindersPage() {
                             <Badge tone={r.status === "done" ? "good" : "neutral"}>
                               {r.status === "done" ? "Done" : "Dropped"}
                             </Badge>
-                            <Button variant="ghost" size="xs" onClick={() => void act(r.id, "reopen")}>
+                            <Button variant="ghost" size="xs" onClick={() => void act(r, "reopen")}>
                               Reopen
                             </Button>
                           </div>
