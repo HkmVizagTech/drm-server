@@ -119,7 +119,7 @@ router.post('/reconcile', authorize('admin'), async (req, res) => {
   try {
     const candidates = await collectCandidates(maxPages);
     if (!candidates.size) {
-      return res.status(503).json({ error: 'No donation site answered. Check the site settings and try again.' });
+      return res.status(503).json({ error: 'Could not reach the donation sites. Try again.' });
     }
 
     const phones = [...candidates.keys()];
@@ -224,7 +224,7 @@ router.post('/reconcile', authorize('admin'), async (req, res) => {
     });
   } catch (err) {
     console.error('profiles.reconcile error:', err);
-    res.status(500).json({ error: 'Could not reconcile the donor names' });
+    res.status(500).json({ error: 'Could not check donor names. Try again.' });
   }
 });
 
@@ -242,7 +242,7 @@ router.get('/conflicts', async (_req, res) => {
     res.json({ conflicts: rows.rows });
   } catch (err) {
     console.error('profiles.conflicts error:', err);
-    res.status(500).json({ error: 'Could not load the name conflicts' });
+    res.status(500).json({ error: 'Could not load name differences.' });
   }
 });
 
@@ -271,7 +271,7 @@ router.post('/:id/keep-name', async (req, res) => {
     res.json(r.rows[0]);
   } catch (err) {
     console.error('profiles.keepName error:', err);
-    res.status(500).json({ error: 'Could not save that' });
+    res.status(500).json({ error: 'Could not save. Try again.' });
   }
 });
 
@@ -288,7 +288,7 @@ router.post('/:id/push', async (req, res) => {
     res.json(after.rows[0]);
   } catch (err) {
     console.error('profiles.push error:', err);
-    res.status(500).json({ error: 'Could not send that to the sites' });
+    res.status(500).json({ error: 'Could not update the sites. Try again.' });
   }
 });
 

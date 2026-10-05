@@ -96,7 +96,7 @@ interface TeamMember {
 // one of these - everything that is not cash or a cheque is booked as UPI. A
 // fourth option would be a choice that quietly becomes one of these anyway.
 const METHODS = [
-  { value: "upi", label: "PhonePe / UPI / GPay" },
+  { value: "upi", label: "UPI" },
   { value: "cash", label: "Cash" },
   { value: "cheque", label: "Cheque" },
 ];
@@ -160,7 +160,7 @@ export default function CollectedByHandPage() {
       setData(await apiClient.get<CollectionsResponse>(`/api/crm/collections?${filterParams()}`));
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load what was collected");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     } finally {
       setLoading(false);
     }
@@ -185,10 +185,10 @@ export default function CollectedByHandPage() {
     setError(null);
     try {
       await apiClient.post(`/api/crm/collections/${c.id}/verify`, {});
-      setNotice(`${currency(Number(c.amount))} from ${c.donor_name ?? "that donor"} is ticked off.`);
+      setNotice(`${currency(Number(c.amount))} from ${c.donor_name ?? "this donor"} checked.`);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not check that off");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
     } finally {
       setBusy(null);
     }
@@ -208,18 +208,18 @@ export default function CollectedByHandPage() {
     <div>
       <PageHeader
         eyebrow="Calling"
-        title={mine ? "Money you collected" : "Money collected by PhonePe"}
-        subtitle="Donations taken on the temple's PhonePe or UPI number — counted from the moment they are written down, checked against the bank afterwards"
+        title="Collected by PhonePe"
+        subtitle="Money paid to the temple's PhonePe or UPI number."
         actions={
           <>
             <ExportButton
               path="/api/crm/collections/export"
               params={filterParams()}
               filename="collected-by-phonepe"
-              hint={data ? `${number(data.total)} record${data.total === 1 ? "" : "s"}` : undefined}
+              hint={data ? `${number(data.total)} entr${data.total === 1 ? "y" : "ies"}` : undefined}
             />
             <Button icon="plus" onClick={() => setRecording(true)}>
-              Record a collection
+              Add payment
             </Button>
           </>
         }
@@ -240,11 +240,11 @@ export default function CollectedByHandPage() {
             value={verified}
             onChange={setVerified}
             ariaLabel="Checked"
-            placeholder="Everything"
+            placeholder="All"
             options={[
-              { value: "", label: "Everything" },
-              { value: "no", label: "Awaiting a check", hint: "The verification queue" },
-              { value: "yes", label: "Checked off" },
+              { value: "", label: "All" },
+              { value: "no", label: "Not checked yet" },
+              { value: "yes", label: "Checked" },
             ]}
           />
         </Field>
@@ -271,7 +271,7 @@ export default function CollectedByHandPage() {
           </Field>
         )}
         <Field label="Find" className="w-56">
-          <SearchInput value={search} onChange={setSearch} placeholder="Donor, phone or reference…" />
+          <SearchInput value={search} onChange={setSearch} placeholder="Donor, mobile or UTR" />
         </Field>
       </Toolbar>
 
@@ -285,35 +285,32 @@ export default function CollectedByHandPage() {
           loading={loading}
           accent="brand"
           icon="rupee"
-          sub={data ? `${number(data.total)} donation${data.total === 1 ? "" : "s"} recorded` : undefined}
+          sub={data ? `${number(data.total)} donation${data.total === 1 ? "" : "s"}` : undefined}
         />
         <StatTile
-          label="Awaiting a check"
+          label="Not checked yet"
           value={currency(data?.awaiting ?? 0)}
           loading={loading}
           accent={data && data.awaiting > 0 ? "warn" : "default"}
           icon="clock"
-          sub={data ? `${number(data.awaiting_count)} still to be found on the statement` : undefined}
+          sub={data ? `${number(data.awaiting_count)} to check` : undefined}
         />
         <StatTile
-          label="Checked off"
+          label="Checked"
           value={currency((data?.amount ?? 0) - (data?.awaiting ?? 0))}
           loading={loading}
           accent="good"
           icon="checkCircle"
-          sub="matched to a line in the bank"
+          sub="Found in bank"
         />
       </div>
 
       {/* The plain-words version, on the screen rather than in a tooltip. The
           people reading this are the ones whose money it is. */}
-      <Alert tone="info" title="What these rows are">
-        Nothing watched this money arrive — it went straight to a PhonePe or UPI number, so there is no webhook and
-        no site donation behind it. DRM counts it from the moment it is written down, and marks it as the caller&apos;s
-        own report until an admin finds it on the bank statement and ticks it off. Awaiting a check means nobody has
-        looked yet, not that anything is wrong.{" "}
+      <Alert tone="info">
+        Counted now. An admin checks it in the bank later.{" "}
         <Link href="/calling/earnings" className="font-medium text-brand-700 hover:underline">
-          See it beside everything else raised
+          Money raised
         </Link>
       </Alert>
 
@@ -325,32 +322,29 @@ export default function CollectedByHandPage() {
       {canVerify && data && data.awaiting_count > 0 && verified !== "no" && (
         <Alert
           tone="warn"
-          title={`${currency(data.awaiting)} across ${number(data.awaiting_count)} collection${
+          title={`${currency(data.awaiting)} from ${number(data.awaiting_count)} payment${
             data.awaiting_count === 1 ? "" : "s"
-          } has not been checked`}
+          } not checked yet`}
           action={
             <Button variant="secondary" onClick={() => setVerified("no")}>
-              Work through them
+              Check them
             </Button>
           }
-        >
-          Open the bank statement beside this and tick off each one you can find.
-        </Alert>
+        />
       )}
 
       {data && !data.complete && (
         <Alert tone="warn">
-          Showing the newest {number(data.collections.length)} of {number(data.total)}. The totals above cover all of
-          them; narrow the dates to work through the rest on screen, or download the file.
+          Showing {number(data.collections.length)} of {number(data.total)}. Pick dates to see more.
         </Alert>
       )}
 
       <TableShell>
         <Thead>
-          <Th>When</Th>
+          <Th>Date</Th>
           <Th>Donor</Th>
           <Th align="right">Amount</Th>
-          <Th>How it came</Th>
+          <Th>Paid by</Th>
           {canChooseCaller && <Th>Caller</Th>}
           <Th>Checked</Th>
           <Th>Receipt</Th>
@@ -382,12 +376,12 @@ export default function CollectedByHandPage() {
                   </Td>
                   <Td>
                     <span className="block text-sm font-medium text-ink">
-                      {c.donor_name || <span className="text-ink-faint">not named</span>}
+                      {c.donor_name || <span className="text-ink-faint">No name</span>}
                     </span>
                     {c.donor_phone && (
                       <span className="block text-xs tabular-nums text-ink-muted">{c.donor_phone}</span>
                     )}
-                    {c.sevak_name && <span className="block text-2xs text-ink-faint">for {c.sevak_name}</span>}
+                    {c.sevak_name && <span className="block text-2xs text-ink-faint">On the name of {c.sevak_name}</span>}
                   </Td>
                   <Td align="right" className="whitespace-nowrap font-medium tabular-nums text-ink">
                     {currency(Number(c.amount))}
@@ -405,7 +399,7 @@ export default function CollectedByHandPage() {
                     ) : (
                       <span className="mt-0.5 inline-flex items-center gap-1 text-xs text-warn">
                         <Icon name="alert" size={12} />
-                        no reference
+                        No UTR yet
                       </span>
                     )}
                   </Td>
@@ -414,7 +408,7 @@ export default function CollectedByHandPage() {
                     {c.verified_at ? (
                       <span>
                         <Badge tone="good" dot>
-                          checked off
+                          Checked
                         </Badge>
                         {c.verified_by_name && (
                           <div className="mt-0.5 text-2xs text-ink-muted">by {c.verified_by_name}</div>
@@ -422,7 +416,7 @@ export default function CollectedByHandPage() {
                       </span>
                     ) : (
                       <Badge tone="warn" dot>
-                        awaiting a check
+                        Not checked yet
                       </Badge>
                     )}
                   </Td>
@@ -437,17 +431,17 @@ export default function CollectedByHandPage() {
                           loading={busy === c.id}
                           onClick={() => void tickOff(c)}
                         >
-                          Tick off
+                          Mark checked
                         </Button>
                       )}
                       {c.receipt_status !== "issued" && (
                         <Button size="sm" variant="ghost" icon="receipt" onClick={() => setReceipting(c)}>
-                          Raise receipt
+                          Send receipt
                         </Button>
                       )}
                       {canVerify && (
                         <Button size="sm" variant="dangerSoft" icon="trash" onClick={() => setReversing(c)}>
-                          Reverse
+                          Remove
                         </Button>
                       )}
                     </div>
@@ -459,10 +453,7 @@ export default function CollectedByHandPage() {
         )}
       </TableShell>
 
-      <p className="mt-3 text-xs text-ink-muted">
-        Reversing does not delete anything: the row stays with the reason on it, stops counting, and frees the money
-        to be claimed by whoever actually raised it. A receipt, once raised, cannot be withdrawn from here at all.
-      </p>
+
 
       {recording && (
         <RecordDialog
@@ -523,8 +514,8 @@ function EmptyCollections({
     return (
       <EmptyState
         icon="checkCircle"
-        title="Nothing waiting to be checked"
-        message="Every collection recorded has been found on the statement and ticked off."
+        title="All checked"
+        message="Nothing waiting."
       />
     );
   }
@@ -532,19 +523,19 @@ function EmptyCollections({
     return (
       <EmptyState
         icon="inbox"
-        title="Nothing matches those filters"
-        message="Clear the filters, or widen the dates."
+        title="No match"
+        message="Clear filters or pick other dates."
       />
     );
   }
   return (
     <EmptyState
       icon="rupee"
-      title="Nothing recorded yet"
-      message="When a donor pays straight to the temple's PhonePe or UPI number, record it here so it counts towards what you raised."
+      title="Nothing added yet"
+      message="Add money paid to the temple's PhonePe or UPI."
       action={
         <Button icon="plus" onClick={onRecord}>
-          Record a collection
+          Add payment
         </Button>
       }
     />
@@ -555,14 +546,14 @@ function receiptCell(c: Collection) {
   if (c.receipt_status === "issued") {
     return (
       <span>
-        <Badge tone="good">issued</Badge>
+        <Badge tone="good">Sent</Badge>
         {c.receipt_number && <div className="mt-0.5 text-2xs tabular-nums text-ink-muted">{c.receipt_number}</div>}
       </span>
     );
   }
-  if (c.receipt_status === "pending") return <Badge tone="neutral">in progress</Badge>;
-  if (c.receipt_status === "failed") return <Badge tone="danger">refused</Badge>;
-  return <Badge tone="warn">not raised</Badge>;
+  if (c.receipt_status === "pending") return <Badge tone="neutral">In progress</Badge>;
+  if (c.receipt_status === "failed") return <Badge tone="danger">Failed</Badge>;
+  return <Badge tone="warn">Not sent</Badge>;
 }
 
 /* ------------------------------------------------------------ record a collection */
@@ -606,7 +597,7 @@ function RecordDialog({
 
   return (
     <Modal
-      title="Record money you collected"
+      title="Add payment"
       onClose={onClose}
       footer={
         <>
@@ -640,30 +631,26 @@ function RecordDialog({
                 });
                 await onDone(
                   reference.trim()
-                    ? `${currency(Number(amount))} from ${donorName.trim()} recorded.`
-                    : `${currency(Number(amount))} from ${donorName.trim()} recorded — add the reference when you have it, or the receipt cannot be raised.`
+                    ? `${currency(Number(amount))} from ${donorName.trim()} saved.`
+                    : `${currency(Number(amount))} from ${donorName.trim()} saved. Add the UTR later.`
                 );
               } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not record that");
+                setError(e instanceof Error ? e.message : "Could not save. Try again.");
                 setBusy(false);
               }
             }}
           >
-            Record it
+            Save
           </Button>
         </>
       }
     >
       {error && <Alert tone="danger">{error}</Alert>}
 
-      <p className="mb-4 text-sm text-ink-muted">
-        For a donation that went straight to the temple's PhonePe or UPI number. It counts towards what you raised from the
-        moment you save it, marked as your own report until an admin finds it on the bank statement. This writes
-        nothing to either donation site — the 80G receipt is a separate step.
-      </p>
+
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="How much" htmlFor="col-amount" required>
+        <Field label="Amount" htmlFor="col-amount" required>
           <Input
             id="col-amount"
             value={amount}
@@ -673,18 +660,13 @@ function RecordDialog({
             className="tabular-nums"
           />
         </Field>
-        <Field label="When it arrived" htmlFor="col-at" hint="Write up Friday's shift on Monday and Friday still shows it">
+        <Field label="Date" htmlFor="col-at">
           <Input id="col-at" type="date" value={at} max={istToday()} onChange={(e) => setAt(e.target.value)} />
         </Field>
-        <Field label="Who gave it" htmlFor="col-name" required>
+        <Field label="Donor Name" htmlFor="col-name" required>
           <Input id="col-name" value={donorName} onChange={(e) => setDonorName(e.target.value)} />
         </Field>
-        <Field
-          label="Their mobile"
-          htmlFor="col-phone"
-          required
-          hint="Ten digits, so the donor can be found again"
-        >
+        <Field label="Mobile Number" htmlFor="col-phone" required>
           <Input
             id="col-phone"
             value={donorPhone}
@@ -694,14 +676,10 @@ function RecordDialog({
             className="tabular-nums"
           />
         </Field>
-        <Field label="How it came">
-          <Select value={method} onChange={setMethod} ariaLabel="How it came" options={METHODS} />
+        <Field label="Paid by">
+          <Select value={method} onChange={setMethod} ariaLabel="Paid by" options={METHODS} />
         </Field>
-        <Field
-          label="Reference"
-          htmlFor="col-ref"
-          hint="The UTR, the PhonePe reference, or the cheque number"
-        >
+        <Field label="Transaction ID (UTR) / Cheque No." htmlFor="col-ref" hint="12 digits on the PhonePe screen">
           <Input
             id="col-ref"
             value={reference}
@@ -718,24 +696,23 @@ function RecordDialog({
           retry safe - both sites refuse a duplicate reference, so with it a
           second press cannot mint a second receipt. */}
       {!reference.trim() && (
-        <Alert tone="warn" className="mt-4" title="No reference yet?">
-          You can still save this and add it later. But until there is one, the 80G receipt cannot be raised and
-          nobody reconciling the bank statement can find this money on it.
+        <Alert tone="warn" className="mt-4">
+          No UTR? You can save now. The receipt needs the UTR.
         </Alert>
       )}
 
       <div className="mt-4 border-t border-line-soft pt-3">
         <Button variant="ghost" size="sm" icon={more ? "chevronUp" : "chevronDown"} onClick={() => setMore((v) => !v)}>
-          {more ? "Fewer details" : "Details for the receipt"}
+          {more ? "Hide receipt details" : "Receipt details"}
         </Button>
         {more && (
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            <Field label="Email" htmlFor="col-email">
+            <Field label="E-mail ID (optional)" htmlFor="col-email">
               <Input id="col-email" type="email" value={donorEmail} onChange={(e) => setDonorEmail(e.target.value)} />
             </Field>
             {/* The site only sends an 80G certificate when it has a PAN, so
                 this field decides whether the donor gets one at all. */}
-            <Field label="PAN" htmlFor="col-pan" hint="Without it the site cannot send an 80G certificate">
+            <Field label="PAN Number" htmlFor="col-pan" hint="Needed for 80G Tax Exemption">
               <Input
                 id="col-pan"
                 value={donorPan}
@@ -744,16 +721,16 @@ function RecordDialog({
                 className="uppercase tabular-nums"
               />
             </Field>
-            <Field label="What it is for" htmlFor="col-purpose">
+            <Field label="Seva" htmlFor="col-purpose">
               <Input id="col-purpose" value={purpose} onChange={(e) => setPurpose(e.target.value)} placeholder="Annadan" />
             </Field>
-            <Field label="On the name of" htmlFor="col-sevak" hint="If the donor asked for the seva in somebody else's name">
+            <Field label="On the name of" htmlFor="col-sevak">
               <Input id="col-sevak" value={sevakName} onChange={(e) => setSevakName(e.target.value)} />
             </Field>
             <Field label="Address" htmlFor="col-address" className="sm:col-span-2">
               <Input id="col-address" value={donorAddress} onChange={(e) => setDonorAddress(e.target.value)} />
             </Field>
-            <Field label="Anything worth noting" htmlFor="col-note" className="sm:col-span-2">
+            <Field label="Note" htmlFor="col-note" className="sm:col-span-2">
               <Textarea id="col-note" rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
             </Field>
           </div>
@@ -790,7 +767,7 @@ function ReceiptDialog({
 
   return (
     <Modal
-      title="Raise the 80G receipt"
+      title="Send 80G receipt"
       onClose={onClose}
       footer={
         <>
@@ -810,16 +787,16 @@ function ReceiptDialog({
                 );
                 await onDone(
                   r.receipt_number
-                    ? `Receipt ${r.receipt_number} raised for ${currency(Number(collection.amount))}.`
-                    : `The receipt is ${r.receipt_status}.`
+                    ? `Receipt No. ${r.receipt_number} sent for ${currency(Number(collection.amount))}.`
+                    : `Receipt: ${r.receipt_status}.`
                 );
               } catch (e) {
-                setError(e instanceof Error ? e.message : "The site refused that receipt");
+                setError(e instanceof Error ? e.message : "Could not send receipt. Try again.");
                 setBusy(false);
               }
             }}
           >
-            Raise it
+            Send receipt
           </Button>
         </>
       }
@@ -827,16 +804,9 @@ function ReceiptDialog({
       {error && <Alert tone="danger">{error}</Alert>}
 
       {blocked ? (
-        <Alert tone="warn" title="There is no reference on this record">
-          The UTR or PhonePe reference is what ties the certificate to a line on the bank statement, and it is also
-          what stops a retry minting a second receipt — both sites refuse a duplicate reference. Add it to the
-          record first.
-        </Alert>
+        <Alert tone="warn">No UTR yet. Add the UTR first.</Alert>
       ) : (
-        <Alert tone="warn" title="This cannot be undone">
-          Pressing this creates a real donation on the site you pick. It mints a numbered 80G certificate, files it,
-          and emails the donor. Nothing on this screen can withdraw it afterwards.
-        </Alert>
+        <Alert tone="warn">This cannot be undone. The donor gets the receipt by e-mail.</Alert>
       )}
 
       <dl className="mb-4 grid gap-2 text-sm sm:grid-cols-2">
@@ -849,17 +819,17 @@ function ReceiptDialog({
           <dd className="font-medium tabular-nums text-ink">{currency(Number(collection.amount))}</dd>
         </div>
         <div>
-          <dt className="text-xs text-ink-muted">Arrived</dt>
+          <dt className="text-xs text-ink-muted">Date</dt>
           <dd className="text-ink">{dateTime(collection.occurred_at)}</dd>
         </div>
         <div>
-          <dt className="text-xs text-ink-muted">Reference</dt>
+          <dt className="text-xs text-ink-muted">UTR / Cheque No.</dt>
           <dd className="tabular-nums text-ink">{collection.reference ?? "—"}</dd>
         </div>
       </dl>
 
-      <Field label="Which site should issue it" hint="Pick the one the donor would recognise giving to">
-        <Select value={site} onChange={setSite} ariaLabel="Which site should issue it" options={SITES} disabled={blocked} />
+      <Field label="Site">
+        <Select value={site} onChange={setSite} ariaLabel="Site" options={SITES} disabled={blocked} />
       </Field>
     </Modal>
   );
@@ -883,7 +853,7 @@ function ReverseDialog({
 
   return (
     <Modal
-      title={`Reverse ${currency(Number(collection.amount))}?`}
+      title={`Remove ${currency(Number(collection.amount))}?`}
       tone="danger"
       onClose={onClose}
       footer={
@@ -907,14 +877,14 @@ function ReverseDialog({
                   method: "DELETE",
                   body: JSON.stringify({ reason: reason.trim() }),
                 });
-                await onDone(`${currency(Number(collection.amount))} reversed. The row keeps the reason you gave.`);
+                await onDone(`${currency(Number(collection.amount))} removed.`);
               } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not reverse that");
+                setError(e instanceof Error ? e.message : "Could not remove. Try again.");
                 setBusy(false);
               }
             }}
           >
-            Reverse it
+            Remove
           </Button>
         </>
       }
@@ -922,18 +892,16 @@ function ReverseDialog({
       {error && <Alert tone="danger">{error}</Alert>}
 
       <p className="mb-4 text-sm text-ink-soft">
-        This stops {collection.caller_name} being credited with {currency(Number(collection.amount))} from{" "}
-        {collection.donor_name ?? "this donor"}. The row is not deleted: it stays with your reason on it, which is
-        worth more than no record at all, and the money becomes free for whoever actually raised it to claim.
+        It will no longer count for {collection.caller_name}.
       </p>
 
-      <Field label="Why" htmlFor="rev-reason" required hint="Whoever reads this row in six months has only this line">
+      <Field label="Reason" htmlFor="rev-reason" required>
         <Textarea
           id="rev-reason"
           rows={3}
           value={reason}
           onChange={(e) => setReason(e.target.value)}
-          placeholder="Could not be found on the statement"
+          placeholder="e.g. Not found in bank"
         />
       </Field>
     </Modal>

@@ -46,13 +46,13 @@ export default function SevaPage() {
       <PageHeader
         eyebrow="Fulfilment"
         title="Seva bookings"
-        subtitle="The sevas the temple offers, and the slots people have booked."
+        subtitle="Sevas and booked slots."
       />
 
       <Card className="mb-5">
-        <CardHeader title="Seva types" subtitle="What can be booked." icon="tag" />
+        <CardHeader title="Seva types" subtitle="What can be booked" icon="tag" />
         {types.length === 0 ? (
-          <p className="text-sm text-ink-muted">No seva types defined yet.</p>
+          <p className="text-sm text-ink-muted">No seva types yet.</p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {types.map((t) => (
@@ -68,8 +68,8 @@ export default function SevaPage() {
         <Card padded={false}>
           <EmptyState
             icon="calendar"
-            title="Slot bookings are not built yet"
-            message="This screen can list the seva types above, but nothing here reads real slots: it asks the server for a seva type that does not exist, so no booking ever comes back. The seva routes are still on the server for whoever builds it."
+            title="No bookings yet"
+            message="Seva bookings are coming soon."
           />
         </Card>
       ) : (

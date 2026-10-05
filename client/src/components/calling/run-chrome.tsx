@@ -24,7 +24,7 @@ export function RunProgress({ counts }: { counts: RunCounts }) {
       <div
         className="flex h-2 w-full overflow-hidden rounded-pill bg-sunken"
         role="img"
-        aria-label={`${counts.done} called, ${counts.skipped} skipped, ${counts.pending} still to call, of ${counts.total}`}
+        aria-label={`${counts.done} called, ${counts.skipped} skipped, ${counts.pending} left, of ${counts.total}`}
       >
         <span className="h-full bg-brand-600 transition-[width] duration-500" style={{ width: pct(counts.done) }} />
         <span className="h-full bg-warn transition-[width] duration-500" style={{ width: pct(counts.skipped) }} />
@@ -41,11 +41,11 @@ export function RunProgress({ counts }: { counts: RunCounts }) {
         )}
         {counts.taken > 0 && (
           <span>
-            <span className="font-semibold tabular-nums">{number(counts.taken)}</span> with colleagues
+            <span className="font-semibold tabular-nums">{number(counts.taken)}</span> with others
           </span>
         )}
         <span>
-          <span className="font-semibold tabular-nums text-ink">{number(counts.ahead)}</span> still ahead
+          <span className="font-semibold tabular-nums text-ink">{number(counts.ahead)}</span> left
         </span>
       </p>
     </div>
@@ -76,7 +76,7 @@ export function RunHeader({
           <h1 className="truncate text-lg font-semibold tracking-tight text-ink sm:text-2xl">{label}</h1>
           <p className="mt-0.5 flex flex-wrap items-center gap-2 text-sm text-ink-muted">
             <span className="tabular-nums">
-              {finished ? "All the way through" : `${number(counts.index)} of ${number(counts.total)}`}
+              {finished ? "All done" : `${number(counts.index)} of ${number(counts.total)}`}
             </span>
             {paused && (
               <Badge tone="warn" dot>

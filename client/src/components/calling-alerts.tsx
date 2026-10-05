@@ -110,7 +110,7 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
         setAlerts((prev) => [...a.alerts, ...prev].slice(0, 20));
         if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
           for (const al of a.alerts) {
-            new Notification(al.lead_name ? `${al.lead_name} — reminder` : "Reminder", {
+            new Notification(al.lead_name ? `Reminder: ${al.lead_name}` : "Reminder", {
               body: al.title,
               tag: al.id,
             });

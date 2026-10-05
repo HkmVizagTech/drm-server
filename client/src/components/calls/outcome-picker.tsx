@@ -19,9 +19,9 @@ export interface OutcomeOption {
 
 /** The bundles a caller actually reaches for. Slugs missing from Settings are dropped. */
 const BUNDLES: { label: string; slugs: string[] }[] = [
-  { label: "Didn't pick up", slugs: ["no_answer", "busy", "switched_off"] },
-  { label: "Said they'd give", slugs: ["promised", "interested", "will_donate", "will_pay_qr"] },
-  { label: "Gave on the call", slugs: ["donated"] },
+  { label: "Not answered", slugs: ["no_answer", "busy", "switched_off"] },
+  { label: "Will give", slugs: ["promised", "interested", "will_donate", "will_pay_qr"] },
+  { label: "Gave", slugs: ["donated"] },
 ];
 
 export function OutcomePicker({
@@ -57,11 +57,11 @@ export function OutcomePicker({
   const same = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
 
   const summary = !value.length
-    ? "Any outcome"
+    ? "Any result"
     : bundles.find((b) => same(b.slugs, value))?.label ??
       (value.length === 1
         ? options.find((o) => o.slug === value[0])?.label ?? value[0].replace(/_/g, " ")
-        : `${value.length} outcomes`);
+        : `${value.length} results`);
 
   const toggle = (slug: string) =>
     onChange(value.includes(slug) ? value.filter((s) => s !== slug) : [...value, slug]);
@@ -88,7 +88,7 @@ export function OutcomePicker({
       {open && (
         <div
           role="dialog"
-          aria-label="Choose outcomes"
+          aria-label="Pick call results"
           className="fade-rise absolute left-0 right-0 z-50 mt-1 min-w-64 rounded-control border border-line-strong bg-surface shadow-float sm:right-auto"
         >
           {bundles.length > 0 && (
@@ -119,11 +119,11 @@ export function OutcomePicker({
                 <Checkbox checked={value.includes(o.slug)} onChange={() => toggle(o.slug)} label={o.label} />
               </div>
             ))}
-            {!options.length && <p className="px-3 py-2 text-sm text-ink-faint">Loading outcomes…</p>}
+            {!options.length && <p className="px-3 py-2 text-sm text-ink-faint">Loading…</p>}
           </div>
           <div className="flex items-center justify-between gap-2 border-t border-line-soft bg-sunken px-2.5 py-2">
             <Button size="sm" variant="ghost" onClick={() => onChange([])} disabled={!value.length}>
-              Any outcome
+              Clear
             </Button>
             <Button size="sm" onClick={() => setOpen(false)}>
               Done

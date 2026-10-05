@@ -59,7 +59,7 @@ const roleOptions = ["donor", "volunteer", "folk", "congregation"];
 
 const sortOptions = [
   { value: "recent", label: "Recently added" },
-  { value: "lifetime", label: "Highest total donated" },
+  { value: "lifetime", label: "Highest total" },
   { value: "donations", label: "Most donations" },
   { value: "last_gift", label: "Most recent donation" },
   { value: "name", label: "Name (A–Z)" },
@@ -127,7 +127,7 @@ export default function PeoplePage() {
       // said "no records" when the truth was "the server refused", or "the
       // server broke" - indistinguishable to anybody without DevTools open,
       // and the reason a permissions bug can sit unnoticed for weeks.
-      .catch((e) => setLoadError(e instanceof Error ? e.message : "Could not load this list"))
+      .catch((e) => setLoadError(e instanceof Error ? e.message : "Could not load. Try again."))
       .finally(() => setLoading(false));
   }, [filterParams]);
 
@@ -156,16 +156,16 @@ export default function PeoplePage() {
 
       const siteError = result.sites?.[siteKey]?.error;
       setImportMessage(
-        `${label}: ${number(result.donorsProcessed)} donors — ` +
+        `${label}: ${number(result.donorsProcessed)} donors. ` +
           `${number(result.peopleCreated)} new, ${number(result.donationsSynced)} donations, ` +
-          `${number(result.subscriptionsSynced)} subscriptions, ${number(result.deliveriesSynced)} prasadam` +
+          `${number(result.subscriptionsSynced)} recurring, ${number(result.deliveriesSynced)} prasadam` +
           (result.failureCount ? `, ${number(result.failureCount)} skipped` : "") +
-          (siteError ? ` — stopped early: ${siteError}` : "")
+          (siteError ? `. Stopped early: ${siteError}` : "")
       );
       setPage(1);
       fetchPeople();
     } catch (err) {
-      setImportMessage(`${label}: ${err instanceof Error ? err.message : "import failed"}`);
+      setImportMessage(`${label}: ${err instanceof Error ? err.message : "Import failed. Try again."}`);
     } finally {
       setImporting(null);
     }
@@ -192,7 +192,7 @@ export default function PeoplePage() {
       <PageHeader
         eyebrow="Donors"
         title="People"
-        subtitle={data ? `${number(data.total)} records${hasFilters ? " matching your filters" : ""}` : undefined}
+        subtitle={data ? `${number(data.total)} people${hasFilters ? " found" : ""}` : undefined}
         actions={
           <>
             {importSites.map((s) => (
@@ -203,7 +203,7 @@ export default function PeoplePage() {
                 onClick={() => runImport(s.key, s.label)}
                 disabled={importing !== null}
                 loading={importing === s.key}
-                title={`Pull donors and donations from ${s.label}. Safe to re-run - it updates rather than duplicates.`}
+                title={`Get donors from ${s.label}`}
               >
                 {importing === s.key ? "Importing…" : `Import ${s.label}`}
               </Button>
@@ -213,11 +213,11 @@ export default function PeoplePage() {
                 path="/api/people/export"
                 params={filterParams()}
                 filename="people"
-                hint={data ? `${number(data.total)} people match these filters` : undefined}
+                hint={data ? `${number(data.total)} people` : undefined}
               />
             )}
             <Button icon="plus" onClick={() => setShowModal(true)}>
-              Add Person
+              Add person
             </Button>
           </>
         }
@@ -233,7 +233,7 @@ export default function PeoplePage() {
             id="people-search"
             value={search}
             onChange={setSearch}
-            placeholder="Name, phone or email…"
+            placeholder="Name, mobile or e-mail…"
           />
         </Field>
         <Field label="Role" className="flex-1 min-w-[9rem]">
@@ -256,8 +256,8 @@ export default function PeoplePage() {
         <Field label="Donation page" className="flex-1 min-w-[9rem]">
           <Select value={groupFilter} onChange={(v) => setGroupFilter(v)} ariaLabel="Donation page">
             <option value="">Any page</option>
-            <option value="donations">Donations page (incl. nested)</option>
-            <option value="donate">Donate — seva campaigns</option>
+            <option value="donations">Donations pages</option>
+            <option value="donate">Seva pages</option>
             <option value="other">Other pages</option>
           </Select>
         </Field>
@@ -356,8 +356,8 @@ export default function PeoplePage() {
                   title={hasFilters ? "No matches" : "No people yet"}
                   message={
                     hasFilters
-                      ? "Try a different search term or clear the filters."
-                      : "Import your donors from the HKMV site, or add someone manually."
+                      ? "Try another search or clear filters."
+                      : "Import donors or add one."
                   }
                   action={
                     !hasFilters && importSites.length ? (
@@ -423,7 +423,7 @@ function AddPersonModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
       onAdded();
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to add person");
+      setError(err instanceof Error ? err.message : "Could not save. Try again.");
     } finally {
       setLoading(false);
     }
@@ -431,7 +431,7 @@ function AddPersonModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
 
   return (
     <Modal
-      title="Add Person"
+      title="Add person"
       onClose={onClose}
       footer={
         <>
@@ -442,20 +442,16 @@ function AddPersonModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
               is tied back to it by id. Without that it is a button in no form
               at all, and Add Person silently does nothing. */}
           <Button type="submit" form="add-person" loading={loading}>
-            {loading ? "Saving…" : "Add Person"}
+            {loading ? "Saving…" : "Add"}
           </Button>
         </>
       }
     >
       <form id="add-person" onSubmit={handleSubmit} className="space-y-4">
-        <p className="text-sm text-ink-muted">
-          Phone number is the unique key — an existing donor with this number will not be duplicated.
-        </p>
-
         {error && <Alert tone="danger">{error}</Alert>}
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="Full name" htmlFor="person-name" required className="sm:col-span-2">
+          <Field label="Name" htmlFor="person-name" required className="sm:col-span-2">
             <Input
               id="person-name"
               value={form.name}
@@ -463,7 +459,7 @@ function AddPersonModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
               required
             />
           </Field>
-          <Field label="Phone number" htmlFor="person-phone" required>
+          <Field label="Mobile Number" htmlFor="person-phone" required>
             <Input
               id="person-phone"
               value={form.phone}
@@ -471,7 +467,7 @@ function AddPersonModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
               required
             />
           </Field>
-          <Field label="Email" htmlFor="person-email">
+          <Field label="E-mail ID (optional)" htmlFor="person-email">
             <Input
               id="person-email"
               type="email"
@@ -479,7 +475,7 @@ function AddPersonModal({ onClose, onAdded }: { onClose: () => void; onAdded: ()
               onChange={(e) => setForm({ ...form, email: e.target.value })}
             />
           </Field>
-          <Field label="PAN" hint="For 80G receipts" htmlFor="person-pan">
+          <Field label="PAN Number" hint="Needed for 80G" htmlFor="person-pan">
             <Input
               id="person-pan"
               value={form.pan}

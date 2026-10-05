@@ -657,7 +657,7 @@ router.get('/reports/credits', CREDIT_READERS, async (req, res) => {
     });
   } catch (err) {
     console.error('crm.reportCredits error:', err);
-    res.status(500).json({ error: 'Could not load the credit list' });
+    res.status(500).json({ error: 'Could not load the list.' });
   }
 });
 
@@ -697,7 +697,7 @@ async function exportCreditsFile(
         `${describeFilters(req.query as Record<string, unknown>, {
           kind: 'Kind',
           verified: 'Verification',
-        })} | ${label} (${from} to ${to}) | ${f.me ? 'Own credits only' : f.who ? 'One caller' : 'All callers'}`,
+        })} | ${label} (${from} to ${to}) | ${f.me ? 'My total only' : f.who ? 'One caller' : 'All callers'}`,
       columns: [
         { header: 'Date', value: (r) => r.occurred_at, kind: 'datetime' },
         { header: 'Caller', value: (r) => r.caller_name },
@@ -717,7 +717,7 @@ async function exportCreditsFile(
     });
   } catch (err) {
     console.error('crm.exportCredits error:', err);
-    res.status(500).json({ error: 'Could not build that export' });
+    res.status(500).json({ error: 'Could not download. Try again.' });
   }
 }
 
@@ -878,7 +878,7 @@ router.get('/reports/callers', async (req, res) => {
     res.json({ range: { from, to, label }, callers: rows.rows });
   } catch (err) {
     console.error('crm.reportCallers error:', err);
-    res.status(500).json({ error: 'Could not build the caller report' });
+    res.status(500).json({ error: 'Could not load the caller report.' });
   }
 });
 
@@ -933,7 +933,7 @@ async function exportCallerReportFile(
     });
   } catch (err) {
     console.error('crm.exportCallerReport error:', err);
-    res.status(500).json({ error: 'Could not build that export' });
+    res.status(500).json({ error: 'Could not download. Try again.' });
   }
 }
 
@@ -1001,7 +1001,7 @@ router.get('/reports/timeline', async (req, res) => {
     res.json({ range: { from, to, label }, grain, buckets: rows.rows });
   } catch (err) {
     console.error('crm.reportTimeline error:', err);
-    res.status(500).json({ error: 'Could not build the timeline' });
+    res.status(500).json({ error: 'Could not load the timeline.' });
   }
 });
 
@@ -1059,7 +1059,7 @@ router.get('/reports/calls', async (req, res) => {
     res.json({ range: { from, to, label }, totals: totals.rows[0], by_disposition: byDisposition.rows, by_hour: byHour.rows });
   } catch (err) {
     console.error('crm.reportCalls error:', err);
-    res.status(500).json({ error: 'Could not build the call report' });
+    res.status(500).json({ error: 'Could not load the call report.' });
   }
 });
 
@@ -1120,7 +1120,7 @@ router.get('/reports/conversion', async (req, res) => {
     });
   } catch (err) {
     console.error('crm.reportConversion error:', err);
-    res.status(500).json({ error: 'Could not build the conversion report' });
+    res.status(500).json({ error: 'Could not load the report.' });
   }
 });
 
@@ -1148,7 +1148,7 @@ router.get('/reports/follow-ups', async (_req, res) => {
     res.json({ rows: rows.rows });
   } catch (err) {
     console.error('crm.reportFollowUps error:', err);
-    res.status(500).json({ error: 'Could not build the follow-up report' });
+    res.status(500).json({ error: 'Could not load the follow-up report.' });
   }
 });
 

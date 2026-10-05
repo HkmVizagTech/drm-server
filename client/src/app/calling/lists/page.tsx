@@ -176,7 +176,7 @@ export default function CallingListsPage() {
           setLoading(false);
         },
         (e) => {
-          setError(e instanceof Error ? e.message : "Could not load the lists");
+          setError(e instanceof Error ? e.message : "Could not load lists. Try again.");
           setLoading(false);
         }
       ),
@@ -212,13 +212,13 @@ export default function CallingListsPage() {
     try {
       const run = await startRun({ kind: "list", list_id: l.id });
       if (run.empty || !run.session) {
-        toast.info(`Nobody to call on “${l.name}” right now`, "Everyone on it has been rung, or is due another day.");
+        toast.info(`No one to call on “${l.name}” right now`);
         void load();
         return;
       }
       router.push(runHref(run.session.id));
     } catch (e) {
-      toast.error("Could not start calling", e instanceof Error ? e.message : undefined);
+      toast.error("Could not start calling. Try again.", e instanceof Error ? e.message : undefined);
     } finally {
       setStarting(null);
     }
@@ -232,7 +232,7 @@ export default function CallingListsPage() {
       });
       await load();
     } catch (e) {
-      toast.error("Could not change that list", e instanceof Error ? e.message : undefined);
+      toast.error("Could not save. Try again.", e instanceof Error ? e.message : undefined);
     }
   }
 
@@ -240,8 +240,8 @@ export default function CallingListsPage() {
     <div>
       <PageHeader
         eyebrow="Calling"
-        title="Calling lists"
-        subtitle="What a caller can pick up and work through. Every applied sheet becomes one automatically."
+        title="Lists"
+        subtitle="Groups of people to call."
         actions={
           <>
             <Link href="/calling/start" className={buttonSecondary}>
@@ -249,7 +249,7 @@ export default function CallingListsPage() {
             </Link>
             {elevated && (
               <Button icon="plus" onClick={() => setShowNew(true)}>
-                Build a list
+                New list
               </Button>
             )}
           </>
@@ -261,7 +261,7 @@ export default function CallingListsPage() {
       {elevated && (
         <Toolbar onClear={() => setShowRetired(false)} activeCount={showRetired ? 1 : 0}>
           <Field label="Retired lists">
-            <Checkbox checked={showRetired} onChange={setShowRetired} label="Show them too" className="h-9.5" />
+            <Checkbox checked={showRetired} onChange={setShowRetired} label="Show" className="h-9.5" />
           </Field>
           <p className="ml-auto pb-2 text-xs text-ink-muted">{plural(lists.length, "list", "lists")}</p>
         </Toolbar>
@@ -285,8 +285,8 @@ export default function CallingListsPage() {
             title="No lists yet"
             message={
               elevated
-                ? "Apply an uploaded sheet and its list appears here, or build one from a tag, a preacher or a city."
-                : "Nothing has been set up to call yet. Start calling still finds everyone who is due."
+                ? "Upload a sheet or make a new list."
+                : "Ask your admin for a list."
             }
             action={
               elevated ? (
@@ -403,13 +403,13 @@ function ListCard({
         <div className="min-w-0">
           <h2 className="text-sm font-semibold text-ink">{l.name}</h2>
           <p className="mt-0.5 text-2xs text-ink-muted">
-            {l.origin === "import" ? "From a sheet" : "Built by hand"}
+            {l.origin === "import" ? "From a sheet" : "Made by hand"}
             {l.created_by_name && ` · ${l.created_by_name}`}
             {` · ${relativeDate(l.created_at)}`}
           </p>
         </div>
         <div className="flex flex-none flex-wrap justify-end gap-1">
-          {l.assigned_to_me && <Badge tone="brand">Given to you</Badge>}
+          {l.assigned_to_me && <Badge tone="brand">Yours</Badge>}
           {!l.active && <Badge>Retired</Badge>}
         </div>
       </div>
@@ -421,7 +421,7 @@ function ListCard({
 
       <div className="mt-3 flex flex-wrap gap-1">
         {l.members_only ? (
-          <Badge tone="info">Hand-picked people</Badge>
+          <Badge tone="info">Hand-picked</Badge>
         ) : (
           <>
             {l.batch_filename && <Badge>{l.batch_sheet || l.batch_filename}</Badge>}
@@ -439,7 +439,7 @@ function ListCard({
       <div className="mt-4 flex items-end gap-6">
         <div>
           <p className="text-2xl font-semibold tabular-nums text-ink">{number(l.to_call)}</p>
-          <p className="text-xs text-ink-muted">{elevated ? "to call for you" : "to call now"}</p>
+          <p className="text-xs text-ink-muted">{elevated ? "for you" : "to call"}</p>
         </div>
         {elevated && (
           <div>
@@ -454,7 +454,7 @@ function ListCard({
           <div
             className="h-1.5 overflow-hidden rounded-pill bg-sunken"
             role="progressbar"
-            aria-label="Reached so far"
+            aria-label="Called so far"
             aria-valuenow={reached}
             aria-valuemin={0}
             aria-valuemax={100}
@@ -462,7 +462,7 @@ function ListCard({
             <div className="h-full rounded-pill bg-brand-500" style={{ width: `${reached}%` }} />
           </div>
           <p className="mt-1 text-xs text-ink-muted">
-            {number(l.called)} of {plural(l.total, "person", "people")} reached
+            {number(l.called)} of {plural(l.total, "person", "people")} called
             {l.converted > 0 && ` · ${number(l.converted)} donated`}
           </p>
         </div>
@@ -484,7 +484,7 @@ function ListCard({
           className="col-span-2 sm:col-span-1"
         >
           {l.session_id
-            ? `Carry on — ${plural(l.session_calls ?? 0, "call", "calls")} so far`
+            ? `Continue (${plural(l.session_calls ?? 0, "call", "calls")})`
             : "Start calling"}
         </Button>
         {/* callable=true: the same people a run would hand over, not
@@ -493,18 +493,18 @@ function ListCard({
           href={`/leads?list=${l.id}&callable=true`}
           className={buttonClass("secondary", "md", elevated ? "" : "col-span-2 sm:col-span-1")}
         >
-          See them
+          See leads
         </Link>
         {elevated && (
           <DropdownMenu
             className="min-w-0"
             items={[
-              { label: "Edit the list", icon: "edit", hint: "Name, who is in it, people added by hand", onSelect: onEdit },
-              { label: "Share out between callers", icon: "users", hint: "Deal its people evenly", onSelect: onShare },
-              { label: "Give to…", icon: "userPlus", hint: "Put it first on their start screen", onSelect: onAssign },
+              { label: "Edit", icon: "edit", onSelect: onEdit },
+              { label: "Split between callers", icon: "users", onSelect: onShare },
+              { label: "Give to callers", icon: "userPlus", onSelect: onAssign },
               l.active
-                ? { label: "Retire", icon: "trash", hint: "Hide it from callers", onSelect: onRetire, tone: "danger" as const }
-                : { label: "Bring it back", icon: "refresh", onSelect: onRetire },
+                ? { label: "Retire", icon: "trash", hint: "Hide from callers", onSelect: onRetire, tone: "danger" as const }
+                : { label: "Bring back", icon: "refresh", onSelect: onRetire },
             ]}
             trigger={({ open, toggle }) => (
               <Button
@@ -523,7 +523,7 @@ function ListCard({
         )}
       </div>
       {l.session_id && l.session_last_active && (
-        <p className="mt-2 text-2xs text-ink-faint">Your run on this list was last used {relativeDate(l.session_last_active).toLowerCase()}.</p>
+        <p className="mt-2 text-2xs text-ink-faint">Last called {relativeDate(l.session_last_active).toLowerCase()}</p>
       )}
     </Card>
   );
@@ -576,11 +576,11 @@ function PreviewLine({ preview }: { preview: ReturnType<typeof useListPreview> }
   return (
     <p className="mt-3 flex items-center gap-2 rounded-control bg-sunken px-3 py-2 text-sm text-ink" aria-live="polite">
       {failed ? (
-        <span className="text-ink-muted">Could not count that just now.</span>
+        <span className="text-ink-muted">Could not count.</span>
       ) : result ? (
         <span className={counting ? "opacity-50" : ""}>
-          Finds <strong className="tabular-nums">{plural(result.total, "person", "people")}</strong> ·{" "}
-          <strong className="tabular-nums">{number(result.to_call)}</strong> due to call now
+          <strong className="tabular-nums">{plural(result.total, "person", "people")}</strong> ·{" "}
+          <strong className="tabular-nums">{number(result.to_call)}</strong> to call now
         </span>
       ) : (
         <span className="text-ink-muted">Counting…</span>
@@ -612,22 +612,22 @@ function ListFilterFields({
   const set = (k: keyof ListFilters) => (v: string) => onChange({ ...value, [k]: v });
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      <Field label="From an uploaded sheet">
+      <Field label="Sheet">
         <Select
           value={value.import_batch_id}
           onChange={set("import_batch_id")}
-          ariaLabel="From an uploaded sheet"
+          ariaLabel="Sheet"
           placeholder="Any sheet"
           options={[
             { value: "", label: "Any sheet" },
             ...batches.map((b) => ({
               value: b.id,
-              label: b.sheet_name ? `${b.filename} — ${b.sheet_name}` : b.filename,
+              label: b.sheet_name ? `${b.filename} · ${b.sheet_name}` : b.filename,
             })),
           ]}
         />
       </Field>
-      <Field label="With the tag" htmlFor="list-tag">
+      <Field label="Tag" htmlFor="list-tag">
         <Input
           id="list-tag"
           value={value.tag}
@@ -636,11 +636,11 @@ function ListFilterFields({
           autoCapitalize="off"
         />
       </Field>
-      <Field label="Brought in by">
+      <Field label="Preacher">
         <Select
           value={value.preacher_id}
           onChange={set("preacher_id")}
-          ariaLabel="Brought in by"
+          ariaLabel="Preacher"
           placeholder="Any preacher"
           options={[
             { value: "", label: "Any preacher" },
@@ -648,28 +648,28 @@ function ListFilterFields({
           ]}
         />
       </Field>
-      <Field label="At stage">
+      <Field label="Stage">
         <Select
           value={value.status_slug}
           onChange={set("status_slug")}
-          ariaLabel="At stage"
+          ariaLabel="Stage"
           placeholder="Any stage"
           options={[{ value: "", label: "Any stage" }, ...statuses.map((s) => ({ value: s.slug, label: s.label }))]}
         />
       </Field>
-      <Field label="Came in as">
+      <Field label="Source">
         <Select
           value={value.source}
           onChange={set("source")}
-          ariaLabel="Came in as"
+          ariaLabel="Source"
           placeholder="Any source"
           options={[{ value: "", label: "Any source" }, ...SOURCES.map((s) => ({ value: s.key, label: s.label }))]}
         />
       </Field>
-      <Field label="In or near" htmlFor="list-city">
+      <Field label="City" htmlFor="list-city">
         <Input id="list-city" value={value.city} onChange={(e) => set("city")(e.target.value)} placeholder="Any city" />
       </Field>
-      <Field label="Has given at least (₹, lifetime)" htmlFor="list-min" className="sm:col-span-2">
+      <Field label="Total given, at least (₹)" htmlFor="list-min" className="sm:col-span-2">
         <Input
           id="list-min"
           value={value.min_external_total}
@@ -709,7 +709,7 @@ function NewListDialog({
   const preview = useListPreview(filters);
 
   async function save() {
-    if (!name.trim()) return setError("Give the list a name");
+    if (!name.trim()) return setError("Enter a list name.");
     setBusy(true);
     setError(null);
     try {
@@ -723,17 +723,17 @@ function NewListDialog({
         city: filters.city.trim() || undefined,
         min_external_total: filters.min_external_total || undefined,
       });
-      toast(`Made the list “${name.trim()}”`);
+      toast(`List “${name.trim()}” made`);
       onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that list");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
       setBusy(false);
     }
   }
 
   return (
     <Modal
-      title="Build a calling list"
+      title="New list"
       onClose={onClose}
       footer={
         <>
@@ -741,14 +741,14 @@ function NewListDialog({
             Cancel
           </Button>
           <Button onClick={() => void save()} disabled={busy || !name.trim()} loading={busy}>
-            {busy ? "Saving…" : "Create the list"}
+            {busy ? "Saving…" : "Create list"}
           </Button>
         </>
       }
     >
       {error && <Alert tone="danger">{error}</Alert>}
 
-      <Field label="What to call it" htmlFor="list-name" required>
+      <Field label="List name" htmlFor="list-name" required>
         <Input
           id="list-name"
           value={name}
@@ -769,9 +769,7 @@ function NewListDialog({
 
       {isEmpty(filters) && (
         <Alert tone="warn" className="mb-0 mt-3">
-          Nothing chosen, so this list will hold every lead — the same as &ldquo;Everything that is due&rdquo;. Narrow it
-          unless that is what you want. To make a list of particular people, tick them on the Leads screen and choose
-          &ldquo;Add to a list&rdquo;.
+          Nothing picked. This list will have every lead.
         </Alert>
       )}
     </Modal>
@@ -835,7 +833,7 @@ function EditListDialog({
     () =>
       apiClient
         .get<{ members: Member[] }>(`/api/crm/lists/${list.id}/members`)
-        .then((d) => setMembers(d.members), (e) => setError(e instanceof Error ? e.message : "Could not load the people")),
+        .then((d) => setMembers(d.members), (e) => setError(e instanceof Error ? e.message : "Could not load. Try again.")),
     [list.id]
   );
 
@@ -850,18 +848,18 @@ function EditListDialog({
       setMembers((all) => (all ? all.filter((x) => x.lead_id !== m.lead_id) : all));
       toast(
         m.kind === "include"
-          ? `Took ${m.name || m.phone} off the list`
-          : `${m.name || m.phone} is in or out by the filters again`
+          ? `Removed ${m.name || m.phone}`
+          : `${m.name || m.phone} follows the filters again`
       );
     } catch (e) {
-      toast.error("Could not change that", e instanceof Error ? e.message : undefined);
+      toast.error("Could not save. Try again.", e instanceof Error ? e.message : undefined);
     } finally {
       setRemoving(null);
     }
   }
 
   async function save() {
-    if (!name.trim()) return setError("A list needs a name");
+    if (!name.trim()) return setError("Enter a list name.");
     setBusy(true);
     setError(null);
     try {
@@ -884,7 +882,7 @@ function EditListDialog({
       toast(`Saved “${name.trim()}”`);
       onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that list");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
       setBusy(false);
     }
   }
@@ -903,7 +901,7 @@ function EditListDialog({
             Cancel
           </Button>
           <Button onClick={() => void save()} loading={busy} disabled={!name.trim()}>
-            Save changes
+            Save
           </Button>
         </>
       }
@@ -916,17 +914,17 @@ function EditListDialog({
         </Field>
         <div className="flex items-center justify-between gap-3 rounded-control border border-line-soft px-3 py-2 sm:mt-5">
           <span className="text-sm text-ink-soft">
-            {active ? "Callers can see it" : "Retired — hidden from callers"}
+            {active ? "Shown to callers" : "Hidden from callers"}
           </span>
           <Toggle on={active} onChange={setActiveState} label="List is active" />
         </div>
-        <Field label="What it is for (optional)" htmlFor="edit-list-desc" className="sm:col-span-2">
+        <Field label="Note (optional)" htmlFor="edit-list-desc" className="sm:col-span-2">
           <Textarea
             id="edit-list-desc"
             rows={2}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="e.g. Lapsed Janmashtami donors — ring before 15 August"
+            placeholder="e.g. Call before 15 August"
           />
         </Field>
       </div>
@@ -935,12 +933,12 @@ function EditListDialog({
       <Checkbox
         checked={membersOnly}
         onChange={setMembersOnly}
-        label="Only the people added by hand — ignore the filters"
+        label="Only people added by hand"
         className="mb-3"
       />
       {membersOnly ? (
         <p className="rounded-control bg-sunken px-3 py-2 text-sm text-ink">
-          Holds exactly the {plural(included.length, "person", "people")} added by hand below.
+          {plural(included.length, "person", "people")} added by hand.
         </p>
       ) : (
         <>
@@ -955,7 +953,7 @@ function EditListDialog({
           {included.length > 0 && (
             <p className="mt-1.5 text-xs text-ink-muted">
               Plus {plural(included.length, "person", "people")} added by hand
-              {excluded.length > 0 && `, less ${number(excluded.length)} left out`}.
+              {excluded.length > 0 && ` · ${number(excluded.length)} left out`}
             </p>
           )}
         </>
@@ -967,16 +965,14 @@ function EditListDialog({
       {members === null ? (
         <Skeleton className="h-16 w-full" />
       ) : !members.length ? (
-        <p className="text-sm text-ink-muted">
-          Nobody yet. Tick people on the Leads screen and choose &ldquo;Add to a list&rdquo;.
-        </p>
+        <p className="text-sm text-ink-muted">No one yet.</p>
       ) : (
         <ul className="max-h-72 divide-y divide-line-soft overflow-y-auto rounded-card border border-line-soft scroll-slim">
           {[...included, ...excluded].map((m) => (
             <li key={m.lead_id} className="flex items-center gap-3 px-3 py-2">
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm text-ink">
-                  {m.name || "Name not known"}{" "}
+                  {m.name || "No name"}{" "}
                   <span className="text-xs tabular-nums text-ink-muted">{m.phone}</span>
                 </p>
                 <p className="text-2xs text-ink-faint">
@@ -991,7 +987,7 @@ function EditListDialog({
                 icon="x"
                 loading={removing === m.lead_id}
                 onClick={() => void removeMember(m)}
-                title={m.kind === "include" ? "Take them off this list" : "Let the filters decide again"}
+                title={m.kind === "include" ? "Remove from list" : "Use filters again"}
               >
                 Remove
               </Button>
@@ -1040,24 +1036,24 @@ function SplitDialog({
       );
       if (!r.dealt) {
         toast.info(
-          "Nobody to deal",
+          "No one to split",
           includeAssigned
-            ? "Nobody on this list can be called."
-            : "Everyone on it already has a caller. Tick “Also re-deal…” to share those out too."
+            ? "No one on this list can be called."
+            : "Everyone already has a caller."
         );
       } else {
-        toast(`Dealt ${number(r.dealt)}: ${r.shares.map((s) => `${s.name ?? "?"} ${number(s.count)}`).join(", ")}`);
+        toast(`Split ${number(r.dealt)}: ${r.shares.map((s) => `${s.name ?? "?"} ${number(s.count)}`).join(", ")}`);
       }
       onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not share that list out");
+      setError(e instanceof Error ? e.message : "Could not split. Try again.");
       setBusy(false);
     }
   }
 
   return (
     <Modal
-      title={`Share out ${list.name}`}
+      title={`Split ${list.name}`}
       onClose={onClose}
       footer={
         <>
@@ -1065,16 +1061,13 @@ function SplitDialog({
             Cancel
           </Button>
           <Button onClick={() => void deal()} loading={busy} disabled={!chosen.size}>
-            {chosen.size ? `Deal between ${plural(chosen.size, "caller", "callers")}` : "Choose callers"}
+            {chosen.size ? `Split between ${plural(chosen.size, "caller", "callers")}` : "Pick callers"}
           </Button>
         </>
       }
     >
       {error && <Alert tone="danger">{error}</Alert>}
-      <p className="mb-3 text-sm text-ink-muted">
-        Everyone on the list who can still be called is handed out in turn, most urgent first, and the list goes on
-        each caller&rsquo;s start screen. {number(list.to_call_all)} of them are due now.
-      </p>
+      <p className="mb-3 text-sm text-ink-muted">{number(list.to_call_all)} to call now.</p>
 
       <div className="mb-2 flex items-center justify-between">
         <p className="text-xs font-medium text-ink-soft">Callers</p>
@@ -1107,20 +1100,15 @@ function SplitDialog({
             <span className="ml-auto text-2xs capitalize text-ink-faint">{u.role?.replace(/_/g, " ")}</span>
           </div>
         ))}
-        {!callers.length && <p className="text-sm text-ink-muted">Nobody on the team takes calls yet.</p>}
+        {!callers.length && <p className="text-sm text-ink-muted">No callers yet.</p>}
       </div>
 
       <div className="mt-4 rounded-control border border-line-soft p-3">
         <Checkbox
           checked={includeAssigned}
           onChange={setIncludeAssigned}
-          label="Also re-deal leads already assigned to someone"
+          label="Also move leads that have a caller"
         />
-        {includeAssigned && (
-          <p className="mt-1.5 text-xs text-warn">
-            Leads other callers are working will be moved to whoever they are dealt to.
-          </p>
-        )}
       </div>
     </Modal>
   );
@@ -1152,7 +1140,7 @@ function AssignDialog({
         setChosen(new Set(d.assignees.map((a) => a.user_id)));
         setNote(d.assignees[0]?.note ?? "");
       })
-      .catch((e) => setError(e instanceof Error ? e.message : "Could not load who has this"));
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load. Try again."));
   }, [list.id]);
 
   return (
@@ -1177,11 +1165,11 @@ function AssignDialog({
                 toast(
                   chosen.size
                     ? `Gave “${list.name}” to ${plural(chosen.size, "caller", "callers")}`
-                    : `“${list.name}” is no longer given to anyone`
+                    : `“${list.name}” has no callers now`
                 );
                 onDone();
               } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not save that");
+                setError(e instanceof Error ? e.message : "Could not save. Try again.");
                 setBusy(false);
               }
             }}
@@ -1193,10 +1181,7 @@ function AssignDialog({
     >
       {error && <Alert tone="danger">{error}</Alert>}
 
-      <p className="mb-3 text-sm text-ink-muted">
-        It becomes their default when they press Start calling. They can still choose another list — a caller who
-        finishes early should not be stuck. To hand each of them their own share of the people, use Share out instead.
-      </p>
+
 
       <div className="max-h-64 space-y-1 overflow-y-auto scroll-slim">
         {users.map((u) => (
@@ -1219,12 +1204,12 @@ function AssignDialog({
         ))}
       </div>
 
-      <Field label="A note for them (optional)" htmlFor="assign-note" className="mt-4">
+      <Field label="Note (optional)" htmlFor="assign-note" className="mt-4">
         <Input
           id="assign-note"
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          placeholder="e.g. Finish before Friday — the festival is on Saturday"
+          placeholder="e.g. Finish by Friday"
         />
       </Field>
     </Modal>

@@ -288,9 +288,9 @@ async function checkBatch(
               WHEN l.do_not_call THEN 'Asked not to be called'
               WHEN l.invalid_reason IS NOT NULL THEN 'Number is not valid'
               WHEN COALESCE(st.is_open, TRUE) = FALSE THEN 'Now ' || COALESCE(st.label, l.status)
-              WHEN oc.at IS NOT NULL THEN 'Rung by ' || COALESCE(oc.by_name, 'a colleague')
+              WHEN oc.at IS NOT NULL THEN 'Called by ' || COALESCE(oc.by_name, 'another caller')
               WHEN l.claimed_by IS NOT NULL AND l.claimed_by <> $2::uuid AND l.claimed_until > NOW()
-                THEN COALESCE(cu.name, 'A colleague') || ' is on a call with them'
+                THEN COALESCE(cu.name, 'Someone') || ' is calling them'
               ELSE NULL END AS blocked
        FROM calling_session_items i
        JOIN leads l ON l.id = i.lead_id
@@ -362,7 +362,7 @@ async function moveNext(
     for (const row of batch.rows) {
       cur = row.position;
       let reason = blocked.get(row.position) ?? null;
-      if (!reason && !(await claim(row.lead_id, me))) reason = 'A colleague is on a call with them';
+      if (!reason && !(await claim(row.lead_id, me))) reason = 'Someone else is calling them';
       if (reason) {
         await pool.query(
           `UPDATE calling_session_items SET state = 'taken', note = $3 WHERE session_id = $1 AND position = $2`,
@@ -587,7 +587,7 @@ router.get('/sessions/sources', async (req, res) => {
     });
   } catch (err) {
     console.error('crm.sessionSources error:', err);
-    res.status(500).json({ error: 'Could not work out who there is to call' });
+    res.status(500).json({ error: 'Could not load who to call.' });
   }
 });
 
@@ -631,7 +631,7 @@ router.post('/sessions', async (req, res) => {
     let listName: string | null = null;
     if (src.kind === 'list') {
       const l = await pool.query(`SELECT name FROM calling_lists WHERE id = $1 AND active`, [src.list_id]);
-      if (!l.rows.length) return res.status(404).json({ error: 'That list is not available' });
+      if (!l.rows.length) return res.status(404).json({ error: 'List not found.' });
       listName = l.rows[0].name;
     }
 
@@ -685,10 +685,10 @@ router.post('/sessions', async (req, res) => {
     res.status(201).json({ ...(await sessionState(fresh, me)), resumed: false, adopted, passed: moved.passed, count });
   } catch (err) {
     if ((err as { code?: string }).code === '23505') {
-      return res.status(409).json({ error: 'That run was just started in another tab - open it from the start screen' });
+      return res.status(409).json({ error: 'Already open in another tab.' });
     }
     console.error('crm.openSession error:', err);
-    res.status(500).json({ error: 'Could not start calling' });
+    res.status(500).json({ error: 'Could not start calling. Try again.' });
   }
 });
 
@@ -709,7 +709,7 @@ router.get('/sessions/current', async (req, res) => {
     res.json({ session: s });
   } catch (err) {
     console.error('crm.currentSession error:', err);
-    res.status(500).json({ error: 'Could not load your calling session' });
+    res.status(500).json({ error: 'Could not load your list.' });
   }
 });
 
@@ -750,11 +750,11 @@ router.get('/sessions/:id', async (req, res) => {
   const me = req.user?.userId ?? null;
   try {
     const session = await loadSession(req.params.id, me);
-    if (!session) return res.status(404).json({ error: 'That run is not yours, or no longer exists' });
+    if (!session) return res.status(404).json({ error: 'List not found.' });
     res.json(await sessionState(session, me!));
   } catch (err) {
     console.error('crm.sessionState error:', err);
-    res.status(500).json({ error: 'Could not load where you were' });
+    res.status(500).json({ error: 'Could not load your place.' });
   }
 });
 
@@ -774,7 +774,7 @@ router.post('/sessions/:id/move', async (req, res) => {
   const action = String(req.body?.action ?? 'next');
   try {
     const session = await loadSession(req.params.id, me);
-    if (!session || session.ended_at) return res.status(404).json({ error: 'That run is finished' });
+    if (!session || session.ended_at) return res.status(404).json({ error: 'This list is finished.' });
 
     let message: string | null = null;
     let passed: { name: string | null; reason: string }[] = [];
@@ -790,7 +790,7 @@ router.post('/sessions/:id/move', async (req, res) => {
         `SELECT position, lead_id, state FROM calling_session_items WHERE session_id = $1 AND position = $2`,
         [session.id, pos]
       );
-      if (!target.rows.length) return res.status(404).json({ error: 'Nobody at that place in the run' });
+      if (!target.rows.length) return res.status(404).json({ error: 'Nobody at that spot.' });
       const t = target.rows[0];
       if (t.state === 'pending' || t.state === 'taken') {
         const blocked = (await checkBatch(session.id, me!, [pos])).get(pos);
@@ -802,7 +802,7 @@ router.post('/sessions/:id/move', async (req, res) => {
           );
         }
       }
-      if (!(await claim(t.lead_id, me!))) return res.status(409).json({ error: 'A colleague is on a call with them' });
+      if (!(await claim(t.lead_id, me!))) return res.status(409).json({ error: 'Someone else is calling them' });
       // Leaving somebody uncalled to jump elsewhere counts as skipping them.
       await pool.query(
         `UPDATE calling_session_items SET state = 'skipped'
@@ -832,7 +832,7 @@ router.post('/sessions/:id/move', async (req, res) => {
     res.json({ ...(await sessionState(fresh, me!)), message, passed });
   } catch (err) {
     console.error('crm.sessionMove error:', err);
-    res.status(500).json({ error: 'Could not move on' });
+    res.status(500).json({ error: 'Could not go to next. Try again.' });
   }
 });
 
@@ -841,7 +841,7 @@ router.get('/sessions/:id/items', async (req, res) => {
   const me = req.user?.userId ?? null;
   try {
     const session = await loadSession(req.params.id, me);
-    if (!session) return res.status(404).json({ error: 'That run is not yours' });
+    if (!session) return res.status(404).json({ error: 'List not found.' });
     const r = await pool.query(
       `SELECT i.position, i.state, i.outcome, i.note, i.lead_id,
               l.name, l.phone, l.city, l.expected_amount, l.last_outcome, l.last_contacted_at,
@@ -859,7 +859,7 @@ router.get('/sessions/:id/items', async (req, res) => {
     res.json({ items: r.rows, position: session.position });
   } catch (err) {
     console.error('crm.sessionItems error:', err);
-    res.status(500).json({ error: 'Could not load the run' });
+    res.status(500).json({ error: 'Could not load your list.' });
   }
 });
 
@@ -883,7 +883,7 @@ router.post('/sessions/:id/heartbeat', async (req, res) => {
     res.json({ held: (r.rowCount ?? 0) > 0 });
   } catch (err) {
     console.error('crm.sessionHeartbeat error:', err);
-    res.status(500).json({ error: 'Could not keep your place' });
+    res.status(500).json({ error: 'Could not save your place.' });
   }
 });
 
@@ -900,7 +900,7 @@ router.post('/sessions/:id/pause', async (req, res) => {
         WHERE id = $1 AND user_id = $2 AND ended_at IS NULL RETURNING *`,
       [req.params.id, me, str(req.body?.note, 200)]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'That run is already finished' });
+    if (!r.rows.length) return res.status(404).json({ error: 'This list is already finished.' });
     if (me) await releaseClaims(me);
     res.json({ session: r.rows[0] });
   } catch (err) {
@@ -918,7 +918,7 @@ router.post('/sessions/:id/resume', async (req, res) => {
         WHERE id = $1 AND user_id = $2 AND ended_at IS NULL RETURNING id`,
       [req.params.id, me]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'That run is already finished' });
+    if (!r.rows.length) return res.status(404).json({ error: 'This list is already finished.' });
     const session = (await loadSession(req.params.id, me))!;
     // If somebody rang the person on screen while we were away, move on.
     const cur = await pool.query(
@@ -994,11 +994,11 @@ router.get('/sessions/:id/summary', async (req, res) => {
   const me = req.user?.userId ?? null;
   try {
     const session = await loadSession(req.params.id, me);
-    if (!session) return res.status(404).json({ error: 'That run is not yours' });
+    if (!session) return res.status(404).json({ error: 'List not found.' });
     res.json({ summary: await sessionSummary(session.id, me!) });
   } catch (err) {
     console.error('crm.sessionSummary error:', err);
-    res.status(500).json({ error: 'Could not add that up' });
+    res.status(500).json({ error: 'Could not load totals.' });
   }
 });
 
@@ -1011,12 +1011,12 @@ router.post('/sessions/:id/end', async (req, res) => {
         WHERE id = $1 AND user_id = $2 AND ended_at IS NULL RETURNING *`,
       [req.params.id, me]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'That session is already finished' });
+    if (!r.rows.length) return res.status(404).json({ error: 'This list is already finished.' });
     if (me) await releaseClaims(me);
     res.json({ session: r.rows[0], summary: await sessionSummary(req.params.id, me!) });
   } catch (err) {
     console.error('crm.endSession error:', err);
-    res.status(500).json({ error: 'Could not finish that session' });
+    res.status(500).json({ error: 'Could not finish. Try again.' });
   }
 });
 

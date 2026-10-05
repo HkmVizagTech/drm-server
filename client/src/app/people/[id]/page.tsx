@@ -232,11 +232,11 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
       );
       setSyncNote({
         tone: "ok",
-        text: `Synced ${result.donationsSynced} donation${result.donationsSynced === 1 ? "" : "s"}, ${result.subscriptionsSynced} subscription${result.subscriptionsSynced === 1 ? "" : "s"}, ${result.deliveriesSynced} prasadam ${result.deliveriesSynced === 1 ? "delivery" : "deliveries"} from hkmsite2.0.`,
+        text: `Updated. ${result.donationsSynced} donation${result.donationsSynced === 1 ? "" : "s"}, ${result.subscriptionsSynced} recurring, ${result.deliveriesSynced} prasadam.`,
       });
       load();
     } catch (err) {
-      setSyncNote({ tone: "err", text: err instanceof Error ? err.message : "Sync failed" });
+      setSyncNote({ tone: "err", text: err instanceof Error ? err.message : "Could not refresh. Try again." });
     } finally {
       setSyncing(false);
     }
@@ -259,12 +259,12 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
       );
       setResendNote({
         tone: "ok",
-        text: `Receipt ${r.receiptNumber ?? ""} re-sent${r.sentTo ? ` to ${r.sentTo}` : ""}.`,
+        text: `Receipt ${r.receiptNumber ?? ""} sent${r.sentTo ? ` to ${r.sentTo}` : ""}.`,
       });
     } catch (err) {
       setResendNote({
         tone: "err",
-        text: err instanceof Error ? err.message : "Could not resend the receipt.",
+        text: err instanceof Error ? err.message : "Could not send the receipt. Try again.",
       });
     } finally {
       setResendingId(null);
@@ -336,7 +336,7 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
               Back to people
             </LinkButton>
             <Button variant="secondary" icon="refresh" loading={syncing} onClick={syncFromHkmv}>
-              Sync from HKMV
+              Refresh from HKMV
             </Button>
             <Button icon="edit" onClick={() => setShowEdit(true)}>
               Edit profile
@@ -353,22 +353,21 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
           page should know the spelling is contested before they read it out on
           a call. */}
       {person.name_alt && (
-        <Alert tone="warn" title="The sites disagree about this donor's name">
-          <strong>{person.name_alt_source === "annadan" ? "annadan" : "The donation site"}</strong> has this donor
-          as <strong>{person.name_alt}</strong>. Open Edit profile to settle which spelling is right — it will be
-          sent to both sites.
+        <Alert tone="warn" title="Name does not match">
+          <strong>{person.name_alt_source === "annadan" ? "Annadan" : "The donation site"}</strong> has{" "}
+          <strong>{person.name_alt}</strong>. Pick the right one in Edit profile.
         </Alert>
       )}
 
       {person.push_status === "failed" || person.push_status === "partial" ? (
-        <Alert tone="danger" title="The last change did not reach the sites">
-          The last change here did not reach {person.push_status === "partial" ? "every site" : "the sites"}.
+        <Alert tone="danger" title="Not saved on the sites">
+          Your last change did not reach {person.push_status === "partial" ? "every site" : "the sites"}.
           {person.push_error && <span className="mt-0.5 block text-xs">{person.push_error}</span>}
         </Alert>
       ) : null}
 
       <div className="mb-5 grid gap-4 sm:grid-cols-3">
-        <StatTile label="Lifetime giving" value={currency(lifetime.total)} icon="rupee" accent="brand" />
+        <StatTile label="Total given" value={currency(lifetime.total)} icon="rupee" accent="brand" />
         <StatTile label="Donations" value={donations.length} icon="receipt" />
         <StatTile label="Last donation" value={shortDate(lastDonationAt)} icon="calendar" />
       </div>
@@ -377,9 +376,9 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
         <Card className="lg:col-span-2">
           <CardHeader title="Donor details" icon="user" />
           <div className="grid gap-4 sm:grid-cols-3">
-            <Detail label="Phone">{person.phone}</Detail>
-            <Detail label="Email">{person.email || "—"}</Detail>
-            <Detail label="PAN">{person.pan || "—"}</Detail>
+            <Detail label="Mobile Number">{person.phone}</Detail>
+            <Detail label="E-mail ID">{person.email || "—"}</Detail>
+            <Detail label="PAN Number">{person.pan || "—"}</Detail>
             <Detail label="Date of birth">{shortDate(person.date_of_birth)}</Detail>
             <Detail label="Anniversary">{shortDate(person.anniversary_date)}</Detail>
           </div>
@@ -396,14 +395,14 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
                 <span className="text-ink-faint">Not set</span>
               )}
             </Detail>
-            <Detail label="Prasadam delivery address">
+            <Detail label="Prasadam address">
               {prasadamLines.length ? (
                 <div className="leading-snug">
                   {prasadamLines.map((l, i) => (
                     <p key={i}>{l}</p>
                   ))}
                   {prasadamSameAsHome && (
-                    <p className="mt-0.5 text-xs font-normal text-ink-faint">Same as their address</p>
+                    <p className="mt-0.5 text-xs font-normal text-ink-faint">Same as address</p>
                   )}
                 </div>
               ) : (
@@ -443,7 +442,7 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
               ))}
             </div>
           ) : (
-            <EmptyState icon="rupee" title="No donations yet" message="Nothing has been recorded against this donor." />
+            <EmptyState icon="rupee" title="No donations yet" message="Donations show here." />
           )}
         </Card>
       </div>
@@ -511,10 +510,10 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
                           {d.receipt_number || "View"}
                         </a>
                       ) : (
-                        <Badge tone="good">{d.receipt_number || "issued"}</Badge>
+                        <Badge tone="good">{d.receipt_number || "Issued"}</Badge>
                       )
                     ) : (
-                      <Badge tone="neutral">not issued</Badge>
+                      <Badge tone="neutral">Not issued</Badge>
                     )}
                   </Td>
                   <Td align="right" className="whitespace-nowrap">
@@ -531,7 +530,7 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
                         loading={resendingId === d.id}
                         onClick={() => resendReceipt(d.id)}
                       >
-                        Resend on WhatsApp
+                        Send on WhatsApp
                       </Button>
                     )}
                   </Td>
@@ -545,7 +544,7 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
                   <EmptyState
                     icon="rupee"
                     title="No donations yet"
-                    message="Nothing has come through from the sites, and nothing has been entered by hand."
+                    message="Donations show here."
                   />
                 </Td>
               </tr>
@@ -558,7 +557,7 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
         <>
           <div className="mb-3 flex items-center justify-end">
             <Button size="sm" icon="plus" onClick={() => setShowNewSubscription(true)}>
-              New subscription
+              Add recurring
             </Button>
           </div>
           <TableShell>
@@ -566,7 +565,7 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
               <Th align="right">Amount</Th>
               <Th>Frequency</Th>
               <Th>Purpose</Th>
-              <Th>Next charge</Th>
+              <Th>Next due</Th>
               <Th>Status</Th>
               <Th align="right">Actions</Th>
             </Thead>
@@ -627,7 +626,7 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
                     <EmptyState
                       icon="refresh"
                       title="No recurring donations"
-                      message="This donor has no standing instruction set up."
+                      message="None set up yet."
                     />
                   </Td>
                 </tr>
@@ -641,7 +640,7 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
         <>
           <div className="mb-3 flex items-center justify-end">
             <Button size="sm" icon="plus" onClick={() => setShowNewDelivery(true)}>
-              Queue delivery
+              Add delivery
             </Button>
           </div>
           <TableShell>
@@ -680,8 +679,8 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
                   <Td colSpan={5}>
                     <EmptyState
                       icon="box"
-                      title="No prasadam deliveries queued"
-                      message="Nothing is on its way to this donor."
+                      title="No prasadam deliveries"
+                      message="Deliveries show here."
                     />
                   </Td>
                 </tr>
@@ -693,12 +692,12 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
 
       {tab === "notes" && (
         <Card>
-          <CardHeader title="Staff notes" icon="fileText" />
+          <CardHeader title="Notes" icon="fileText" />
           <form onSubmit={addNote} className="mb-4 flex gap-2">
             <Input
               value={noteText}
               onChange={(e) => setNoteText(e.target.value)}
-              placeholder='e.g. "Called about missing receipt, resent via WhatsApp"'
+              placeholder="Add a note…"
               className="flex-1"
             />
             <Button type="submit" icon="plus" loading={savingNote} disabled={!noteText.trim()}>
@@ -720,7 +719,7 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
             <EmptyState
               icon="fileText"
               title="No notes yet"
-              message="Anything staff should know before the next call goes here."
+              message="Notes for staff show here."
             />
           )}
         </Card>
@@ -761,7 +760,7 @@ function ProfileSkeleton() {
         <Skeleton className="mt-2 h-4 w-80" />
       </div>
       <div className="mb-5 grid gap-4 sm:grid-cols-3">
-        <StatTile label="Lifetime giving" value="" icon="rupee" accent="brand" loading />
+        <StatTile label="Total given" value="" icon="rupee" accent="brand" loading />
         <StatTile label="Donations" value="" icon="receipt" loading />
         <StatTile label="Last donation" value="" icon="calendar" loading />
       </div>
@@ -849,7 +848,7 @@ function EditProfileModal({ person, onClose, onSaved }: { person: Person; onClos
       // Shown, not swallowed. The server's wording is the useful one - it
       // names the field, and a message like "A PAN looks like ABCDE1234F" is
       // worth more than "could not save".
-      setError(err instanceof Error ? err.message : "Could not save that");
+      setError(err instanceof Error ? err.message : "Could not save. Try again.");
       setSaving(false);
     }
   };
@@ -886,9 +885,9 @@ function EditProfileModal({ person, onClose, onSaved }: { person: Person; onClos
   const addressGrid = (a: AddressParts, set: (v: AddressParts) => void, idPrefix: string) => (
     <div className="grid gap-3 sm:grid-cols-2">
       {field("Door / flat no.", a.door, (v) => set({ ...a, door: v }), { placeholder: "e.g. 12-3-45", idPrefix })}
-      {field("Building or house name", a.house, (v) => set({ ...a, house: v }), { idPrefix })}
+      {field("Building / house name", a.house, (v) => set({ ...a, house: v }), { idPrefix })}
       {field("Street", a.street, (v) => set({ ...a, street: v }), { wide: true, idPrefix })}
-      {field("Area or locality", a.area, (v) => set({ ...a, area: v }), { wide: true, idPrefix })}
+      {field("Area", a.area, (v) => set({ ...a, area: v }), { wide: true, idPrefix })}
       {field("City", a.city, (v) => set({ ...a, city: v }), { placeholder: "Visakhapatnam", idPrefix })}
       {field("State", a.state, (v) => set({ ...a, state: v }), { placeholder: "Andhra Pradesh", idPrefix })}
       {field("Pincode", a.pincode, (v) => set({ ...a, pincode: v.replace(/\D/g, "").slice(0, 6) }), {
@@ -922,27 +921,25 @@ function EditProfileModal({ person, onClose, onSaved }: { person: Person; onClos
 
         {person.name_alt && (
           <Alert tone="warn">
-            {person.name_alt_source === "annadan" ? "annadan" : "The site"} calls them{" "}
-            <strong>{person.name_alt}</strong>. Saving here settles it and sends your spelling to both sites.
+            {person.name_alt_source === "annadan" ? "Annadan" : "The site"} has{" "}
+            <strong>{person.name_alt}</strong>. Your name will be used on both sites.
           </Alert>
         )}
 
         <div className="grid gap-3 sm:grid-cols-2">
-          {field("Full name", form.name, (v) => setForm({ ...form, name: v }), { wide: true })}
-          {field("Phone", form.phone, (v) => setForm({ ...form, phone: v }), {
-            hint: "The number everything is matched on, here and on both sites.",
-          })}
-          {field("Email", form.email, (v) => setForm({ ...form, email: v }), { type: "email" })}
-          {field("PAN", form.pan, (v) => setForm({ ...form, pan: v.toUpperCase() }), {
+          {field("Name", form.name, (v) => setForm({ ...form, name: v }), { wide: true })}
+          {field("Mobile Number", form.phone, (v) => setForm({ ...form, phone: v }))}
+          {field("E-mail ID", form.email, (v) => setForm({ ...form, email: v }), { type: "email" })}
+          {field("PAN Number", form.pan, (v) => setForm({ ...form, pan: v.toUpperCase() }), {
             placeholder: "ABCDE1234F",
-            hint: "Needed for an 80G certificate.",
+            hint: "Needed for 80G",
           })}
           {field("Date of birth", form.date_of_birth, (v) => setForm({ ...form, date_of_birth: v }), {
             type: "date",
           })}
           {field("Wedding anniversary", form.anniversary_date, (v) => setForm({ ...form, anniversary_date: v }), {
             type: "date",
-            hint: "Both are optional, and are what the greeting reminders use.",
+            hint: "Optional",
           })}
         </div>
 
@@ -951,8 +948,7 @@ function EditProfileModal({ person, onClose, onSaved }: { person: Person; onClos
           {addressGrid(home, setHome, "home")}
           {legacy && !hasParts(home) && (
             <Alert tone="info" className="mt-2 mb-0">
-              Currently on file as one line: &ldquo;{legacy}&rdquo;. Split it into the boxes above and the receipts
-              will lay it out properly.
+              Saved as: &ldquo;{legacy}&rdquo;. Please fill the boxes above.
             </Alert>
           )}
         </div>
@@ -966,7 +962,7 @@ function EditProfileModal({ person, onClose, onSaved }: { person: Person; onClos
           {!samePrasadam && (
             <div className="mt-3">
               <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.06em] text-ink-muted">
-                Prasadam delivery address
+                Prasadam address
               </p>
               {addressGrid(prasadam, setPrasadam, "prasadam")}
             </div>
@@ -990,9 +986,6 @@ function EditProfileModal({ person, onClose, onSaved }: { person: Person; onClos
           </div>
         </div>
 
-        <p className="text-xs text-ink-muted">
-          Saving also sends the correction to the donation sites this donor is known to.
-        </p>
       </form>
     </Modal>
   );
@@ -1015,7 +1008,7 @@ function IssueReceiptModal({ donation, onClose, onSaved }: { donation: Donation;
 
   return (
     <Modal
-      title={`Issue receipt — ${currency(donation.amount)}`}
+      title={`Issue receipt: ${currency(donation.amount)}`}
       onClose={onClose}
       footer={
         <>
@@ -1029,19 +1022,17 @@ function IssueReceiptModal({ donation, onClose, onSaved }: { donation: Donation;
       }
     >
       <form id={formId} onSubmit={submit} className="space-y-3">
-        <Field label="Receipt number" htmlFor="receipt-number">
+        <Field label="Receipt No." htmlFor="receipt-number">
           <Input
             id="receipt-number"
             value={receiptNumber}
             onChange={(e) => setReceiptNumber(e.target.value)}
           />
         </Field>
-        <Field label="Receipt PDF URL" htmlFor="receipt-url" hint="Optional.">
+        <Field label="Receipt PDF link" htmlFor="receipt-url" hint="Optional">
           <Input id="receipt-url" value={receiptUrl} onChange={(e) => setReceiptUrl(e.target.value)} />
         </Field>
-        <p className="text-xs text-ink-muted">
-          This marks the receipt as issued and queues a WhatsApp notification to the donor.
-        </p>
+        <p className="text-xs text-ink-muted">The donor gets a WhatsApp message.</p>
       </form>
     </Modal>
   );
@@ -1118,7 +1109,7 @@ function NewSubscriptionModal({ personId, onClose, onSaved }: { personId: string
             </Select>
           </Field>
         </div>
-        <Field label="Next charge date" htmlFor="subscription-next-charge">
+        <Field label="Next due date" htmlFor="subscription-next-charge">
           <Input
             id="subscription-next-charge"
             type="date"
@@ -1145,7 +1136,7 @@ function NewDeliveryModal({ personId, onClose, onSaved }: { personId: string; on
 
   return (
     <Modal
-      title="Queue prasadam delivery"
+      title="Add prasadam delivery"
       onClose={onClose}
       footer={
         <>
@@ -1160,9 +1151,9 @@ function NewDeliveryModal({ personId, onClose, onSaved }: { personId: string; on
     >
       <form id={formId} onSubmit={submit} className="space-y-3">
         <Field
-          label="Delivery address"
+          label="Address"
           htmlFor="delivery-address"
-          hint="Leave blank to use the donor's saved address."
+          hint="Leave blank to use saved address"
         >
           <Textarea
             id="delivery-address"
@@ -1171,7 +1162,7 @@ function NewDeliveryModal({ personId, onClose, onSaved }: { personId: string; on
             onChange={(e) => setAddress(e.target.value)}
           />
         </Field>
-        <Field label="Notes" htmlFor="delivery-notes" hint="Optional.">
+        <Field label="Notes" htmlFor="delivery-notes" hint="Optional">
           <Input id="delivery-notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
         </Field>
       </form>
@@ -1219,7 +1210,7 @@ function UpdateDeliveryModal({ delivery, onClose, onSaved }: { delivery: Prasada
         <Field label="Courier name" htmlFor="delivery-courier">
           <Input id="delivery-courier" value={courier} onChange={(e) => setCourier(e.target.value)} />
         </Field>
-        <Field label="Tracking number" htmlFor="delivery-tracking">
+        <Field label="Tracking No." htmlFor="delivery-tracking">
           <Input id="delivery-tracking" value={tracking} onChange={(e) => setTracking(e.target.value)} />
         </Field>
       </form>

@@ -70,7 +70,7 @@ export default function ConflictsPage() {
       setRows(d.conflicts);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the conflicts");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     } finally {
       setLoading(false);
     }
@@ -88,7 +88,7 @@ export default function ConflictsPage() {
       setSweep(d);
       if (apply) await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not check the sites");
+      setError(e instanceof Error ? e.message : "Could not check the sites. Try again.");
     } finally {
       setBusy(false);
     }
@@ -99,7 +99,7 @@ export default function ConflictsPage() {
       await apiClient.post(`/api/profiles/${id}/keep-name`, { which });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
     }
   }
 
@@ -108,7 +108,7 @@ export default function ConflictsPage() {
       <PageHeader
         eyebrow="Donors"
         title="Name mismatches"
-        subtitle="Donors the donation sites and DRM spell differently"
+        subtitle="Same donor, different names"
         actions={
           <>
             {/* A next/link anchor in the button's clothes rather than
@@ -131,26 +131,25 @@ export default function ConflictsPage() {
           happens, not after. */}
       {sweep && !sweep.applied && (
         <Card tone="brand" className="mb-5">
-          <CardHeader title="What a sweep would change" icon="refresh" />
+          <CardHeader title="What will change" icon="refresh" />
           <div className="grid gap-4 sm:grid-cols-3">
             <div>
               <p className="text-2xl font-semibold tabular-nums text-ink">{number(sweep.names_to_fix)}</p>
-              <p className="text-xs text-ink-soft">names corrected</p>
+              <p className="text-xs text-ink-soft">names to fix</p>
             </div>
             <div>
               <p className="text-2xl font-semibold tabular-nums text-ink">{number(sweep.addresses_to_fill)}</p>
-              <p className="text-xs text-ink-soft">blank addresses filled in</p>
+              <p className="text-xs text-ink-soft">addresses to fill</p>
             </div>
             <div>
               <p className="text-2xl font-semibold tabular-nums text-ink">{number(sweep.checked)}</p>
-              <p className="text-xs text-ink-soft">donors checked against {sweep.sites_seen.length} site{sweep.sites_seen.length === 1 ? "" : "s"}</p>
+              <p className="text-xs text-ink-soft">donors checked</p>
             </div>
           </div>
 
           {sweep.edited_here_count > 0 && (
             <Alert tone="warn" className="mt-3">
-              {number(sweep.edited_here_count)} of these were typed in DRM by hand and would be replaced by what a
-              site says. Look at the list below before applying.
+              {number(sweep.edited_here_count)} were typed here by hand. Check the list first.
             </Alert>
           )}
 
@@ -184,7 +183,7 @@ export default function ConflictsPage() {
               disabled={busy || !sweep.names_to_fix}
               loading={busy}
             >
-              {busy ? "Applying…" : `Apply ${number(sweep.names_to_fix)} correction${sweep.names_to_fix === 1 ? "" : "s"}`}
+              {busy ? "Applying…" : `Fix ${number(sweep.names_to_fix)} name${sweep.names_to_fix === 1 ? "" : "s"}`}
             </Button>
             <Button variant="secondary" onClick={() => setSweep(null)}>
               Not now
@@ -195,22 +194,21 @@ export default function ConflictsPage() {
 
       {sweep?.applied && (
         <Alert tone="good" className="mb-5">
-          Done — {number(sweep.names_to_fix)} names corrected and {number(sweep.addresses_to_fill)} addresses
-          filled in.
+          Done. {number(sweep.names_to_fix)} names fixed, {number(sweep.addresses_to_fill)} addresses filled.
         </Alert>
       )}
 
       <CardHeader
-        title={`${rows.length} still unsettled`}
-        subtitle="Two genuinely different names on one phone number. Often a shared family line — worth a look before choosing."
+        title={`${rows.length} to check`}
+        subtitle="Two names on one mobile number"
       />
 
       <TableShell>
         <Thead>
-          <Th>Phone</Th>
-          <Th>DRM has</Th>
-          <Th>The site has</Th>
-          <Th>Noticed</Th>
+          <Th>Mobile Number</Th>
+          <Th>Our name</Th>
+          <Th>Site name</Th>
+          <Th>Found</Th>
           <Th align="right">Keep</Th>
         </Thead>
         {loading ? (
@@ -221,8 +219,8 @@ export default function ConflictsPage() {
               <td colSpan={5}>
                 <EmptyState
                   icon="users"
-                  title="Nothing in dispute"
-                  message="No donor has two different names across DRM and the sites. Press “Check both sites” to look again."
+                  title="No mismatches"
+                  message="All names match."
                 />
               </td>
             </tr>
@@ -265,10 +263,6 @@ export default function ConflictsPage() {
         )}
       </TableShell>
 
-      <p className="mt-3 text-xs text-ink-muted">
-        Whichever you keep is sent back to both sites, so the disagreement is settled everywhere rather than
-        coming back on the next sync.
-      </p>
     </div>
   );
 }

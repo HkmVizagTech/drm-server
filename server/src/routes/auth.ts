@@ -32,9 +32,9 @@ function validate(body: Record<string, unknown>): string | null {
   const name = String(body.name ?? '').trim();
   const email = String(body.email ?? '').trim();
   const password = String(body.password ?? '');
-  if (!name) return 'A name is needed';
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return 'That does not look like an email address';
-  if (password.length < MIN_PASSWORD) return `A password needs at least ${MIN_PASSWORD} characters`;
+  if (!name) return 'Enter a name.';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return 'Enter a valid E-mail ID.';
+  if (password.length < MIN_PASSWORD) return `Password must be at least ${MIN_PASSWORD} characters.`;
   if (body.role !== undefined && !ROLES.includes(body.role as UserRole)) return 'Unknown role';
   return null;
 }
@@ -72,7 +72,7 @@ async function hasUserColumn(name: string): Promise<boolean> {
 router.post('/login', async (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase();
   const password = String(req.body?.password ?? '');
-  if (!email || !password) return res.status(400).json({ error: 'Email and password are needed' });
+  if (!email || !password) return res.status(400).json({ error: 'Enter email and password.' });
 
   try {
     const result = await pool.query('SELECT * FROM users WHERE lower(email) = $1', [email]);
@@ -84,9 +84,9 @@ router.post('/login', async (req, res) => {
     const hash = user?.password_hash ?? '$2b$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidinv';
     const valid = await bcrypt.compare(password, hash);
 
-    if (!user || !valid) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user || !valid) return res.status(401).json({ error: 'Wrong email or password.' });
     if (user.active === false) {
-      return res.status(403).json({ error: 'That account has been switched off. Ask an administrator.' });
+      return res.status(403).json({ error: 'This account is turned off. Ask an admin.' });
     }
 
     // Best-effort, and deliberately so.
@@ -108,7 +108,7 @@ router.post('/login', async (req, res) => {
     res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
   } catch (err) {
     console.error('auth.login error:', err);
-    res.status(500).json({ error: 'Could not sign you in' });
+    res.status(500).json({ error: 'Could not sign in. Try again.' });
   }
 });
 
@@ -137,7 +137,7 @@ router.post('/register', async (req, res) => {
       ).catch(() => undefined);
       if (!req.user) return res.status(401).json({ error: 'Sign in first' });
       if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'Only an administrator can create accounts' });
+        return res.status(403).json({ error: 'Only an admin can add users.' });
       }
     }
 
@@ -165,10 +165,10 @@ router.post('/register', async (req, res) => {
     res.status(201).json({ user });
   } catch (err) {
     if ((err as { code?: string }).code === '23505') {
-      return res.status(409).json({ error: 'Somebody already has that email address' });
+      return res.status(409).json({ error: 'This email is already in use.' });
     }
     console.error('auth.register error:', err);
-    res.status(500).json({ error: 'Could not create that account' });
+    res.status(500).json({ error: 'Could not add user. Try again.' });
   }
 });
 
@@ -210,13 +210,13 @@ router.post('/change-password', authenticate, async (req, res) => {
   const current = String(req.body?.current_password ?? '');
   const next = String(req.body?.new_password ?? '');
   if (next.length < MIN_PASSWORD) {
-    return res.status(400).json({ error: `A password needs at least ${MIN_PASSWORD} characters` });
+    return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD} characters.` });
   }
   try {
     const r = await pool.query('SELECT password_hash FROM users WHERE id = $1', [req.user!.userId]);
     if (!r.rows.length) return res.status(404).json({ error: 'User not found' });
     if (!(await bcrypt.compare(current, r.rows[0].password_hash))) {
-      return res.status(403).json({ error: 'That is not your current password' });
+      return res.status(403).json({ error: 'Current password is wrong.' });
     }
     await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [
       await bcrypt.hash(next, 10),
@@ -225,7 +225,7 @@ router.post('/change-password', authenticate, async (req, res) => {
     res.json({ changed: true });
   } catch (err) {
     console.error('auth.changePassword error:', err);
-    res.status(500).json({ error: 'Could not change your password' });
+    res.status(500).json({ error: 'Could not change password. Try again.' });
   }
 });
 
@@ -247,7 +247,7 @@ router.get('/users', authenticate, authorize('admin'), async (_req, res) => {
       );
       return res.json({
         users: rows.rows,
-        degraded: 'The database is still being brought up to date, so sign-in times and lead counts are missing.',
+        degraded: 'Some details are missing. Try again later.',
       });
     }
 
@@ -299,7 +299,7 @@ router.put('/users/:id', authenticate, authorize('admin'), async (req, res) => {
         );
         if (others.rows[0].n === 0) {
           return res.status(409).json({
-            error: 'That is the only administrator left. Make somebody else an administrator first.',
+            error: 'This is the only admin. Make someone else admin first.',
           });
         }
       }
@@ -319,11 +319,11 @@ router.put('/users/:id', authenticate, authorize('admin'), async (req, res) => {
         req.params.id,
       ]
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'No such account' });
+    if (!result.rows.length) return res.status(404).json({ error: 'User not found.' });
     res.json(result.rows[0]);
   } catch (err) {
     console.error('auth.updateUser error:', err);
-    res.status(500).json({ error: 'Could not save that' });
+    res.status(500).json({ error: 'Could not save. Try again.' });
   }
 });
 
@@ -337,18 +337,18 @@ router.put('/users/:id', authenticate, authorize('admin'), async (req, res) => {
 router.post('/users/:id/password', authenticate, authorize('admin'), async (req, res) => {
   const next = String(req.body?.new_password ?? '');
   if (next.length < MIN_PASSWORD) {
-    return res.status(400).json({ error: `A password needs at least ${MIN_PASSWORD} characters` });
+    return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD} characters.` });
   }
   try {
     const r = await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id', [
       await bcrypt.hash(next, 10),
       req.params.id,
     ]);
-    if (!r.rows.length) return res.status(404).json({ error: 'No such account' });
+    if (!r.rows.length) return res.status(404).json({ error: 'User not found.' });
     res.json({ changed: true });
   } catch (err) {
     console.error('auth.setPassword error:', err);
-    res.status(500).json({ error: 'Could not set that password' });
+    res.status(500).json({ error: 'Could not change password. Try again.' });
   }
 });
 

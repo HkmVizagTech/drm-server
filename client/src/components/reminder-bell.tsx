@@ -88,7 +88,7 @@ export function ReminderBell() {
       void refresh();
     } catch (e) {
       // The board is the source of truth; a failed snooze just reappears.
-      toast.error("Could not update that reminder", e instanceof Error ? e.message : undefined);
+      toast.error("Could not update. Try again.", e instanceof Error ? e.message : undefined);
     }
   }
 
@@ -101,7 +101,7 @@ export function ReminderBell() {
       <span className="relative block">
         <IconButton
           name="bell"
-          label={dueCount ? `${dueCount} reminders need attention` : "Reminders"}
+          label={dueCount ? `${dueCount} reminders due` : "Reminders"}
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
           aria-haspopup="true"
@@ -147,7 +147,7 @@ export function ReminderBell() {
                     </p>
                     <p className="mt-0.5 text-xs text-ink-muted">
                       {c.purpose ? `${c.purpose} · ` : ""}
-                      {c.converted_via === "auto" ? "came through on the site" : "recorded by hand"}
+                      {c.converted_via === "auto" ? "Paid on the site" : "Added by hand"}
                     </p>
                     <div className="mt-2 flex gap-2">
                       {/* Still a next/link, not the shared LinkButton: that one
@@ -173,8 +173,8 @@ export function ReminderBell() {
             {!alerts.length && !conversions.length ? (
               <p className="px-4 py-6 text-center text-sm text-ink-muted">
                 {dueCount > 0
-                  ? `${dueCount} reminder${dueCount === 1 ? "" : "s"} need attention.`
-                  : "Nothing is alerting right now."}
+                  ? `${dueCount} reminder${dueCount === 1 ? "" : "s"} due.`
+                  : "No reminders right now."}
               </p>
             ) : (
               <ul className="divide-y divide-line-soft">
@@ -196,7 +196,7 @@ export function ReminderBell() {
                     <p className="mt-0.5 text-sm text-ink-soft">{a.title}</p>
                     {a.expected_amount && (
                       <p className="text-xs text-ink-muted">
-                        Said they would give {currency(Number(a.expected_amount))}
+                        Promised {currency(Number(a.expected_amount))}
                       </p>
                     )}
                     <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -234,7 +234,7 @@ export function ReminderBell() {
                 }
                 className="text-left text-xs text-brand-700 hover:underline"
               >
-                Also alert me on the desktop, even when this tab is behind something
+                Turn on desktop alerts
               </button>
             </div>
           )}

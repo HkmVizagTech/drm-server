@@ -100,7 +100,7 @@ router.get('/storage/status', authenticate, async (_req, res) => {
     });
   } catch (err) {
     console.error('crm.storageStatus error:', err);
-    res.status(500).json({ error: 'Could not read the storage status' });
+    res.status(500).json({ error: 'Could not load storage status.' });
   }
 });
 
@@ -159,8 +159,8 @@ router.get('/qrs', authenticate, async (req, res) => {
 router.post('/qrs', authenticate, authorize('admin'), async (req, res) => {
   const qrId = str(req.body?.qr_id, 60);
   const label = str(req.body?.label, 120);
-  if (!qrId) return res.status(400).json({ error: "The QR's id from Razorpay is needed" });
-  if (!label) return res.status(400).json({ error: 'Give the QR a label the caller will recognise' });
+  if (!qrId) return res.status(400).json({ error: 'Enter the Razorpay QR ID.' });
+  if (!label) return res.status(400).json({ error: 'Enter a QR name.' });
   // Razorpay QR ids look like qr_XXXXXXXXXXXX. Checked rather than enforced,
   // because a rejected id is worse than an odd-looking one that works.
   const looksRight = /^qr_[A-Za-z0-9]+$/.test(qrId);
@@ -227,7 +227,7 @@ router.put('/qrs/:id', authenticate, authorize('admin'), async (req, res) => {
         b.receipt_site === 'annadan' || b.receipt_site === 'hkmv' ? b.receipt_site : null,
       ]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'No such QR' });
+    if (!r.rows.length) return res.status(404).json({ error: 'QR not found.' });
     res.json(r.rows[0]);
   } catch (err) {
     console.error('crm.updateQr error:', err);
@@ -262,7 +262,7 @@ router.put('/qrs/:id', authenticate, authorize('admin'), async (req, res) => {
  */
 router.post('/qr/share-to', authenticate, async (req, res) => {
   const phone = String(req.body?.phone ?? '').replace(/\D/g, '').slice(-10);
-  if (phone.length !== 10) return res.status(400).json({ error: 'A 10-digit number is needed' });
+  if (phone.length !== 10) return res.status(400).json({ error: 'Enter a 10-digit mobile number.' });
   if (!str(req.body?.qr_id, 36)) return res.status(400).json({ error: 'Choose a QR to send' });
 
   try {
@@ -315,7 +315,7 @@ const shareQrToLead: RequestHandler = async (req, res) => {
          AND (owner_id IS NULL OR owner_id = $2::uuid OR $3 = 'admin')`,
       [qrRowId, req.user?.userId ?? null, req.user?.role ?? '']
     );
-    if (!qr.rows.length) return res.status(404).json({ error: 'That QR is not available to you' });
+    if (!qr.rows.length) return res.status(404).json({ error: 'QR not found.' });
     const q = qr.rows[0];
 
     const amount = req.body?.expected_amount ? Number(req.body.expected_amount) : null;
@@ -391,12 +391,12 @@ router.post('/leads/:id/share-qr', authenticate, shareQrToLead);
  */
 router.post('/qrs/:id/image', authenticate, authorize('admin'), async (req, res) => {
   if (!storage.isConfigured()) {
-    return res.status(503).json({ error: 'File storage is not set up, so images cannot be uploaded yet.' });
+    return res.status(503).json({ error: 'Image upload is not set up yet.' });
   }
   if (!storage.hasPublicUrls()) {
     return res.status(503).json({
       error:
-        'This bucket has no public URL set, so a donor could not load the image. Set R2_PUBLIC_BASE_URL, or paste the Razorpay image link instead.',
+        'Image upload is not set up. Paste the Razorpay image link.',
     });
   }
 
@@ -413,7 +413,7 @@ router.post('/qrs/:id/image', authenticate, authorize('admin'), async (req, res)
   // somebody picked by mistake, and it would be slow to load on the phone it
   // is meant for.
   if (buf.length > 2 * 1024 * 1024) {
-    return res.status(400).json({ error: 'That image is over 2 MB. A QR image should be far smaller.' });
+    return res.status(400).json({ error: 'Image is over 2 MB. Use a smaller one.' });
   }
 
   try {
@@ -425,7 +425,7 @@ router.post('/qrs/:id/image', authenticate, authorize('admin'), async (req, res)
       `UPDATE razorpay_qrs SET image_key = $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
       [req.params.id, key]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'No such QR' });
+    if (!r.rows.length) return res.status(404).json({ error: 'QR not found.' });
     res.json({ qr: r.rows[0], url: put.url });
   } catch (err) {
     console.error('crm.qrImage error:', err);
@@ -451,7 +451,7 @@ router.get('/qrs/:id/image.png', authenticate, async (req, res) => {
     const r = await pool.query(`SELECT image_key, image_url, label FROM razorpay_qrs WHERE id = $1`, [
       req.params.id,
     ]);
-    if (!r.rows.length) return res.status(404).json({ error: 'No such QR' });
+    if (!r.rows.length) return res.status(404).json({ error: 'QR not found.' });
     const q = r.rows[0];
 
     let buf: Buffer | null = null;
@@ -474,7 +474,7 @@ router.get('/qrs/:id/image.png', authenticate, async (req, res) => {
 
     if (!buf) {
       return res.status(404).json({
-        error: 'This QR has no image yet. Upload one, or paste the Razorpay image link.',
+        error: 'No image yet. Upload one or paste the Razorpay link.',
       });
     }
 
@@ -494,7 +494,7 @@ router.delete('/qrs/:id/image', authenticate, authorize('admin'), async (req, re
       `UPDATE razorpay_qrs SET image_key = NULL, updated_at = NOW() WHERE id = $1 RETURNING image_key`,
       [req.params.id]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'No such QR' });
+    if (!r.rows.length) return res.status(404).json({ error: 'QR not found.' });
     res.json({ removed: true });
   } catch (err) {
     console.error('crm.removeQrImage error:', err);
@@ -768,8 +768,8 @@ async function note(rowId: string, result: MatchResult): Promise<MatchResult> {
  */
 export async function matchPayment(paymentId: string): Promise<MatchResult> {
   const p = await pool.query(`SELECT * FROM qr_payments WHERE payment_id = $1`, [paymentId]);
-  if (!p.rows.length) return { matched: false, reason: 'No such payment' };
-  if (p.rows[0].share_id) return { matched: false, reason: 'Already attached' };
+  if (!p.rows.length) return { matched: false, reason: 'Payment not found.' };
+  if (p.rows[0].share_id) return { matched: false, reason: 'Already linked' };
   const pay = p.rows[0];
 
   // Money that did not arrive must not move a lead to Donated. A failed
@@ -777,7 +777,7 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
   // never attributed to anybody.
   const status = String(pay.status ?? '');
   if (status && status !== 'captured' && status !== 'authorized') {
-    return await note(pay.id, { matched: false, reason: `The payment is ${status}, not captured` });
+    return await note(pay.id, { matched: false, reason: `Payment not complete (${status})` });
   }
 
   // HOW A PAYMENT IS TIED BACK TO A SHARE
@@ -790,8 +790,7 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
     return await note(pay.id, {
       matched: false,
       reason:
-        'Razorpay did not say which QR this was paid into, and the payment carries no phone number. ' +
-        'Subscribe to the qr_code.credited event if this keeps happening.',
+        'No QR or mobile number on this payment.',
     });
   }
 
@@ -814,8 +813,8 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
       basis,
       reason:
         basis === 'qr'
-          ? 'That QR was not shared from DRM in the week before this payment'
-          : 'Nothing was shared to that number in the week before this payment',
+          ? 'This QR was not sent in the last week'
+          : 'No QR was sent to this number in the last week',
     });
   }
 
@@ -854,10 +853,10 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
       basis,
       score: best?.score,
       reason: !best
-        ? 'Every candidate was outside the window for this payment'
+        ? 'No QR was sent near this time'
         : best.share.awaiting_payment_at
-        ? `Looks like ${who ?? best.share.phone}, who said on the call they would pay by QR — but the same QR went to somebody else too, so confirm it.`
-        : `Could be ${who ?? best?.share.phone}, but the same QR went to more than one person around then. Confirm it.`,
+        ? `Looks like ${who ?? best.share.phone}, who promised. This QR went to others too. Please check.`
+        : `Could be ${who ?? best?.share.phone}. This QR went to others too. Please check.`,
     });
   }
 
@@ -879,8 +878,7 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
       basis,
       score: best.score,
       reason:
-        `Looks like ${who ?? `the share to ${best.share.phone}`}, but Razorpay did not say this came ` +
-        'through a QR - it may be a website donation that is already receipted. Confirm it here.',
+        `Looks like ${who ?? `the QR sent to ${best.share.phone}`}. It may be a website donation. Please check.`,
     });
   }
 
@@ -917,7 +915,7 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
     await markLeadDonated(
       best.share.lead_id,
       Number(pay.amount),
-      'Paid by QR, matched automatically',
+      'Paid by QR, linked automatically',
       undefined,
       sharedBy,
       { qrPaymentId: pay.id, shareId: best.share.id, occurredAt: pay.received_at }
@@ -937,7 +935,7 @@ export async function matchPayment(paymentId: string): Promise<MatchResult> {
       occurredAt: pay.received_at,
       qrPaymentId: pay.id,
       shareId: best.share.id,
-      note: 'Paid by QR, matched automatically',
+      note: 'Paid by QR, linked automatically',
     }).catch((e) => {
       console.error('crmQr.credit (no lead) failed:', (e as Error).message);
       return null;
@@ -1092,7 +1090,7 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
       },
       enteredByName: `DRM · QR ${p.qr_label}`,
       dccEnrolledById: p.preacher_dcc_id ? Number(p.preacher_dcc_id) : null,
-      note: `Paid by QR during a call. Razorpay payment ${p.payment_id}.`,
+      note: `Paid by QR during a call. Payment ID: ${p.payment_id}.`,
     });
 
     await pool.query(
@@ -1332,7 +1330,7 @@ router.post('/qr/payments/:id/issue-receipt', authenticate, async (req, res) => 
         WHERE p.id = $1 AND (s.shared_by = $2::uuid OR q.owner_id = $2::uuid)`,
       [req.params.id, req.user?.userId ?? null]
     );
-    if (!ok.rows.length) return res.status(404).json({ error: 'No such payment' });
+    if (!ok.rows.length) return res.status(404).json({ error: 'Payment not found.' });
   }
 
   try {
@@ -1342,11 +1340,11 @@ router.post('/qr/payments/:id/issue-receipt', authenticate, async (req, res) => 
       `SELECT receipt_status, receipt_error, receipt_number FROM qr_payments WHERE id = $1`,
       [req.params.id]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'No such payment' });
+    if (!r.rows.length) return res.status(404).json({ error: 'Payment not found.' });
     res.json(r.rows[0]);
   } catch (err) {
     console.error('crm.retryReceipt error:', err);
-    res.status(500).json({ error: 'Could not issue that receipt' });
+    res.status(500).json({ error: 'Could not issue receipt. Try again.' });
   }
 });
 
@@ -1384,6 +1382,12 @@ function qrPaymentScope(
     where:
       scope === 'all'
         ? 'TRUE'
+        : // Money in, no receipt yet - what the "Raise a receipt" picker on
+          // the donations screen lists. Refunded or failed payments are not
+          // offered: a certificate for money the temple does not hold is the
+          // one mistake a receipt can make that nobody can quietly fix.
+          scope === 'needs_receipt'
+        ? "p.receipt_number IS NULL AND COALESCE(p.status, 'captured') IN ('captured', 'authorized')"
         : scope === 'unmatched'
         ? 'p.share_id IS NULL'
         : // 'needs_donor' belongs here, and leaving it out hid the exact rows
@@ -1415,12 +1419,23 @@ const QR_PAYMENT_VISIBLE = `($1::uuid IS NULL
                -- Unclaimed money on a QR anybody may use. Theirs to recognise.
                OR (p.share_id IS NULL AND q.owner_id IS NULL))`;
 
+/**
+ * The UTR - the 12-digit UPI transaction number the donor sees on their own
+ * payment screen. Razorpay calls it the RRN and keeps it inside the event;
+ * it is what a donor reads out when they ring to ask about their receipt.
+ */
+const QR_UTR = `COALESCE(p.raw #>> '{payload,payment,entity,acquirer_data,rrn}',
+                         p.raw #>> '{payload,payment,entity,acquirer_data,upi_transaction_id}')`;
+
 router.get('/qr/payments', authenticate, async (req, res) => {
   const { where, me } = qrPaymentScope(req.query as Record<string, unknown>, req.user);
+  // Search by what somebody holding the payment screen can read off it: the
+  // name, the UPI id, the phone, the amount, or the UTR.
+  const term = String(req.query.q ?? '').trim().slice(0, 80);
 
   try {
     const rows = await pool.query(
-      `SELECT p.id, p.payment_id, p.qr_id, p.amount, p.payer_phone, p.payer_vpa,
+      `SELECT p.id, p.payment_id, ${QR_UTR} AS utr, p.qr_id, p.amount, p.payer_phone, p.payer_vpa,
               p.payer_name, p.status, p.received_at, p.share_id, p.person_id,
               p.receipt_status, p.receipt_error, p.receipt_number, p.receipt_site,
               p.match_basis, p.match_score, p.match_note, p.last_event,
@@ -1430,8 +1445,17 @@ router.get('/qr/payments', authenticate, async (req, res) => {
          ${QR_PAYMENT_FROM}
         WHERE (${where})
           AND ${QR_PAYMENT_VISIBLE}
+          AND ($2::text = ''
+               OR p.payer_name ILIKE '%' || $2 || '%'
+               OR p.payer_vpa ILIKE '%' || $2 || '%'
+               OR p.payer_phone LIKE '%' || $2 || '%'
+               OR p.payment_id ILIKE '%' || $2 || '%'
+               OR ${QR_UTR} LIKE '%' || $2 || '%'
+               OR l.name ILIKE '%' || $2 || '%'
+               OR p.amount::text = $2
+               OR p.amount::text = $2 || '.00')
         ORDER BY p.received_at DESC LIMIT 200`,
-      [me]
+      [me, term]
     );
     res.json({ payments: rows.rows, scope: me ? 'mine' : 'all' });
   } catch (err) {
@@ -1500,7 +1524,7 @@ async function exportQrPaymentsFile(
     });
   } catch (err) {
     console.error('crm.exportQrPayments error:', err);
-    res.status(500).json({ error: 'Could not build that export' });
+    res.status(500).json({ error: 'Could not download. Try again.' });
   }
 }
 
@@ -1535,7 +1559,7 @@ router.get('/qr/unmatched', authenticate, async (req, res) => {
     res.json({ payments: rows.rows });
   } catch (err) {
     console.error('crm.qrUnmatched error:', err);
-    res.status(500).json({ error: 'Could not load the unmatched payments' });
+    res.status(500).json({ error: 'Could not load payments.' });
   }
 });
 
@@ -1559,7 +1583,7 @@ router.get('/qr/unmatched', authenticate, async (req, res) => {
 router.get('/qr/payments/:id', authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT p.*,
+      `SELECT p.*, ${QR_UTR} AS utr,
               COALESCE(q_share.label, q_direct.label)               AS qr_label,
               COALESCE(q_share.purpose, q_direct.purpose)           AS qr_purpose,
               COALESCE(p.receipt_site, q_share.receipt_site, q_direct.receipt_site) AS site_for_receipt,
@@ -1589,11 +1613,11 @@ router.get('/qr/payments/:id', authenticate, async (req, res) => {
                OR q_share.owner_id = $2::uuid OR q_direct.owner_id = $2::uuid)`,
       [req.params.id, req.user?.role === 'caller' ? req.user?.userId ?? null : null]
     );
-    if (!rows.length) return res.status(404).json({ error: 'No such payment' });
+    if (!rows.length) return res.status(404).json({ error: 'Payment not found.' });
     res.json({ payment: rows[0] });
   } catch (err) {
     console.error('crm.qrPayment error:', err);
-    res.status(500).json({ error: 'Could not load that payment' });
+    res.status(500).json({ error: 'Could not load payment.' });
   }
 });
 
@@ -1623,9 +1647,9 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
   const donorPhone = (str(b.donor_phone, 15) ?? '').replace(/\D/g, '').slice(-10) || null;
   const site = str(b.site, 20);
 
-  if (!donorName) return res.status(400).json({ error: "The donor's name is needed for a receipt" });
+  if (!donorName) return res.status(400).json({ error: 'Enter the Donor Name.' });
   if (!donorPhone || donorPhone.length !== 10) {
-    return res.status(400).json({ error: "A ten-digit mobile number is needed for a receipt" });
+    return res.status(400).json({ error: 'Enter a 10-digit mobile number.' });
   }
 
   try {
@@ -1645,20 +1669,33 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
                OR q_share.owner_id = $2::uuid OR q_direct.owner_id = $2::uuid)`,
       [req.params.id, me]
     );
-    if (!found.rows.length) return res.status(404).json({ error: 'No such payment' });
+    if (!found.rows.length) return res.status(404).json({ error: 'Payment not found.' });
     const pay = found.rows[0];
 
     if (pay.receipt_status === 'issued') {
-      return res.status(409).json({ error: 'A receipt has already been raised for this payment' });
+      return res.status(409).json({ error: 'Receipt already issued.' });
     }
 
     // Stored on the payment, not just passed through, so a reprint months
     // later says exactly what the original said.
+    //
+    // COALESCE on the donor fields, for that reason. The dialog only sends a
+    // field it has an input for, and "" used to mean "set this donor's PAN to
+    // nothing" - so raising a receipt for a payment that had an address and no
+    // PAN wiped the address, and every receipt wiped the sevak's phone. An
+    // audit field on a financial record must not be erasable by omission. A
+    // genuine correction still goes through, because the form is prefilled
+    // from the stored value and sends it back non-empty.
     await pool.query(
       `UPDATE qr_payments SET
-         donor_name = $2, donor_phone = $3, donor_email = $4, donor_pan = $5,
-         donor_address = $6, purpose = COALESCE($7, purpose),
-         sevak_name = $8, sevak_phone = $9,
+         donor_name    = COALESCE(NULLIF($2, ''), donor_name),
+         donor_phone   = COALESCE(NULLIF($3, ''), donor_phone),
+         donor_email   = COALESCE(NULLIF($4, ''), donor_email),
+         donor_pan     = COALESCE(NULLIF($5, ''), donor_pan),
+         donor_address = COALESCE(NULLIF($6, ''), donor_address),
+         purpose       = COALESCE($7, purpose),
+         sevak_name    = COALESCE(NULLIF($8, ''), sevak_name),
+         sevak_phone   = COALESCE(NULLIF($9, ''), sevak_phone),
          receipt_site = COALESCE($10, receipt_site),
          receipt_by = $11, receipt_status = NULL, receipt_error = NULL
        WHERE id = $1`,
@@ -1710,7 +1747,7 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
           occurredAt: pay.received_at,
           qrPaymentId: pay.id,
           leadId: pay.lead_id ?? null,
-          note: `Receipt raised for a QR payment${donorName ? ` from ${donorName}` : ''}`,
+          note: `Receipt issued for QR payment${donorName ? ` from ${donorName}` : ''}`,
           createdBy: creditTo,
         }).catch((e) => {
           console.error('crm.qrReceipt credit failed:', (e as Error).message);
@@ -1730,7 +1767,7 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
     });
   } catch (err) {
     console.error('crm.qrReceipt error:', err);
-    res.status(500).json({ error: 'Could not raise that receipt' });
+    res.status(500).json({ error: 'Could not issue receipt. Try again.' });
   }
 });
 
@@ -1775,12 +1812,12 @@ router.post('/qr/payments/:id/claim', authenticate, async (req, res) => {
         WHERE p.id = $1`,
       [req.params.id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'No such payment' });
+    if (!rows.length) return res.status(404).json({ error: 'Payment not found.' });
     const p = rows[0];
 
     if (p.credit_id) {
       return res.status(409).json({
-        error: `That payment is already counted for ${p.credit_user_name ?? 'somebody'}.`,
+        error: `Already counted for ${p.credit_user_name ?? 'another caller'}.`,
       });
     }
 
@@ -1792,8 +1829,8 @@ router.post('/qr/payments/:id/claim', authenticate, async (req, res) => {
       occurredAt: p.received_at,
       qrPaymentId: p.id,
       note: note
-        ? `Claimed by hand — ${note}`
-        : `Claimed by hand${p.qr_label ? ` from QR ${p.qr_label}` : ''}`,
+        ? `Added by hand: ${note}`
+        : `Added by hand${p.qr_label ? ` from QR ${p.qr_label}` : ''}`,
       createdBy: me,
     });
 
@@ -1801,12 +1838,12 @@ router.post('/qr/payments/:id/claim', authenticate, async (req, res) => {
       // Lost the race rather than hit an error. Said plainly, because the
       // screen refreshing to show somebody else's name on it would otherwise
       // look like the button did nothing.
-      return res.status(409).json({ error: 'Somebody else claimed that payment a moment ago.' });
+      return res.status(409).json({ error: 'Someone else just added this to their total.' });
     }
     res.json({ claimed: true, credit });
   } catch (err) {
     console.error('crm.claimPayment error:', err);
-    res.status(500).json({ error: 'Could not claim that payment' });
+    res.status(500).json({ error: 'Could not add to your total. Try again.' });
   }
 });
 
@@ -1823,13 +1860,13 @@ router.delete('/qr/payments/:id/claim', authenticate, authorize('admin', 'accoun
     const n = await reverseCreditFor(
       { qrPaymentId: String(req.params.id) },
       req.user?.userId ?? '',
-      str(req.body?.reason, 300) ?? 'Reversed by an administrator'
+      str(req.body?.reason, 300) ?? 'Undone by an admin'
     );
-    if (!n) return res.status(404).json({ error: 'Nothing was credited for that payment' });
+    if (!n) return res.status(404).json({ error: 'This payment is not counted for anyone.' });
     res.json({ reversed: n });
   } catch (err) {
     console.error('crm.unclaimPayment error:', err);
-    res.status(500).json({ error: 'Could not reverse that credit' });
+    res.status(500).json({ error: 'Could not undo. Try again.' });
   }
 });
 
@@ -1882,7 +1919,7 @@ router.get('/qr/shares', authenticate, async (req, res) => {
  */
 router.post('/qr/payments/:id/attach', authenticate, async (req, res) => {
   const shareId = str(req.body?.share_id, 36);
-  if (!shareId) return res.status(400).json({ error: 'Choose who this payment was from' });
+  if (!shareId) return res.status(400).json({ error: 'Pick who paid.' });
 
   const client = await pool.connect();
   try {
@@ -1890,7 +1927,7 @@ router.post('/qr/payments/:id/attach', authenticate, async (req, res) => {
     const pay = await client.query(`SELECT * FROM qr_payments WHERE id = $1 FOR UPDATE`, [req.params.id]);
     if (!pay.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'No such payment' });
+      return res.status(404).json({ error: 'Payment not found.' });
     }
     // A caller may only attribute a payment to a QR they themselves shared.
     // Without this, attributing was a one-click way to move a colleague's
@@ -1903,7 +1940,7 @@ router.post('/qr/payments/:id/attach', authenticate, async (req, res) => {
     );
     if (!share.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'No such share' });
+      return res.status(404).json({ error: 'Not found.' });
     }
 
     await client.query(
@@ -1961,7 +1998,7 @@ router.post('/qr/payments/:id/attach', authenticate, async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.attachPayment error:', err);
-    res.status(500).json({ error: 'Could not link that payment' });
+    res.status(500).json({ error: 'Could not link payment. Try again.' });
   } finally {
     client.release();
   }

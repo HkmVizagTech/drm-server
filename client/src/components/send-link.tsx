@@ -72,7 +72,7 @@ export function SendLink({
       // pick the wrong one. The server already returns personal presets first.
       setChosen((c) => c || d.links[0]?.id || "");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the saved links");
+      setError(e instanceof Error ? e.message : "Could not load links.");
     }
   }, []);
 
@@ -131,9 +131,9 @@ export function SendLink({
     <>
       {!compact && (
         <div className="mb-2 flex items-center justify-between gap-2">
-          <p className="text-sm font-semibold text-ink">Send them a link</p>
+          <p className="text-sm font-semibold text-ink">Send a link</p>
           <Button size="xs" variant="ghost" onClick={() => setAdding((v) => !v)}>
-            {adding ? "Cancel" : "Save a new link"}
+            {adding ? "Cancel" : "Add link"}
           </Button>
         </div>
       )}
@@ -153,7 +153,7 @@ export function SendLink({
               value={chosen}
               onChange={setChosen}
               className="flex-1 min-w-[12rem]"
-              ariaLabel="Which link to send"
+              ariaLabel="Link to send"
               placeholder="Pick a link…"
               options={links.map((l) => ({
                 value: l.id,
@@ -161,7 +161,7 @@ export function SendLink({
                 // Two headings rather than one flat pile: a caller's own
                 // presets and the temple's shared links are different things,
                 // and only the first list is theirs to change.
-                group: l.owner_user_id ? "My presets" : "The temple's links",
+                group: l.owner_user_id ? "My presets" : "Temple links",
                 hint:
                   l.use_count > 0
                     ? `sent ${l.use_count} time${l.use_count === 1 ? "" : "s"}`
@@ -184,7 +184,7 @@ export function SendLink({
               // The calling screen's W shortcut clicks this button rather than
               // duplicating the send logic, so the two can never drift apart.
               data-send-whatsapp
-              title="Opens WhatsApp on this computer, in this donor's chat"
+              title="Open WhatsApp chat"
             >
               WhatsApp
             </Button>
@@ -196,7 +196,7 @@ export function SendLink({
                 onClick={() => setAdding(true)}
                 className="text-2xs text-ink-faint underline underline-offset-2 hover:text-brand-700"
               >
-                Save a new link
+                Add link
               </button>
               <a
                 href="/calling/links"
@@ -209,7 +209,7 @@ export function SendLink({
 
           {sentLabel && (
             <Alert tone="good" className="mt-2">
-              WhatsApp opened with the {sentLabel} link. Press send there — DRM can&apos;t do that part for you.
+              WhatsApp opened. Press send there.
             </Alert>
           )}
           {error && (
@@ -233,14 +233,14 @@ export function SendLink({
                     setMessage(preview);
                     setEditing(true);
                   }}
-                  title="Click to edit before sending"
+                  title="Click to edit"
                   className="w-full whitespace-pre-line break-words rounded-control bg-sunken px-3 py-2 text-left text-xs text-ink-soft transition-colors [overflow-wrap:anywhere] hover:bg-brand-50"
                 >
                   {preview}
                 </button>
               )}
               <p className="mt-1 text-2xs text-ink-faint">
-                {editing ? "Edit, then press WhatsApp." : "Click the message to change it for this donor."}
+                {editing ? "Edit, then press WhatsApp." : "Click the message to edit it."}
               </p>
             </div>
           )}
@@ -284,7 +284,7 @@ function NewLinkForm({ onDone }: { onDone: (createdId?: string) => void }) {
       });
       onDone(created.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that link");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
     } finally {
       setBusy(false);
     }
@@ -295,7 +295,7 @@ function NewLinkForm({ onDone }: { onDone: (createdId?: string) => void }) {
   // wanted the URL has nothing left to read.
   return (
     <div className="space-y-2">
-      <Field label="What to call it" htmlFor="new-link-label" required>
+      <Field label="Name" htmlFor="new-link-label" required>
         <Input
           id="new-link-label"
           value={label}
@@ -303,7 +303,7 @@ function NewLinkForm({ onDone }: { onDone: (createdId?: string) => void }) {
           placeholder="Govardhan Puja 2026"
         />
       </Field>
-      <Field label="The link" htmlFor="new-link-url" hint="Paste the full link, UTM and all." required>
+      <Field label="Link" htmlFor="new-link-url" hint="Paste the full link" required>
         <Input
           id="new-link-url"
           value={url}
@@ -311,7 +311,7 @@ function NewLinkForm({ onDone }: { onDone: (createdId?: string) => void }) {
           placeholder="https://harekrishnavizag.org/…"
         />
       </Field>
-      <Field label="Seva name" htmlFor="new-link-seva" hint="As a donor would say it. Optional.">
+      <Field label="Seva name" htmlFor="new-link-seva" hint="Optional">
         <Input
           id="new-link-seva"
           value={seva}
@@ -319,7 +319,7 @@ function NewLinkForm({ onDone }: { onDone: (createdId?: string) => void }) {
           placeholder="Annadan"
         />
       </Field>
-      <Checkbox checked={shared} onChange={setShared} label="Everyone can send this one" />
+      <Checkbox checked={shared} onChange={setShared} label="Share with everyone" />
       {error && <Alert tone="danger">{error}</Alert>}
       <div className="flex gap-2">
         <Button size="sm" onClick={() => void save()} disabled={!label.trim() || !url.trim()} loading={busy}>
@@ -330,9 +330,8 @@ function NewLinkForm({ onDone }: { onDone: (createdId?: string) => void }) {
         </Button>
       </div>
       <p className="text-2xs text-ink-faint">
-        Tip: the link can contain <code className="text-ink-muted">{"{lead}"}</code> or{" "}
-        <code className="text-ink-muted">{"{caller}"}</code> — DRM fills them in, so a donation that came from a call
-        can be told apart from one that arrived on its own.
+        Tip: you can add <code className="text-ink-muted">{"{lead}"}</code> or{" "}
+        <code className="text-ink-muted">{"{caller}"}</code> to the link.
       </p>
     </div>
   );

@@ -25,7 +25,7 @@ export default function EventsPage() {
       <PageHeader
         eyebrow="Fulfilment"
         title="Events"
-        subtitle="Festivals and programmes whose dates are still ahead."
+        subtitle="Upcoming festivals and programmes."
       />
 
       {events.length === 0 ? (
@@ -33,7 +33,7 @@ export default function EventsPage() {
           <EmptyState
             icon="calendar"
             title="No upcoming events"
-            message="Nothing with a date still ahead of it is recorded. This screen only reads the event list — there is no way to add or edit an event from the admin yet."
+            message="Upcoming events show here."
           />
         </Card>
       ) : (

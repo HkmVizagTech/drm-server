@@ -64,20 +64,19 @@ export function statusTone(tone: string | null | undefined): BadgeTone {
 export function nearlyGaveLine(ng: NonNullable<CallLead["nearly_gave"]>): string {
   const amount = ng.amount ? ` ${currency(Number(ng.amount))}` : "";
   const purpose = ng.purpose ? ` for ${ng.purpose}` : "";
-  const site = ng.source_site ? ` on ${ng.source_site}` : "";
-  return `Tried to give${amount}${purpose}${site} · ${relativeDate(ng.attempted_at).toLowerCase()}`;
+  return `Tried to give${amount}${purpose} · ${relativeDate(ng.attempted_at).toLowerCase()}`;
 }
 
 function activityLine(a: RecentActivity): string {
   if (a.kind === "call") return a.disposition_label ?? a.disposition ?? "Called";
   if (a.kind === "status_change") return `Moved to ${a.to_value?.replace(/_/g, " ") ?? "a new stage"}`;
-  if (a.kind === "follow_up") return a.to_value ? `Callback booked for ${shortDate(a.to_value)}` : "Callback cleared";
-  if (a.kind === "reminder") return a.to_value ? `Promise noted for ${shortDate(a.to_value)}` : "Promise noted";
+  if (a.kind === "follow_up") return a.to_value ? `Follow-up on ${shortDate(a.to_value)}` : "Follow-up removed";
+  if (a.kind === "reminder") return a.to_value ? `Promise for ${shortDate(a.to_value)}` : "Promise added";
   if (a.kind === "whatsapp") return "Sent a link on WhatsApp";
   if (a.kind === "qr_share") return "Sent a QR on WhatsApp";
   if (a.kind === "assignment") return a.to_value ? "Assigned to a caller" : "Unassigned";
-  if (a.kind === "import") return a.note && /^Started a donation/.test(a.note) ? "Nearly gave on the website" : "Added from a sheet";
-  if (a.kind === "link_donation") return "Linked a donation from another number";
+  if (a.kind === "import") return a.note && /^Started a donation/.test(a.note) ? "Nearly gave online" : "Added from a sheet";
+  if (a.kind === "link_donation") return "Linked a donation";
   return "Note";
 }
 
@@ -134,15 +133,15 @@ export function LeadCard({
               tabIndex={-1}
               className="min-w-0 break-words text-xl font-semibold leading-tight text-ink outline-none"
             >
-              {lead.name || "Name not known"}
+              {lead.name || "No name"}
             </h2>
-            <IconButton name="edit" size="sm" label="Edit name and numbers" onClick={onEdit} className="-mt-1 flex-none" />
+            <IconButton name="edit" size="sm" label="Edit" onClick={onEdit} className="-mt-1 flex-none" />
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {lead.status_label && <Badge tone={statusTone(lead.status_tone)}>{lead.status_label}</Badge>}
             {lead.call_attempts > 0 && (
               <Badge tone={lead.call_attempts >= 4 ? "warn" : "neutral"}>
-                {lead.call_attempts} attempt{lead.call_attempts === 1 ? "" : "s"}
+                {lead.call_attempts} call{lead.call_attempts === 1 ? "" : "s"}
               </Badge>
             )}
             {lead.nearly_gave && (
@@ -157,7 +156,7 @@ export function LeadCard({
             )}
           </div>
           <p className="mt-1.5 text-sm text-ink-muted">
-            {[lead.city, lead.assigned_to_name ? `with ${lead.assigned_to_name}` : "unassigned", lead.email]
+            {[lead.city, lead.assigned_to_name ? `Caller: ${lead.assigned_to_name}` : "No caller", lead.email]
               .filter(Boolean)
               .join(" · ")}
           </p>
@@ -184,7 +183,7 @@ export function LeadCard({
                 name={copied ? "check" : "copy"}
                 size="lg"
                 variant="secondary"
-                label={copied ? "Copied" : "Copy the number (C)"}
+                label={copied ? "Copied" : "Copy number (C)"}
                 onClick={() => void copy()}
                 className="h-13! w-13!"
               />
@@ -218,16 +217,14 @@ export function LeadCard({
       </div>
 
       {lead.do_not_call && (
-        <Alert tone="danger" title="They asked not to be called" className="mt-3 mb-0">
-          Only ring if they have since asked to be. Clearing this is done on their full record.
-        </Alert>
+        <Alert tone="danger" title="Do not call" className="mt-3 mb-0" />
       )}
 
       {/* Already given: so nobody chases a donor for money that has arrived.
           Logging the call is still allowed - they may have rung to say so. */}
       {lead.converted_at && (
         <Alert tone="good" title={`Already donated${lead.converted_amount ? ` ${currency(Number(lead.converted_amount))}` : ""} on ${shortDate(lead.converted_at)}`} className="mt-3 mb-0">
-          {convertedViaLabel(lead.converted_via)} — no need to ask again. You can still log this call.
+          {convertedViaLabel(lead.converted_via)}. No need to ask again.
         </Alert>
       )}
 
@@ -236,10 +233,7 @@ export function LeadCard({
         <div className="mt-3 rounded-card border border-amber-200 bg-warn-wash px-3.5 py-2.5 text-sm text-amber-900">
           <p className="flex items-start gap-2 font-medium">
             <Icon name="sparkle" size={15} className="mt-0.5 flex-none text-warn" />
-            {nearlyGaveLine(lead.nearly_gave)}
-          </p>
-          <p className="mt-0.5 pl-6 text-xs opacity-80">
-            The donation did not go through. Ask if something went wrong — a link or QR finishes it.
+            {nearlyGaveLine(lead.nearly_gave)}. Payment failed.
           </p>
           {onLinkOther && !lead.converted_at && (
             // Often they finished it on a son's or spouse's phone. Said here,
@@ -250,7 +244,7 @@ export function LeadCard({
               className="mt-2 ml-6 inline-flex min-h-11 items-center gap-1.5 rounded-control border border-amber-300 bg-surface px-3 py-2 text-left text-sm font-medium text-amber-900 hover:bg-amber-50"
             >
               <Icon name="link" size={14} className="flex-none" />
-              <span>They gave from another number / name</span>
+              <span>Gave from another number</span>
             </button>
           )}
         </div>
@@ -269,7 +263,7 @@ export function LeadCard({
                   Promised{r.expected_amount ? ` ${currency(Number(r.expected_amount))}` : ""}
                   {r.occasion ? ` at ${r.occasion}` : ""}
                 </span>{" "}
-                — due {shortDate(r.due_at)} ({dueLabel(r.due_at)})
+                · due {shortDate(r.due_at)} ({dueLabel(r.due_at)})
                 {r.title && !r.occasion && <span className="block text-xs text-ink-muted">{r.title}</span>}
               </span>
             </li>
@@ -286,22 +280,22 @@ export function LeadCard({
               <span className="text-ink-muted"> · {relativeDate(lead.last_contacted_at)}</span>
             </>
           ) : (
-            "Never rung"
+            "Never called"
           )}
         </Fact>
-        <Fact label="Callback">
+        <Fact label="Follow-up">
           {lead.next_follow_up_at ? (
             <span className={dueLabel(lead.next_follow_up_at).endsWith("late") ? "font-medium text-warn" : ""}>
               {shortDate(lead.next_follow_up_at)} · {dueLabel(lead.next_follow_up_at)}
             </span>
           ) : (
-            "None booked"
+            "None"
           )}
         </Fact>
-        <Fact label="Hoping for">
+        <Fact label="Hoped for">
           {lead.expected_amount ? currency(Number(lead.expected_amount)) : "—"}
         </Fact>
-        <Fact label="Given through DRM">
+        <Fact label="Given">
           {given ? (
             <>
               {currency(Number(lead.total_donated ?? 0))}
@@ -316,10 +310,10 @@ export function LeadCard({
         </Fact>
         {lead.external_total_donated && Number(lead.external_total_donated) > 0 && (
           // From the office's own sheets, never added to anything DRM raised.
-          <Fact label="In the temple accounts" wide>
+          <Fact label="Temple records" wide>
             {currency(Number(lead.external_total_donated))}
             {Number(lead.external_account_count) > 1 && (
-              <span className="text-ink-muted"> across {lead.external_account_count} accounts</span>
+              <span className="text-ink-muted"> · {lead.external_account_count} accounts</span>
             )}
             {lead.external_last_donation_at && (
               <span className="text-ink-muted"> · last in {istYear(lead.external_last_donation_at)}</span>
@@ -338,7 +332,7 @@ export function LeadCard({
         <div className="mt-3 space-y-1 text-sm">
           {lead.follow_up_note && (
             <p className="text-ink-soft">
-              <span className="text-ink-muted">Callback note:</span> “{lead.follow_up_note}”
+              <span className="text-ink-muted">Follow-up note:</span> “{lead.follow_up_note}”
             </p>
           )}
           {lead.remarks && (
@@ -399,15 +393,15 @@ export function LeadCard({
                       <span className="font-medium text-ink">{activityLine(a)}</span>
                       {dir === "inbound" && (
                         <Badge tone="info" icon="phone">
-                          They rang
+                          They called
                         </Badge>
                       )}
-                      {dir === "missed" && <Badge tone="warn">Missed call from them</Badge>}
+                      {dir === "missed" && <Badge tone="warn">Missed call</Badge>}
                     </span>
                     <span className="block text-xs text-ink-muted">
                       {relativeDate(a.occurred_at)} {clockTime(a.occurred_at)}
                       {a.kind === "call"
-                        ? ` · ${dir === "inbound" ? "answered by" : "rung by"} ${a.user_name ?? "someone"}`
+                        ? ` · ${dir === "inbound" ? "answered by" : "called by"} ${a.user_name ?? "someone"}`
                         : a.user_name
                         ? ` · ${a.user_name}`
                         : ""}
@@ -434,7 +428,7 @@ export function LeadCard({
               href={`/leads/${lead.id}`}
               className="inline-flex min-h-8 items-center gap-1 text-xs font-medium text-brand-700 hover:underline"
             >
-              Full record
+              Open lead
               <Icon name="arrowRight" size={12} />
             </Link>
           </div>
@@ -442,10 +436,10 @@ export function LeadCard({
       )}
       {!lead.recent_activities.length && (
         <p className="mt-3 text-xs text-ink-muted">
-          No calls or notes yet — a first conversation.
+          No calls yet.
           {lead.source_detail && <> From: {lead.source_detail}</>}{" "}
           <Link href={`/leads/${lead.id}`} className="font-medium text-brand-700 hover:underline">
-            Full record
+            Open lead
           </Link>
         </p>
       )}

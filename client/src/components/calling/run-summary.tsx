@@ -31,8 +31,8 @@ export function RunSummaryCard({
 }) {
   return (
     <Card tone="brand" padded={false} className="p-4 sm:p-6">
-      <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-brand-700">End of the run</p>
-      <h2 className="mt-1 text-xl font-semibold text-ink">You reached the end of {label}</h2>
+      <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-brand-700">All done</p>
+      <h2 className="mt-1 text-xl font-semibold text-ink">End of {label}</h2>
 
       {!summary ? (
         <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -43,9 +43,9 @@ export function RunSummaryCard({
       ) : (
         <>
           <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Tally label="Calls logged" value={number(summary.calls)} />
+            <Tally label="Calls" value={number(summary.calls)} />
             <Tally
-              label="Got through"
+              label="Answered"
               value={number(summary.connected)}
               sub={summary.calls ? `${Math.round((summary.connected / summary.calls) * 100)}% of calls` : undefined}
             />
@@ -62,8 +62,7 @@ export function RunSummaryCard({
           </dl>
           {summary.credited > 0 && (
             <p className="mt-3 text-sm text-ink-soft">
-              <span className="font-semibold text-good">{currency(summary.credited)}</span> credited to you since you
-              started, from links and QRs as well as calls.
+              <span className="font-semibold text-good">{currency(summary.credited)}</span> added to your total.
             </p>
           )}
           {summary.outcomes.length > 0 && (
@@ -77,7 +76,7 @@ export function RunSummaryCard({
           )}
           {summary.taken > 0 && (
             <p className="mt-3 text-xs text-ink-muted">
-              {number(summary.taken)} were stepped past because a colleague had them.
+              {number(summary.taken)} skipped. Someone else had them.
             </p>
           )}
         </>
@@ -86,7 +85,7 @@ export function RunSummaryCard({
       <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
         {skipped > 0 && (
           <Button size="lg" icon="arrowLeft" loading={busy === "revisit"} disabled={busy !== null} onClick={onRevisit}>
-            Go back to {number(skipped)} skipped
+            Call {number(skipped)} skipped
           </Button>
         )}
         <Button
@@ -100,7 +99,7 @@ export function RunSummaryCard({
           Finish
         </Button>
         <Button size="lg" variant="secondary" disabled={busy !== null} onClick={onChooseAnother}>
-          Choose another list
+          Pick another list
         </Button>
       </div>
     </Card>

@@ -26,7 +26,7 @@ export default function LoginPage() {
     try {
       await login(email, password);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      setError(err instanceof Error ? err.message : "Could not sign in. Try again.");
     } finally {
       setLoading(false);
     }
@@ -53,7 +53,7 @@ export default function LoginPage() {
             H
           </span>
           <h1 className="text-2xl font-semibold tracking-tight text-ink">HKM Vizag</h1>
-          <p className="mt-1 text-sm text-ink-muted">Donor Relationship Manager</p>
+          <p className="mt-1 text-sm text-ink-muted">Donor manager</p>
         </div>
 
         <form
@@ -62,7 +62,7 @@ export default function LoginPage() {
         >
           {error && <Alert tone="danger">{error}</Alert>}
 
-          <Field label="Email" htmlFor="login-email" required>
+          <Field label="E-mail ID" htmlFor="login-email" required>
             <Input
               id="login-email"
               type="email"

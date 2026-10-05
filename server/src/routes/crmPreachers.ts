@@ -183,7 +183,7 @@ router.get('/preachers', async (req, res) => {
 
 router.post('/preachers', authorize('admin', 'accountant'), async (req, res) => {
   const code = normalizeCode(req.body?.code);
-  if (!code) return res.status(400).json({ error: 'A preacher needs a code' });
+  if (!code) return res.status(400).json({ error: 'Enter a preacher code.' });
   const idNumber = normalizeIdNumber(req.body?.id_number);
 
   try {
@@ -199,7 +199,7 @@ router.post('/preachers', authorize('admin', 'accountant'), async (req, res) => 
       if (clash.rows.length) {
         const o = clash.rows[0];
         return res.status(409).json({
-          error: `ID ${idNumber} already belongs to ${o.name || o.code}.`,
+          error: `ID ${idNumber} is already used by ${o.name || o.code}.`,
         });
       }
     }
@@ -237,7 +237,7 @@ router.put('/preachers/:id', authorize('admin', 'accountant'), async (req, res) 
       );
       if (clash.rows.length) {
         const o = clash.rows[0];
-        return res.status(409).json({ error: `ID ${idNumber} already belongs to ${o.name || o.code}.` });
+        return res.status(409).json({ error: `ID ${idNumber} is already used by ${o.name || o.code}.` });
       }
     }
 

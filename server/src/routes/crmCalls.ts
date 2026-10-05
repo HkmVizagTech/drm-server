@@ -186,7 +186,7 @@ async function exportCalls(req: import('express').Request, res: import('express'
     });
   } catch (err) {
     console.error('crm.exportCalls error:', err);
-    res.status(500).json({ error: 'Could not build that export' });
+    res.status(500).json({ error: 'Could not download. Try again.' });
   }
 }
 router.get('/calls/export.csv', (req, res) => exportCalls(req, res, 'csv'));
@@ -298,7 +298,7 @@ router.get('/leads/:id/donation-candidates', async (req, res) => {
     });
   } catch (err) {
     console.error('crm.donationCandidates error:', err);
-    res.status(500).json({ error: 'Could not look for their donation' });
+    res.status(500).json({ error: 'Could not search donations. Try again.' });
   }
 });
 
@@ -319,7 +319,7 @@ router.post('/leads/:id/link-donation', async (req, res) => {
   const me = req.user?.userId ?? null;
   const donationId = str(b.donation_id, 36);
   const qrId = str(b.qr_payment_id, 36);
-  if (!donationId && !qrId) return res.status(400).json({ error: 'Pick the donation that was theirs' });
+  if (!donationId && !qrId) return res.status(400).json({ error: 'Pick their donation.' });
 
   const elevated = req.user?.role && req.user.role !== 'caller';
   const client = await pool.connect();
@@ -354,12 +354,12 @@ router.post('/leads/:id/link-donation', async (req, res) => {
       );
       if (!d.rows.length) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'No such donation' });
+        return res.status(404).json({ error: 'Donation not found.' });
       }
       const row = d.rows[0];
       if (row.other_lead) {
         await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'That donation is already linked to another lead' });
+        return res.status(409).json({ error: 'This donation is linked to another lead.' });
       }
       amount = Number(row.amount);
       at = row.created_at;
@@ -389,7 +389,7 @@ router.post('/leads/:id/link-donation', async (req, res) => {
             leadId: lead.id,
             donationId,
             personId: row.person_id,
-            note: `Gave from another number — ${label}`,
+            note: `Gave from another number: ${label}`,
             createdBy: me,
           },
           client
@@ -405,12 +405,12 @@ router.post('/leads/:id/link-donation', async (req, res) => {
       );
       if (!p.rows.length) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'No such payment' });
+        return res.status(404).json({ error: 'Payment not found.' });
       }
       const row = p.rows[0];
       if (row.share_id) {
         await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'That payment is already matched to somebody' });
+        return res.status(409).json({ error: 'This payment is already linked.' });
       }
       amount = Number(row.amount);
       at = row.received_at;
@@ -447,7 +447,7 @@ router.post('/leads/:id/link-donation', async (req, res) => {
         lead.id,
         me,
         before.rows[0].status,
-        `Gave from another number: ${label}${str(b.note, 300) ? ` — ${str(b.note, 300)}` : ''}`,
+        `Gave from another number: ${label}${str(b.note, 300) ? `. ${str(b.note, 300)}` : ''}`,
         JSON.stringify({
           before: before.rows[0],
           donation_id: donationId,
@@ -469,7 +469,7 @@ router.post('/leads/:id/link-donation', async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.linkDonation error:', err);
-    res.status(500).json({ error: 'Could not link that donation' });
+    res.status(500).json({ error: 'Could not link donation. Try again.' });
   } finally {
     client.release();
   }
@@ -490,7 +490,7 @@ router.post('/link-donation/:activityId/undo', async (req, res) => {
     );
     if (!a.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Nothing to undo — it is too old, or was not yours' });
+      return res.status(404).json({ error: "Can't undo this now." });
     }
     const act = a.rows[0];
     const u = act.undo_payload as {
@@ -551,7 +551,7 @@ router.post('/link-donation/:activityId/undo', async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.undoLinkDonation error:', err);
-    res.status(500).json({ error: 'Could not undo that' });
+    res.status(500).json({ error: 'Could not undo. Try again.' });
   } finally {
     client.release();
   }

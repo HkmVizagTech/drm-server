@@ -147,10 +147,10 @@ const SITE_LABELS: Record<string, string> = {
  * simply never attempted.
  */
 const STATUS_WORDS: Record<string, { label: string; tone: "warn" | "danger" | "info" }> = {
-  pending: { label: "Never completed", tone: "warn" },
-  created: { label: "Never completed", tone: "warn" },
+  pending: { label: "Not finished", tone: "warn" },
+  created: { label: "Not finished", tone: "warn" },
   failed: { label: "Payment failed", tone: "danger" },
-  halted: { label: "Halted", tone: "danger" },
+  halted: { label: "Stopped", tone: "danger" },
 };
 
 const who = (r: Row) => r.name || formatPhone(r.phone);
@@ -166,27 +166,25 @@ const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
  */
 function summarise(r: AdoptResult, opts: { mine: boolean; owners: string[] }): string {
   const parts: string[] = [];
-  if (r.created) parts.push(`${number(r.created)} added as ${plural(r.created, "a lead", "leads")}`);
+  if (r.created) parts.push(`${number(r.created)} added`);
   if (r.already_yours)
     parts.push(
       `${number(r.already_yours)} ${
         opts.mine
-          ? plural(r.already_yours, "was already yours", "were already yours")
-          : plural(r.already_yours, "was already a lead", "were already leads")
+          ? "already yours"
+          : "already leads"
       }`
     );
   if (r.already_others)
     parts.push(
-      `${number(r.already_others)} ${plural(r.already_others, "belongs", "belong")} to ${
-        opts.owners.length === 1 ? opts.owners[0] : "other callers"
-      }`
+      `${number(r.already_others)} with ${opts.owners.length === 1 ? opts.owners[0] : "other callers"}`
     );
-  if (r.do_not_call) parts.push(`${number(r.do_not_call)} asked not to be called`);
+  if (r.do_not_call) parts.push(`${number(r.do_not_call)} do not call`);
   if (r.gave_anyway) parts.push(`${number(r.gave_anyway)} gave anyway`);
   const accounted = r.created + r.already_yours + r.already_others + r.do_not_call + r.gave_anyway;
   const rest = r.requested - accounted;
-  if (rest > 0) parts.push(`${number(rest)} could not be added`);
-  return parts.join(" · ") || "Nobody to add";
+  if (rest > 0) parts.push(`${number(rest)} not added`);
+  return parts.join(" · ") || "No one to add";
 }
 
 export default function PendingPaymentsPage() {
@@ -268,7 +266,7 @@ export default function PendingPaymentsPage() {
     (k: string) =>
       apiClient.get<Answer>(`/api/crm/leads/abandoned?${k}`).then(
         (d) => settle(k, d, null),
-        (e) => settle(k, null, e instanceof Error ? e.message : "Could not load the list")
+        (e) => settle(k, null, e instanceof Error ? e.message : "Could not load. Try again.")
       ),
     [settle]
   );
@@ -340,9 +338,9 @@ export default function PendingPaymentsPage() {
         days: Number(days),
       });
       await reload();
-      toast("Checked both sites just now");
+      toast("Updated");
     } catch (e) {
-      toast.error("Could not reach the sites", e instanceof Error ? e.message : undefined);
+      toast.error("Could not update. Try again.", e instanceof Error ? e.message : undefined);
     } finally {
       setRefreshing(false);
     }
@@ -380,18 +378,18 @@ export default function PendingPaymentsPage() {
         return;
       }
       if (!res.lead_ids.length) {
-        toast.info("Nobody among those can be rung", line);
+        toast.info("No one here can be called", line);
         return;
       }
       const run = await startRun({ kind: "selection", lead_ids: res.lead_ids, label: "Nearly gave" });
       if (run.empty || !run.session) {
-        toast.info("Nobody among those can be rung right now", line);
+        toast.info("No one here can be called now", line);
         return;
       }
       toast(line);
       router.push(runHref(run.session.id));
     } catch (e) {
-      toast.error("Could not add those as leads", e instanceof Error ? e.message : undefined);
+      toast.error("Could not add. Try again.", e instanceof Error ? e.message : undefined);
     } finally {
       setBulkBusy(null);
     }
@@ -403,13 +401,13 @@ export default function PendingPaymentsPage() {
     try {
       const run = await startRun({ kind: "nearly_gave" });
       if (run.empty || !run.session) {
-        toast.info("Nobody to ring", "Everyone who nearly gave has been rung, set aside, or given since.");
+        toast.info("No one to call right now");
         return;
       }
-      if (run.adopted?.created) toast(`${number(run.adopted.created)} added as leads before starting`);
+      if (run.adopted?.created) toast(`${number(run.adopted.created)} new leads added`);
       router.push(runHref(run.session.id));
     } catch (e) {
-      toast.error("Could not start calling", e instanceof Error ? e.message : undefined);
+      toast.error("Could not start calling. Try again.", e instanceof Error ? e.message : undefined);
     } finally {
       setCallingAll(false);
     }
@@ -433,14 +431,14 @@ export default function PendingPaymentsPage() {
       });
       const id = res.lead_ids[0];
       if (!id) {
-        toast.warn(`${who(r)} cannot be rung`, summarise(res, { mine: true, owners: [] }));
+        toast.warn(`${who(r)} cannot be called`, summarise(res, { mine: true, owners: [] }));
         void reload();
         return;
       }
       if (res.created) toast(`${who(r)} is now your lead`);
       router.push(callHref(id, "/calling/pending"));
     } catch (e) {
-      toast.error(`Could not open a call to ${who(r)}`, e instanceof Error ? e.message : undefined);
+      toast.error(`Could not call ${who(r)}. Try again.`, e instanceof Error ? e.message : undefined);
     } finally {
       setBusy(null);
     }
@@ -512,11 +510,11 @@ export default function PendingPaymentsPage() {
       );
       toast(
         res.created
-          ? `${who(r)} is now a lead, assigned to you`
-          : `${who(r)} was already a lead — kept rather than duplicated`
+          ? `${who(r)} is now your lead`
+          : `${who(r)} is already a lead`
       );
     } catch (e) {
-      toast.error(`Could not add ${who(r)}`, e instanceof Error ? e.message : undefined);
+      toast.error(`Could not add ${who(r)}. Try again.`, e instanceof Error ? e.message : undefined);
     } finally {
       setBusy(null);
     }
@@ -528,7 +526,7 @@ export default function PendingPaymentsPage() {
       toast(`${who(r)} is back on the list`);
       void reload();
     } catch (e) {
-      toast.error(`Could not bring ${who(r)} back`, e instanceof Error ? e.message : undefined);
+      toast.error(`Could not bring ${who(r)} back. Try again.`, e instanceof Error ? e.message : undefined);
     }
   }
 
@@ -543,7 +541,7 @@ export default function PendingPaymentsPage() {
       editIds((s) => s.delete(r.id));
       toast(`Set ${who(r)} aside`, { action: { label: "Undo", onClick: () => void restore(r) } });
     } catch (e) {
-      toast.error("Could not set that aside", e instanceof Error ? e.message : undefined);
+      toast.error("Could not set aside. Try again.", e instanceof Error ? e.message : undefined);
     } finally {
       setBusy(null);
     }
@@ -564,7 +562,7 @@ export default function PendingPaymentsPage() {
 
   const assignOptions = [
     { value: "me", label: "Me" },
-    { value: "none", label: "Leave unassigned", hint: "Whoever rings them first" },
+    { value: "none", label: "No caller" },
     ...(config?.users ?? [])
       .filter((u) => u.id !== user?.id)
       .map((u) => ({ value: u.id, label: u.name, hint: u.role?.replace(/_/g, " ") })),
@@ -582,7 +580,7 @@ export default function PendingPaymentsPage() {
         ) : r.lead_id && isOthers(r) ? (
           <Badge tone="info" icon="user">{r.assigned_to_name ? `${r.assigned_to_name}'s lead` : "Someone else's lead"}</Badge>
         ) : r.lead_id ? (
-          <Badge tone="brand">{r.lead_assigned_to ? "Your lead" : "Lead · unassigned"}</Badge>
+          <Badge tone="brand">{r.lead_assigned_to ? "Your lead" : "Lead · no caller"}</Badge>
         ) : null}
       </>
     );
@@ -646,7 +644,7 @@ export default function PendingPaymentsPage() {
             icon="rupee"
             onClick={() => void gaveAnotherWay(r)}
             disabled={busy === r.id}
-            title="They finished it on another phone, number or name - find that donation and link it"
+            title="Find their donation and link it"
           >
             Gave another way
           </Button>
@@ -656,7 +654,7 @@ export default function PendingPaymentsPage() {
           size={size}
           onClick={() => void dismiss(r)}
           disabled={busy === r.id}
-          title="Not worth a call — hide them, and keep them hidden after the next refresh"
+          title="Hide from this list"
         >
           Set aside
         </Button>
@@ -668,15 +666,15 @@ export default function PendingPaymentsPage() {
     view === "set_aside" ? (
       <EmptyState
         icon="inbox"
-        title="Nobody set aside"
-        message="People you set aside in this period appear here, so the decision can be seen and undone."
+        title="No one set aside"
+        message="People you set aside show here."
       />
     ) : (
       <EmptyState
-        title="Nobody to ring"
+        title="No one to call"
         message={
           data?.gave_anyway
-            ? `Everyone who started a donation in this period has since given. ${number(data.gave_anyway)} of them, in fact.`
+            ? `All ${number(data.gave_anyway)} have given since.`
             : "No unfinished donations in this period."
         }
       />
@@ -687,22 +685,22 @@ export default function PendingPaymentsPage() {
       <PageHeader
         eyebrow="Calling"
         title="Nearly gave"
-        subtitle="Donations started on the websites and never completed — the warmest calls in DRM"
+        subtitle="Started a donation online but did not finish."
         actions={
           <>
             {/* The one-press way in: every one of them, as a run, with the
                 new attempts turned into leads on the way. */}
             <Button icon="phoneOutgoing" loading={callingAll} onClick={() => void callEveryone()}>
-              Call everyone who nearly gave
+              Call all
             </Button>
             <Button variant="secondary" icon="refresh" loading={refreshing} onClick={() => void refreshNow()}>
-              {refreshing ? "Checking…" : "Check the sites now"}
+              {refreshing ? "Refreshing…" : "Refresh"}
             </Button>
             <ExportButton
               path="/api/crm/leads/abandoned/export"
               params={filterParams()}
               filename="nearly-gave"
-              hint={data ? `${number(data.open)} people match these filters` : undefined}
+              hint={data ? `${number(data.open)} people` : undefined}
             />
           </>
         }
@@ -733,7 +731,7 @@ export default function PendingPaymentsPage() {
               id="pending-search"
               value={search}
               onChange={setSearch}
-              placeholder="Name, number or email…"
+              placeholder="Name, mobile or e-mail"
               className="flex-1"
             />
             <Button
@@ -748,11 +746,11 @@ export default function PendingPaymentsPage() {
           </div>
         </Field>
         <div className={showFilters ? "contents" : "hidden md:contents"}>
-          <Field label="How far back" className="w-full sm:w-36">
+          <Field label="Period" className="w-full sm:w-36">
             <Select
               value={days}
               onChange={setDays}
-              ariaLabel="How far back"
+              ariaLabel="Period"
               options={[
                 { value: "1", label: "Today" },
                 { value: "7", label: "Last 7 days" },
@@ -774,39 +772,39 @@ export default function PendingPaymentsPage() {
               ]}
             />
           </Field>
-          <Field label="What happened" className="w-full sm:w-44">
+          <Field label="Status" className="w-full sm:w-44">
             <Select
               value={status}
               onChange={setStatus}
-              ariaLabel="What happened"
+              ariaLabel="Status"
               options={[
-                { value: "", label: "Any outcome" },
+                { value: "", label: "Any" },
                 { value: "failed", label: "Payment failed" },
-                { value: "pending,created", label: "Never completed" },
+                { value: "pending,created", label: "Not finished" },
               ]}
             />
           </Field>
-          <Field label="Order" className="w-full sm:w-48">
+          <Field label="Sort" className="w-full sm:w-48">
             <Select
               value={sort}
               onChange={setSort}
-              ariaLabel="Order"
+              ariaLabel="Sort"
               options={[
-                { value: "recent", label: "Most recent first" },
+                { value: "recent", label: "Newest first" },
                 { value: "amount", label: "Biggest amount first" },
-                { value: "attempts", label: "Most attempts first" },
+                { value: "attempts", label: "Most tries first" },
                 { value: "oldest", label: "Oldest first" },
               ]}
             />
           </Field>
-          <Field label="Amount between" className="w-full sm:w-56">
+          <Field label="Amount" className="w-full sm:w-56">
             <div className="flex items-center gap-1.5">
               <Input
                 value={minAmount}
                 onChange={(e) => setMinAmount(e.target.value.replace(/\D/g, ""))}
                 placeholder="any"
                 inputMode="numeric"
-                aria-label="Smallest amount"
+                aria-label="Min amount"
                 className="tabular-nums"
               />
               <span className="text-xs text-ink-faint">to</span>
@@ -815,7 +813,7 @@ export default function PendingPaymentsPage() {
                 onChange={(e) => setMaxAmount(e.target.value.replace(/\D/g, ""))}
                 placeholder="any"
                 inputMode="numeric"
-                aria-label="Largest amount"
+                aria-label="Max amount"
                 className="tabular-nums"
               />
             </div>
@@ -834,11 +832,10 @@ export default function PendingPaymentsPage() {
           table and still in the totals. */}
       {data?.sites.map((st) =>
         st.error ? (
-          <Alert key={st.site} tone="warn" title={`${SITE_LABELS[st.site] ?? st.site} could not be reached.`}>
-            {st.error}{" "}
+          <Alert key={st.site} tone="warn" title={`Could not reach ${SITE_LABELS[st.site] ?? st.site}.`}>
             {st.last_synced_at
-              ? `What you see from it is the copy taken ${relativeDate(st.last_synced_at)}.`
-              : "Nothing from it has ever been fetched, so none of it is listed below."}
+              ? `Showing data from ${relativeDate(st.last_synced_at).toLowerCase()}.`
+              : "No data from this site yet."}
           </Alert>
         ) : null
       )}
@@ -849,9 +846,9 @@ export default function PendingPaymentsPage() {
         !st.error && (st.truncated || st.rows_skipped > 0) ? (
           <Alert key={`${st.site}-partial`} tone="info">
             {SITE_LABELS[st.site] ?? st.site}:{" "}
-            {st.truncated && "there are more attempts than DRM fetched in one go, so the figures below are a floor. "}
+            {st.truncated && "Some are not shown yet. "}
             {st.rows_skipped > 0 &&
-              `${number(st.rows_skipped)} row${st.rows_skipped === 1 ? "" : "s"} could not be used — no number to ring, or nothing to identify them by.`}
+              `${number(st.rows_skipped)} skipped. No mobile number.`}
           </Alert>
         ) : null
       )}
@@ -861,13 +858,13 @@ export default function PendingPaymentsPage() {
           {data.sites
             .map((st) =>
               st.last_synced_at
-                ? `${SITE_LABELS[st.site] ?? st.site} last checked ${relativeDate(st.last_synced_at)}${
-                    st.synced_days && st.synced_days < Number(days) ? ` (last ${st.synced_days} days only)` : ""
+                ? `${SITE_LABELS[st.site] ?? st.site} updated ${relativeDate(st.last_synced_at).toLowerCase()}${
+                    st.synced_days && st.synced_days < Number(days) ? ` (last ${st.synced_days} days)` : ""
                   }`
-                : `${SITE_LABELS[st.site] ?? st.site} not checked yet`
+                : `${SITE_LABELS[st.site] ?? st.site} not updated yet`
             )
             .join(" · ")}
-          {data.sites.some((st) => st.refreshing) && " · checking again now"}
+          {data.sites.some((st) => st.refreshing) && " · updating now"}
         </p>
       )}
 
@@ -877,26 +874,24 @@ export default function PendingPaymentsPage() {
       {view === "open" && (
         <div className="mb-5 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
           <StatTile
-            label="Worth ringing"
+            label="To call"
             value={loading ? "—" : number(data?.open ?? 0)}
-            sub="started a donation, never finished"
           />
           <StatTile
-            label="Value at stake"
+            label="Amount"
             value={loading ? "—" : currency(data?.value_at_stake ?? 0)}
             accent="brand"
-            sub="what they were trying to give"
+            sub="They tried to give"
           />
           <StatTile
             label="Already leads"
             value={loading ? "—" : number(data?.already_leads ?? 0)}
-            sub="in DRM already"
           />
           <StatTile
-            label="Gave anyway"
+            label="Gave later"
             value={loading ? "—" : number(data?.gave_anyway ?? 0)}
             accent="good"
-            sub="settled since — never shown here"
+            sub="Not shown"
           />
         </div>
       )}
@@ -913,7 +908,7 @@ export default function PendingPaymentsPage() {
         />
         {view === "set_aside" && data && !loading && (
           <p className="text-xs text-ink-muted">
-            {number(data.open)} {plural(data.open, "person", "people")} set aside in this period
+            {number(data.open)} set aside
           </p>
         )}
         {/* The page checkbox lives in the table header on a desktop; phones
@@ -968,7 +963,7 @@ export default function PendingPaymentsPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <p className="truncate font-medium text-ink">{r.name || "Name not given"}</p>
+                        <p className="truncate font-medium text-ink">{r.name || "No name"}</p>
                         <p className="text-xs tabular-nums text-ink-muted">{formatPhone(r.phone)}</p>
                       </div>
                       <p className="flex-none font-semibold tabular-nums text-ink">
@@ -976,7 +971,7 @@ export default function PendingPaymentsPage() {
                       </p>
                     </div>
                     <p className="mt-1.5 text-sm text-ink-soft">
-                      {r.purpose || "No purpose given"}
+                      {r.purpose || "No seva"}
                       <span className="text-ink-faint"> · {SITE_LABELS[r.source_site] ?? r.source_site}</span>
                     </p>
                     <p className="mt-0.5 text-xs text-ink-muted">
@@ -1007,15 +1002,15 @@ export default function PendingPaymentsPage() {
                   indeterminate={someOnPage}
                   disabled={!pickable.length}
                   onChange={togglePage}
-                  label={<span className="sr-only">Select everyone shown</span>}
+                  label={<span className="sr-only">Select all</span>}
                 />
               )}
             </Th>
-            <Th>Who</Th>
-            <Th align="right">Tried to give</Th>
-            <Th>For</Th>
+            <Th>Donor</Th>
+            <Th align="right">Amount</Th>
+            <Th>Seva</Th>
             <Th>When</Th>
-            <Th>What happened</Th>
+            <Th>Status</Th>
             <Th align="right"> </Th>
           </Thead>
 
@@ -1042,7 +1037,7 @@ export default function PendingPaymentsPage() {
                         )}
                       </Td>
                       <Td>
-                        <div className="font-medium text-ink">{r.name || "Name not given"}</div>
+                        <div className="font-medium text-ink">{r.name || "No name"}</div>
                         <div className="text-xs tabular-nums text-ink-muted">{formatPhone(r.phone)}</div>
                         {lastCall(r)}
                       </Td>
@@ -1080,18 +1075,11 @@ export default function PendingPaymentsPage() {
 
       {data && !data.complete && !loading && (
         <Alert tone="warn" className="mt-4">
-          Showing the first {number(rows.length)} of {number(data.open)}. The totals above cover all of them — narrow
-          the filters to work through the rest, or tick the page and choose &ldquo;Select all matching&rdquo;.
+          Showing {number(rows.length)} of {number(data.open)}. Use filters to see more.
         </Alert>
       )}
 
-      <p className="mt-4 text-xs text-ink-muted">
-        Kept in DRM and refreshed from both sites in the background, so this screen opens instantly instead of waiting
-        on two websites every time. Press <strong>Check the sites now</strong> if you have just watched a donation
-        fail. Anyone who has since given — on either site, by any means, including cash — is removed before the list
-        reaches you, because chasing money that has already arrived is worse than not calling at all; that check runs
-        on every load, not on the refresh, so it is never out of date.
-      </p>
+
 
       {linking && (
         <LinkDonationDialog
@@ -1109,14 +1097,14 @@ export default function PendingPaymentsPage() {
         allMatching={allMatching}
         onClear={clearSelection}
         note={
-          elevated ? undefined : "They become your leads. Anyone already another caller's is left with them."
+          elevated ? undefined : "They become your leads."
         }
       >
         {elevated && (
           <Select
             value={assign}
             onChange={setAssign}
-            ariaLabel="Whose leads they become"
+            ariaLabel="Caller"
             options={assignOptions}
             className="w-full sm:w-48"
           />
@@ -1136,7 +1124,7 @@ export default function PendingPaymentsPage() {
           disabled={bulkBusy !== null}
           onClick={() => void adoptSelected(true)}
         >
-          Add and start calling
+          Add & start calling
         </Button>
       </SelectionBar>
     </div>

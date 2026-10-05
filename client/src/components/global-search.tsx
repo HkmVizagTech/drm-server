@@ -161,7 +161,7 @@ export function GlobalSearch({ autoFocus = false }: { autoFocus?: boolean }) {
         }}
         onFocus={() => setOpen(true)}
         onKeyDown={onKeyDown}
-        placeholder="Find a number or a name…"
+        placeholder="Search name or number…"
         aria-label="Search leads and donors"
         autoFocus={autoFocus}
         className="h-9 w-full rounded-control border border-line bg-sunken/60 pl-9 pr-10 text-sm text-ink placeholder:text-ink-faint outline-none transition-colors focus:border-brand-500 focus:bg-surface focus:ring-2 focus:ring-brand-500/20 [&::-webkit-search-cancel-button]:appearance-none"

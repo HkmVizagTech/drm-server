@@ -173,7 +173,7 @@ export default function LeadDetailPage() {
     try {
       apply(await apiClient.get<Loaded>(`/api/crm/leads/${id}`));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load that lead");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     }
   }, [id, apply]);
 
@@ -183,7 +183,7 @@ export default function LeadDetailPage() {
     apiClient
       .get<Loaded>(`/api/crm/leads/${id}`)
       .then(apply)
-      .catch((e) => setError(e instanceof Error ? e.message : "Could not load that lead"))
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load. Try again."))
       .finally(() => setLoading(false));
   }, [id, apply]);
 
@@ -201,7 +201,7 @@ export default function LeadDetailPage() {
       toast(done);
       await load();
     } catch (e) {
-      toast.error("Could not save that", e instanceof Error ? e.message : undefined);
+      toast.error("Could not save. Try again.", e instanceof Error ? e.message : undefined);
     }
   }
 
@@ -213,7 +213,7 @@ export default function LeadDetailPage() {
       toast("Note added");
       await load();
     } catch (e) {
-      toast.error("Could not add that note", e instanceof Error ? e.message : undefined);
+      toast.error("Could not add note. Try again.", e instanceof Error ? e.message : undefined);
     }
   }
 
@@ -236,13 +236,13 @@ export default function LeadDetailPage() {
         </div>
       </div>
     );
-  if (!lead) return <EmptyState title="Not found" message={error ?? "That lead no longer exists."} />;
+  if (!lead) return <EmptyState title="Not found" message={error ?? "This lead was removed."} />;
 
   return (
     <div>
       <PageHeader
         eyebrow="Calling"
-        title={lead.name || "Name not known"}
+        title={lead.name || "No name"}
         subtitle={`${formatPhone(lead.phone)}${lead.alt_phone ? ` · also ${formatPhone(lead.alt_phone)}` : ""}${lead.city ? ` · ${lead.city}` : ""}${lead.email ? ` · ${lead.email}` : ""}`}
         actions={
           <>
@@ -259,7 +259,7 @@ export default function LeadDetailPage() {
               Remind me
             </Button>
             <Button variant="secondary" icon="edit" onClick={() => setEditingContact(true)}>
-              Name and numbers
+              Edit contact
             </Button>
             {/* A donor ringing back: the same call screen, with the call
                 logged as one they made. */}
@@ -286,19 +286,18 @@ export default function LeadDetailPage() {
       {lead.do_not_call && (
         <Alert
           tone="danger"
-          title="This person asked not to be called."
+          title="Asked not to be called"
           action={
             <Button
               variant="secondary"
               size="sm"
               onClick={() => void patch({ do_not_call: false }, "They can be called again")}
             >
-              They have asked to be called again
+              Allow calls again
             </Button>
           }
         >
-          They will never appear in a calling queue. Clearing this is deliberate — only do it if they have said so
-          themselves.
+          Only allow again if they asked.
         </Alert>
       )}
 
@@ -310,7 +309,7 @@ export default function LeadDetailPage() {
           </Card>
 
           <Card>
-            <CardHeader title="Add a note" subtitle="For anything that wasn't a call" />
+            <CardHeader title="Add a note" subtitle="Not a call" />
             <div className="flex gap-2">
               <Input
                 value={note}
@@ -340,7 +339,7 @@ export default function LeadDetailPage() {
               }
             />
             {!activities.length ? (
-              <EmptyState title="Nothing yet" message="No calls or notes have been recorded for this person." />
+              <EmptyState title="Nothing yet" message="Calls and notes show here." />
             ) : (
               <ol className="relative space-y-4 border-l border-line-soft pl-5">
                 {activities.map((a) => (
@@ -374,14 +373,14 @@ export default function LeadDetailPage() {
                       {a.kind === "call" && a.duration_seconds !== null && (
                         <span className="text-xs text-ink-faint">
                           · {Math.round(a.duration_seconds / 60)} min
-                          {a.source === "manual" && <span title="Reported by the caller, not measured"> (reported)</span>}
+                          {a.source === "manual" && <span title="Entered by the caller"> (entered)</span>}
                         </span>
                       )}
                     </div>
                     {a.note && <p className="mt-0.5 whitespace-pre-line text-sm text-ink-soft">{a.note}</p>}
                     {a.recording_url && (
                       <a href={a.recording_url} target="_blank" rel="noreferrer" className="text-xs text-brand-700 hover:underline">
-                        Listen to the recording
+                        Play recording
                       </a>
                     )}
                   </li>
@@ -446,7 +445,7 @@ export default function LeadDetailPage() {
           </Card>
 
           <Card>
-            <CardHeader title="Where this lead stands" />
+            <CardHeader title="Status" />
             <div className="space-y-3">
               <Field label="Stage">
                 <Select
@@ -473,13 +472,13 @@ export default function LeadDetailPage() {
                     }
                     ariaLabel="Assigned to"
                   >
-                    <option value="">Nobody</option>
+                    <option value="">No one</option>
                     {config?.users.map((u) => (
                       <option key={u.id} value={u.id}>{u.name}</option>
                     ))}
                   </Select>
                 ) : (
-                  <p className="text-sm text-ink">{lead.assigned_to_name ?? "Nobody yet"}</p>
+                  <p className="text-sm text-ink">{lead.assigned_to_name ?? "No one yet"}</p>
                 )}
               </Field>
               {/* The stored value is a UTC instant, so slicing its first ten
@@ -496,21 +495,21 @@ export default function LeadDetailPage() {
                   onChange={(e) =>
                     void patch(
                       { next_follow_up_at: e.target.value ? istInstant(e.target.value, "10:00").toISOString() : null },
-                      e.target.value ? `Callback booked for ${shortDate(e.target.value)}` : "Callback cleared"
+                      e.target.value ? `Call back on ${shortDate(e.target.value)}` : "Call back removed"
                     )
                   }
                 />
               </Field>
               {/* Optional by design: plenty of donors have no preacher, and
                   forcing one would just get whoever was top of the list. */}
-              <Field label="Known to (preacher)">
+              <Field label="Preacher">
                 <Select
                   value={lead.preacher_id ?? ""}
                   onChange={(v) => void patch({ preacher_id: v || null }, "Preacher saved")}
-                  ariaLabel="Known to (preacher)"
-                  placeholder="Nobody in particular"
+                  ariaLabel="Preacher"
+                  placeholder="None"
                   options={[
-                    { value: "", label: "Nobody in particular" },
+                    { value: "", label: "None" },
                     ...preachers.map((p) => ({
                       value: p.id,
                       label: p.name ? `${p.name} (${p.code})` : p.code,
@@ -518,7 +517,7 @@ export default function LeadDetailPage() {
                   ]}
                 />
               </Field>
-              <Field label="Hoping for (₹)" htmlFor="lead-expected">
+              <Field label="Expected amount (₹)" htmlFor="lead-expected">
                 <Input
                   id="lead-expected"
                   type="number"
@@ -541,7 +540,7 @@ export default function LeadDetailPage() {
 
             <p className="mt-4 text-xs text-ink-faint">
               Came from {lead.source}
-              {lead.source_detail && <> — {lead.source_detail}</>}
+              {lead.source_detail && <> · {lead.source_detail}</>}
             </p>
           </Card>
 
@@ -560,7 +559,7 @@ export default function LeadDetailPage() {
               subtitle={
                 reminders.length
                   ? `${reminders.filter((r) => r.status === "open").length} still open`
-                  : "Nothing promised yet"
+                  : "No promises yet"
               }
               action={
                 <Button variant="ghost" size="xs" icon="plus" onClick={() => setRemindOpen(true)}>
@@ -570,7 +569,7 @@ export default function LeadDetailPage() {
             />
             {reminders.length === 0 ? (
               <p className="text-sm text-ink-muted">
-                When this donor names a time or an amount, record it here and DRM will warn you before it falls due.
+                Add a promise to get a reminder.
               </p>
             ) : (
               <ul className="divide-y divide-line-soft">
@@ -609,11 +608,11 @@ export default function LeadDetailPage() {
           {/* ------------------------------------------- what they have given */}
           <Card>
             <CardHeader
-              title="Giving"
+              title="Donations"
               subtitle={
                 lead.donation_count
-                  ? `${currency(Number(lead.total_donated ?? 0))} across ${lead.donation_count} donation${lead.donation_count === 1 ? "" : "s"}`
-                  : "Nothing on record"
+                  ? `${currency(Number(lead.total_donated ?? 0))} · ${lead.donation_count} donation${lead.donation_count === 1 ? "" : "s"}`
+                  : "No donations yet"
               }
               action={
                 lead.person_id ? (
@@ -621,7 +620,7 @@ export default function LeadDetailPage() {
                     href={`/people/${lead.person_id}`}
                     className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-medium text-brand-700 hover:underline"
                   >
-                    Full record
+                    Donor page
                     <Icon name="arrowRight" size={13} />
                   </Link>
                 ) : undefined
@@ -629,24 +628,23 @@ export default function LeadDetailPage() {
             />
             {lead.external_total_donated && (
               <p className="mb-3 rounded-card bg-brand-50 px-3 py-2 text-sm text-ink-soft">
-                {currency(Number(lead.external_total_donated))} on record in the temple accounts
-                {Number(lead.external_account_count) > 1 && <> across {lead.external_account_count} accounts</>}
+                {currency(Number(lead.external_total_donated))} in temple accounts
+                {Number(lead.external_account_count) > 1 && <> · {lead.external_account_count} accounts</>}
                 {lead.external_last_donation_at && <> · last in {istYear(lead.external_last_donation_at)}</>}
                 <span className="mt-0.5 block text-xs text-ink-muted">
-                  From {lead.external_source || "an uploaded sheet"} — kept out of DRM&apos;s own totals.
+                  From {lead.external_source || "an uploaded sheet"}. Not in our totals.
                 </span>
               </p>
             )}
             {lead.converted_at && (
               <p className="mb-3 rounded-card bg-good-wash px-3 py-2 text-sm text-emerald-900">
-                Gave {currency(Number(lead.converted_amount ?? 0))} {relativeDate(lead.converted_at)} after being
-                called.
+                Donated {currency(Number(lead.converted_amount ?? 0))} {relativeDate(lead.converted_at)} after a call.
                 <span className="mt-0.5 block text-xs text-emerald-800">
                   {lead.converted_via === "manual"
-                    ? "Recorded by a caller — DRM did not see this one arrive."
+                    ? "Added by a caller."
                     : lead.converted_via === "linked"
-                    ? "Linked by a caller — they gave from another number or name."
-                    : "Matched automatically to a donation on the site."}
+                    ? "Linked by a caller. Paid from another number or name."
+                    : "Linked to a site donation."}
                 </span>
               </p>
             )}
@@ -658,7 +656,7 @@ export default function LeadDetailPage() {
             {!lead.converted_at && (
               donatedOpen ? (
                 <div className="mb-3 rounded-card border border-line-soft p-3">
-                  <p className="mb-2 text-xs font-medium text-ink-soft">They donated — how much?</p>
+                  <p className="mb-2 text-xs font-medium text-ink-soft">How much did they donate?</p>
                   <div className="flex gap-2">
                     <Input
                       type="number"
@@ -666,14 +664,14 @@ export default function LeadDetailPage() {
                       value={donatedAmount}
                       onChange={(e) => setDonatedAmount(e.target.value)}
                       placeholder="₹"
-                      aria-label="How much they donated"
+                      aria-label="Amount"
                       className="w-28"
                     />
                     <Input
                       value={donatedNote}
                       onChange={(e) => setDonatedNote(e.target.value)}
-                      placeholder="Cash at the counter, bank transfer…"
-                      aria-label="How it arrived"
+                      placeholder="Cash, UPI, Cheque, Bank Transfer…"
+                      aria-label="How they paid"
                       className="flex-1"
                     />
                   </div>
@@ -687,34 +685,33 @@ export default function LeadDetailPage() {
                             amount: Number(donatedAmount),
                             note: donatedNote || undefined,
                           });
-                          toast.success(`Donation of ${currency(Number(donatedAmount))} recorded`);
+                          toast.success(`${currency(Number(donatedAmount))} saved`);
                           setDonatedOpen(false);
                           setDonatedAmount("");
                           setDonatedNote("");
                           await load();
                         } catch (e) {
-                          toast.error("Could not record that donation", e instanceof Error ? e.message : undefined);
+                          toast.error("Could not save. Try again.", e instanceof Error ? e.message : undefined);
                         }
                       }}
                     >
-                      Record it
+                      Save
                     </Button>
                     <Button size="sm" variant="secondary" onClick={() => setDonatedOpen(false)}>
                       Cancel
                     </Button>
                   </div>
                   <p className="mt-2 text-xs text-ink-faint">
-                    This records the donation against the lead. The receipt still comes from whichever site issues it —
-                    DRM never mints one.
+                    No receipt is sent from here.
                   </p>
                 </div>
               ) : (
                 <div className="mb-3 flex flex-wrap gap-2">
                   <Button variant="secondary" icon="rupee" onClick={() => setDonatedOpen(true)}>
-                    They donated — record it
+                    They donated
                   </Button>
                   <Button variant="secondary" icon="link" onClick={() => setLinkOpen(true)}>
-                    Gave from another number / name
+                    Paid from another number
                   </Button>
                 </div>
               )
@@ -726,14 +723,14 @@ export default function LeadDetailPage() {
                 className="mb-3 inline-flex min-h-9 items-center gap-1.5 text-left text-xs font-medium text-brand-700 hover:underline"
               >
                 <Icon name="link" size={13} className="flex-none" />
-                Link another donation they made from a different number
+                Link a donation from another number
               </button>
             )}
             {!donations.length ? (
               <p className="text-sm text-ink-muted">
                 {lead.person_id
-                  ? "No donations recorded for this person."
-                  : "Not linked to anyone in DRM — they will be linked automatically if they give."}
+                  ? "No donations yet."
+                  : "Not linked yet. Links when they donate."}
               </p>
             ) : (
               <ul className="divide-y divide-line-soft">
@@ -764,7 +761,7 @@ export default function LeadDetailPage() {
               onClick={() => setRemoving(true)}
               className="text-ink-faint hover:bg-danger-wash hover:text-danger"
             >
-              Remove this lead
+              Delete lead
             </Button>
           )}
         </div>
@@ -788,7 +785,7 @@ export default function LeadDetailPage() {
           leadId={lead.id}
           onClose={() => setRemoving(false)}
           onDone={() => {
-            toast("Lead removed");
+            toast("Lead deleted");
             router.push("/leads");
           }}
         />
@@ -808,7 +805,7 @@ export default function LeadDetailPage() {
           onClose={() => setRemindOpen(false)}
           onDone={async () => {
             setRemindOpen(false);
-            toast.success("Promise recorded", "You will be alerted before it falls due.");
+            toast.success("Promise saved", "You will get a reminder.");
             await load();
           }}
         />
@@ -859,7 +856,7 @@ function AddReminderDialog({
 
   return (
     <Modal
-      title={leadName ? `A promise from ${leadName}` : "Add a reminder"}
+      title={leadName ? `Promise from ${leadName}` : "Add reminder"}
       onClose={onClose}
       footer={
         <>
@@ -890,12 +887,12 @@ function AddReminderDialog({
                 });
                 await onDone();
               } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not save that reminder");
+                setError(e instanceof Error ? e.message : "Could not save. Try again.");
                 setBusy(false);
               }
             }}
           >
-            {busy ? "Saving…" : "Add it"}
+            {busy ? "Saving…" : "Save"}
           </Button>
         </>
       }
@@ -903,12 +900,11 @@ function AddReminderDialog({
       {error && <Alert tone="danger">{error}</Alert>}
 
       <p className="mb-4 text-sm text-ink-soft">
-        For a moment this donor named — a festival, a salary date, after a family event. It will reach whoever is to
-        ring them, before the day arrives.
+        When did they say they would give?
       </p>
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="What to remember" htmlFor="reminder-title" className="sm:col-span-2">
+        <Field label="Promise" htmlFor="reminder-title" className="sm:col-span-2">
           <Input
             id="reminder-title"
             value={title}
@@ -925,7 +921,7 @@ function AddReminderDialog({
             onChange={(e) => setWhen(e.target.value)}
           />
         </Field>
-        <Field label="How much they said" htmlFor="reminder-amount">
+        <Field label="Amount" htmlFor="reminder-amount">
           <Input
             id="reminder-amount"
             value={amount}
@@ -936,7 +932,7 @@ function AddReminderDialog({
           />
         </Field>
 
-        <Field label="The occasion they named" htmlFor="reminder-occasion">
+        <Field label="Occasion" htmlFor="reminder-occasion">
           <Input
             id="reminder-occasion"
             value={occasion}
@@ -944,29 +940,29 @@ function AddReminderDialog({
             placeholder="e.g. Govardhan Puja"
           />
         </Field>
-        <Field label="Who should ring them">
+        <Field label="Who will call">
           <Select
             value={assignee}
             onChange={setAssignee}
-            ariaLabel="Who should ring them"
+            ariaLabel="Who will call"
             options={[
-              { value: "", label: "Whoever this lead belongs to" },
+              { value: "", label: "Assigned caller" },
               ...users.map((u) => ({ value: u.id, label: u.name })),
             ]}
           />
         </Field>
 
-        <Field label="What they said, in their words" htmlFor="reminder-note" className="sm:col-span-2">
+        <Field label="Note" htmlFor="reminder-note" className="sm:col-span-2">
           <Textarea
             id="reminder-note"
             value={note}
             onChange={(e) => setNote(e.target.value)}
             rows={2}
-            placeholder="Read back on the call — worth the extra few seconds now."
+            placeholder="What they said"
           />
         </Field>
 
-        <Field label="Warn me" className="sm:col-span-2">
+        <Field label="Remind me" className="sm:col-span-2">
           <div className="mt-1.5">
             <AlertPicker value={alerts} onChange={setAlerts} options={ALERT_OPTIONS} />
           </div>
@@ -1011,7 +1007,7 @@ function RemoveLeadDialog({
     apiClient
       .get<typeof what>(`/api/crm/leads/${leadId}/removal`)
       .then(setWhat)
-      .catch((e) => setError(e instanceof Error ? e.message : "Could not check that lead"));
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load. Try again."));
   }, [leadId]);
 
   const nothing =
@@ -1019,13 +1015,13 @@ function RemoveLeadDialog({
 
   return (
     <Modal
-      title="Remove this lead?"
+      title="Delete this lead?"
       onClose={onClose}
       tone="danger"
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>
-            Keep them
+            Cancel
           </Button>
           <Button
             variant="danger"
@@ -1039,12 +1035,12 @@ function RemoveLeadDialog({
                 await apiClient.delete(`/api/crm/leads/${leadId}`);
                 onDone();
               } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not remove that lead");
+                setError(e instanceof Error ? e.message : "Could not delete. Try again.");
                 setBusy(false);
               }
             }}
           >
-            {busy ? "Removing…" : "Remove"}
+            {busy ? "Deleting…" : "Delete"}
           </Button>
         </>
       }
@@ -1056,25 +1052,24 @@ function RemoveLeadDialog({
       ) : (
         <>
           <p className="text-sm text-ink-soft">
-            {what.name || what.phone} will be removed from DRM. This cannot be undone.
+            {what.name || what.phone} will be deleted. This cannot be undone.
           </p>
 
           {nothing ? (
             <p className="mt-2 text-sm text-ink-muted">
-              Nothing has been recorded against them yet, so there is nothing else to lose.
+              No calls or notes yet.
             </p>
           ) : (
             <ul className="mt-3 space-y-1 text-sm text-ink-soft">
               {what.activities > 0 && (
                 <li>
                   {number(what.activities)} call{what.activities === 1 ? "" : "s"} and note
-                  {what.activities === 1 ? "" : "s"} go with them
+                  {what.activities === 1 ? "" : "s"} will be deleted
                 </li>
               )}
               {what.reminders > 0 && (
                 <li>
-                  {number(what.reminders)} promise{what.reminders === 1 ? "" : "s"} they made will stop
-                  reminding anybody
+                  {number(what.reminders)} promise{what.reminders === 1 ? "" : "s"} will be deleted
                 </li>
               )}
             </ul>
@@ -1087,14 +1082,13 @@ function RemoveLeadDialog({
               <p className="font-medium text-ink-soft">What stays</p>
               {what.has_donation && (
                 <p className="mt-0.5">
-                  Their donation and its receipt are untouched — those belong to the site that issued them.
+                  Their donations and receipts stay.
                 </p>
               )}
               {what.qr_shares > 0 && (
                 <p className="mt-0.5">
-                  {number(what.qr_shares)} QR{what.qr_shares === 1 ? "" : "s"} shared with them
-                  {what.qr_paid > 0 ? `, ${number(what.qr_paid)} of which was paid,` : ""} stay on the QR
-                  payments screen. Money that arrived is never removed.
+                  {number(what.qr_shares)} QR{what.qr_shares === 1 ? "" : "s"} sent
+                  {what.qr_paid > 0 ? ` (${number(what.qr_paid)} paid)` : ""} stay in QR payments.
                 </p>
               )}
             </div>
@@ -1115,10 +1109,10 @@ function describe(a: Activity): string {
   }
   if (a.kind === "status_change") return `Moved to ${a.to_value?.replace(/_/g, " ") ?? "a new stage"}`;
   if (a.kind === "assignment") return a.to_value ? "Assigned to a caller" : "Unassigned";
-  if (a.kind === "follow_up") return a.to_value ? `Callback booked for ${shortDate(a.to_value)}` : "Callback cleared";
+  if (a.kind === "follow_up") return a.to_value ? `Call back on ${shortDate(a.to_value)}` : "Call back removed";
   if (a.kind === "reminder") return a.to_value ? `Reminder set for ${shortDate(a.to_value)}` : "Reminder set";
-  if (a.kind === "import") return "Added to the list";
-  if (a.kind === "whatsapp") return "Opened WhatsApp with a link";
+  if (a.kind === "import") return "Added as lead";
+  if (a.kind === "whatsapp") return "Sent a link on WhatsApp";
   if (a.kind === "qr_share") return "Sent a QR on WhatsApp";
   if (a.kind === "link_donation") return "Linked a donation from another number";
   return "Note";

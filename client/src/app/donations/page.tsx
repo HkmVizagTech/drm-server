@@ -7,12 +7,13 @@ import { useAuth } from "@/lib/auth-context";
 import { clockTime, currency, dateTime, number, shortDate, titleCase } from "@/lib/format";
 import { SourceCell, siteLabel } from "@/components/source";
 import { ExportButton } from "@/components/export-button";
+import { RaiseReceiptFlow } from "@/components/receipts/raise-receipt";
+import { ManualReceiptDialog } from "@/components/receipts/receipt-form";
 import {
   Alert,
   Badge,
   Button,
   buttonSecondary,
-  Checkbox,
   EmptyState,
   Field,
   Icon,
@@ -29,7 +30,6 @@ import {
   TableShell,
   Tbody,
   Td,
-  Textarea,
   Th,
   Thead,
   Toolbar,
@@ -104,7 +104,7 @@ const PERIODS = [
   { value: "this_quarter", label: "This quarter" },
   { value: "this_fy", label: "This financial year" },
   { value: "last_fy", label: "Last financial year" },
-  { value: "this_year", label: "This calendar year" },
+  { value: "this_year", label: "This year" },
   { value: "all", label: "All time" },
 ];
 
@@ -118,10 +118,10 @@ const QUICK_PERIODS = PERIODS.filter((p) =>
 // Mirrors GROUP_LABELS in server/src/utils/pageGroups.ts - shown when the list
 // arrives filtered to a whole bucket from the Donation pages screen.
 const GROUP_FILTER_LABELS: Record<string, string> = {
-  donations: "Donations page (and pages nested under it)",
-  donate: "Donate — seva campaigns",
+  donations: "Donations page",
+  donate: "Seva campaigns",
   other: "Other pages",
-  unattributed: "Donations with no page recorded",
+  unattributed: "No page",
 };
 
 export default function DonationsPage() {
@@ -169,6 +169,8 @@ export default function DonationsPage() {
   const [page, setPage] = useState(1);
   const [showModal, setShowModal] = useState(false);
   const [showOffline, setShowOffline] = useState(false);
+  // "Raise a receipt" asks how they paid first; the offline form is one answer.
+  const [showRaise, setShowRaise] = useState(false);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 300);
@@ -334,8 +336,8 @@ export default function DonationsPage() {
         subtitle={data ? `${number(data.total)} donations${hasFilters ? " matching your filters" : ""}` : undefined}
         actions={
           <>
-            <Button variant="secondary" icon="receipt" onClick={() => setShowOffline(true)}>
-              Record offline donation
+            <Button icon="receipt" onClick={() => setShowRaise(true)}>
+              Send Receipt
             </Button>
             {canExport && (
               <ExportButton
@@ -348,8 +350,11 @@ export default function DonationsPage() {
                 hint={data ? `${number(data.total)} donations · ${windowLabel}` : undefined}
               />
             )}
-            <Button icon="plus" onClick={() => setShowModal(true)}>
-              Record Donation
+            {/* Secondary on purpose: this one issues NO receipt. It used to be
+                the green button, beside the one that did, and the two were
+                told apart by the word "offline". */}
+            <Button variant="secondary" icon="plus" onClick={() => setShowModal(true)}>
+              Add donation
             </Button>
           </>
         }
@@ -592,8 +597,8 @@ export default function DonationsPage() {
                   title={hasFilters ? "No matching donations" : "No donations yet"}
                   message={
                     hasFilters
-                      ? "Try widening your date range or clearing the filters."
-                      : "Donations made on the HKMV site arrive here automatically. You can also record one manually."
+                      ? "Try another date or clear the filters."
+                      : "Website donations show here."
                   }
                   action={
                     hasFilters ? (
@@ -627,8 +632,18 @@ export default function DonationsPage() {
       </TableShell>
 
       {showModal && <RecordDonationModal onClose={() => setShowModal(false)} onSaved={fetchDonations} />}
+      {showRaise && (
+        <RaiseReceiptFlow
+          onClose={() => setShowRaise(false)}
+          onOther={() => {
+            setShowRaise(false);
+            setShowOffline(true);
+          }}
+          onDone={fetchDonations}
+        />
+      )}
       {showOffline && (
-        <OfflineDonationModal onClose={() => setShowOffline(false)} onSaved={fetchDonations} />
+        <ManualReceiptDialog onClose={() => setShowOffline(false)} onSaved={fetchDonations} />
       )}
     </div>
   );
@@ -826,7 +841,7 @@ function RecordDonationModal({ onClose, onSaved }: { onClose: () => void; onSave
 
   return (
     <Modal
-      title="Record Donation"
+      title="Add donation (no receipt)"
       onClose={onClose}
       footer={
         <>
@@ -837,15 +852,13 @@ function RecordDonationModal({ onClose, onSaved }: { onClose: () => void; onSave
               is tied back to it by id - otherwise it belongs to no form and
               pressing it does nothing at all. */}
           <Button type="submit" form="record-donation" loading={loading}>
-            {loading ? "Saving…" : "Record Donation"}
+            {loading ? "Saving…" : "Add to DRM"}
           </Button>
         </>
       }
     >
       <form id="record-donation" onSubmit={handleSubmit} className="space-y-4">
-        <p className="text-sm text-ink-muted">
-          Matched to an existing donor by phone number, or a new one is created.
-        </p>
+        <p className="text-sm text-ink-muted">No receipt is sent. To send one, use Send Receipt.</p>
 
         {error && <Alert tone="danger">{error}</Alert>}
 
@@ -933,334 +946,3 @@ function RecordDonationModal({ onClose, onSaved }: { onClose: () => void; onSave
   );
 }
 
-// ---------------------------------------------------------------------------
-// Recording a donation taken offline — cash at the counter, a cheque, a bank
-// transfer, a UPI payment made outside the website.
-//
-// DRM does not issue receipts. The admin picks which site should, and that
-// site's existing offline path runs: DCC is called, the 80G number comes from
-// that site's own series, the PDF is made and WhatsApp goes out. Identical to
-// using that site's own admin form — which is the point, because there is then
-// still exactly one receipt series per site and DCC sees every donation.
-//
-// What this form adds over those two forms is the thing only DRM can do: type
-// the donor's phone and it fills in the rest from the people already here.
-function OfflineDonationModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
-  const [site, setSite] = useState<"hkmv" | "annadan">("hkmv");
-  const [phone, setPhone] = useState("");
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [amount, setAmount] = useState("");
-  const [mode, setMode] = useState("cash");
-  const [reference, setReference] = useState("");
-  const [paidOn, setPaidOn] = useState("");
-  const [seva, setSeva] = useState("");
-  const [wantCertificate, setWantCertificate] = useState(false);
-  const [pan, setPan] = useState("");
-  const [wantPrasadam, setWantPrasadam] = useState(false);
-  const [address, setAddress] = useState("");
-  const [note, setNote] = useState("");
-
-  const [matched, setMatched] = useState<{ name: string; lifetime_total: number; donation_count: number } | null>(null);
-  const [looking, setLooking] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<{ receiptNumber: string | null; message: string } | null>(null);
-
-  // Look the donor up once there are enough digits to be a real number. Fills
-  // name, email, PAN and address so a regular donor is two fields and a button,
-  // and so their details stay consistent instead of being retyped slightly
-  // differently every time.
-  useEffect(() => {
-    const digits = phone.replace(/\D/g, "");
-    if (digits.length < 10) {
-      setMatched(null);
-      return;
-    }
-    let cancelled = false;
-    setLooking(true);
-    const t = setTimeout(() => {
-      apiClient
-        .get<{ people: Record<string, unknown>[] }>(`/api/people?search=${encodeURIComponent(digits.slice(-10))}&limit=1`)
-        .then((r) => {
-          if (cancelled) return;
-          const p = r.people?.[0];
-          if (!p) {
-            setMatched(null);
-            return;
-          }
-          setMatched({
-            name: String(p.name ?? ""),
-            lifetime_total: Number(p.lifetime_total ?? 0),
-            donation_count: Number(p.donation_count ?? 0),
-          });
-          // Only fill blanks — never overwrite something already typed.
-          setName((v) => v || String(p.name ?? ""));
-          setEmail((v) => v || String(p.email ?? ""));
-          setPan((v) => v || String(p.pan ?? ""));
-          setAddress((v) => v || String(p.prasadam_address ?? p.address ?? ""));
-        })
-        .catch(() => undefined)
-        .finally(() => !cancelled && setLooking(false));
-    }, 350);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-      setLooking(false);
-    };
-  }, [phone]);
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    setSaving(true);
-    setError(null);
-    try {
-      const r = await apiClient.post<{ receiptNumber: string | null; message: string }>(
-        "/api/donations/offline",
-        {
-          site,
-          donor_name: name,
-          donor_mobile: phone,
-          donor_email: email || undefined,
-          amount: Number(amount),
-          payment_mode: mode,
-          reference_no: reference,
-          payment_date: paidOn || undefined,
-          seva_name: seva || undefined,
-          pan_number: pan || undefined,
-          want_certificate: wantCertificate,
-          want_prasadam: wantPrasadam,
-          prasadam_address: wantPrasadam ? address : undefined,
-          note: note || undefined,
-        }
-      );
-      setDone(r);
-      onSaved();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  // The receipt is already issued and the WhatsApp already sent by the time
-  // this shows, so there is nothing to undo — the screen confirms and gets out
-  // of the way rather than offering an edit that would do nothing.
-  if (done) {
-    return (
-      <Modal
-        title="Donation recorded"
-        onClose={onClose}
-        footer={
-          <>
-            <Button variant="secondary" onClick={onClose}>
-              Close
-            </Button>
-            <Button
-              icon="plus"
-              onClick={() => {
-                // Same donor, next donation — keep who they are, clear the money.
-                setDone(null);
-                setAmount("");
-                setReference("");
-                setSeva("");
-                setNote("");
-              }}
-            >
-              Record another
-            </Button>
-          </>
-        }
-      >
-        <div className="text-center">
-          <p className="text-sm text-ink-muted">
-            Recorded on the {site === "annadan" ? "annadan" : "main"} site
-          </p>
-          <p className="mt-2 text-2xl font-semibold tabular-nums text-ink">{currency(Number(amount))}</p>
-          {done.receiptNumber && (
-            <p className="mt-1 font-mono text-sm text-brand-700">{done.receiptNumber}</p>
-          )}
-          <p className="mt-3 text-xs text-ink-muted">{done.message}</p>
-        </div>
-      </Modal>
-    );
-  }
-
-  return (
-    <Modal
-      title="Record an offline donation"
-      onClose={onClose}
-      wide
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-          {/* Tied to the form by id because the footer renders outside it. */}
-          <Button type="submit" form="offline-donation" loading={saving}>
-            {saving ? "Issuing receipt…" : "Record and issue receipt"}
-          </Button>
-        </>
-      }
-    >
-      <p className="mb-4 text-xs text-ink-muted">
-        Cash, cheque, bank transfer or a UPI payment taken outside the website. The receipt is
-        issued by the site you choose, exactly as if it had been entered there.
-      </p>
-
-      {error && <Alert tone="danger">{error}</Alert>}
-
-      <form id="offline-donation" onSubmit={submit} className="space-y-4">
-        <Field label="Which site issues the receipt">
-          <SegmentedControl
-            options={[
-              { value: "hkmv", label: "HKM Vizag site" },
-              { value: "annadan", label: "Annadan site" },
-            ]}
-            value={site}
-            onChange={(v) => setSite(v)}
-          />
-        </Field>
-
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field
-            label="Mobile number"
-            htmlFor="offline-phone"
-            // The lookup result lives in the hint slot so it sits under the
-            // field it describes, and the row does not jump as it appears.
-            hint={
-              looking
-                ? "Looking up…"
-                : matched
-                ? `Known donor · ${number(matched.donation_count)} donations · ${currency(matched.lifetime_total)} lifetime`
-                : phone.replace(/\D/g, "").length >= 10
-                ? "New donor — they will be created"
-                : " "
-            }
-          >
-            <Input
-              id="offline-phone"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              required
-              placeholder="98765 43210"
-            />
-          </Field>
-          <Field label="Donor name" htmlFor="offline-name" required>
-            <Input
-              id="offline-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              required
-            />
-          </Field>
-          <Field label="Email" hint="Optional" htmlFor="offline-email">
-            <Input
-              id="offline-email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-          </Field>
-          <Field label="Seva / purpose" hint="Optional" htmlFor="offline-seva">
-            <Input
-              id="offline-seva"
-              value={seva}
-              onChange={(e) => setSeva(e.target.value)}
-              placeholder="Gau Seva, Annadan…"
-            />
-          </Field>
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
-          <Field label="Amount" htmlFor="offline-amount" required>
-            <Input
-              id="offline-amount"
-              type="number"
-              min="1"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              required
-            />
-          </Field>
-          <Field label="How it was paid">
-            <Select value={mode} onChange={(v) => setMode(v)} ariaLabel="How it was paid">
-              <option value="cash">Cash</option>
-              <option value="cheque">Cheque</option>
-              <option value="upi">UPI</option>
-              <option value="bank">Bank transfer</option>
-            </Select>
-          </Field>
-          <Field
-            label={
-              mode === "cash"
-                ? "Receipt book no."
-                : mode === "cheque"
-                ? "Cheque number"
-                : "UTR / reference"
-            }
-            htmlFor="offline-reference"
-            required
-          >
-            <Input
-              id="offline-reference"
-              value={reference}
-              onChange={(e) => setReference(e.target.value)}
-              required
-            />
-          </Field>
-          {/* The date input's own YYYY-MM-DD string is what the site expects,
-              so it is sent through untouched. */}
-          <Field label="Received on" htmlFor="offline-paid-on">
-            <Input
-              id="offline-paid-on"
-              type="date"
-              value={paidOn}
-              onChange={(e) => setPaidOn(e.target.value)}
-            />
-          </Field>
-        </div>
-        <p className="-mt-2 text-xs text-ink-faint">
-          The reference has to be unique — both sites refuse a second entry against the same one,
-          which is what stops the same donation being recorded twice.
-        </p>
-
-        <div className="space-y-2 border-t border-line-soft pt-3">
-          <Checkbox
-            checked={wantCertificate}
-            onChange={setWantCertificate}
-            label="80G certificate wanted"
-          />
-          {wantCertificate && (
-            <Input
-              value={pan}
-              onChange={(e) => setPan(e.target.value.toUpperCase())}
-              placeholder="PAN (required for 80G)"
-              aria-label="PAN"
-              required
-            />
-          )}
-
-          <Checkbox checked={wantPrasadam} onChange={setWantPrasadam} label="Prasadam to be sent" />
-          {wantPrasadam && (
-            <Textarea
-              value={address}
-              onChange={(e) => setAddress(e.target.value)}
-              placeholder="Delivery address"
-              aria-label="Delivery address"
-              required
-              rows={2}
-            />
-          )}
-        </div>
-
-        <Input
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          placeholder="Note (optional) — who handed it in, anything worth remembering"
-          aria-label="Note"
-        />
-      </form>
-    </Modal>
-  );
-}

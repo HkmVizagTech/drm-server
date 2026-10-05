@@ -75,7 +75,7 @@ async function upsertPerson(
   site: SiteKey
 ): Promise<{ id: string; created: boolean }> {
   const phone = normalizePhone(donor.mobile || '');
-  if (!phone) throw new Error('Donor snapshot has no usable mobile number');
+  if (!phone) throw new Error('Donor has no valid mobile number.');
 
   const formattedAddress = hkmvMappers.formatSavedAddress(donor.savedAddress ?? null);
   const structured = fromHkmvSaved((donor.savedAddress ?? null) as Record<string, unknown> | null);
@@ -397,7 +397,7 @@ export async function upsertDonorSnapshot(
   snapshot: DonorSnapshotInput,
   site: SiteKey = 'hkmv'
 ): Promise<SyncCounts> {
-  if (!snapshot.donor) throw new Error('Snapshot has no donor');
+  if (!snapshot.donor) throw new Error('No donor found.');
 
   const client = await pool.connect();
   try {

@@ -59,28 +59,28 @@ const FIXED: Record<
 > = {
   nearly_gave: {
     icon: "sparkle",
-    blurb: "Tried to give on a website and didn't finish. The warmest calls you can make.",
-    empty: "Nobody nearly gave lately",
+    blurb: "Tried to give online but did not finish.",
+    empty: "No one right now",
   },
   reminders: {
     icon: "bell",
-    blurb: "Donors who named a day for their donation — and it has come.",
-    empty: "No promises due today",
+    blurb: "Promised to give today.",
+    empty: "No promises today",
   },
   follow_ups: {
     icon: "calendar",
-    blurb: "Callbacks booked for today, and any that are late.",
-    empty: "No callbacks due today",
+    blurb: "Due today or late.",
+    empty: "No follow-ups today",
   },
   mine: {
     icon: "user",
-    blurb: "Everyone assigned to you who is due a call.",
-    empty: "Nobody of yours is due today",
+    blurb: "Your leads due a call.",
+    empty: "None due today",
   },
   everything: {
     icon: "users",
-    blurb: "Every lead you can see that is due, most overdue first.",
-    empty: "Nobody due today",
+    blurb: "All leads due a call.",
+    empty: "None due today",
   },
 };
 const ORDER: (keyof typeof FIXED)[] = ["nearly_gave", "reminders", "follow_ups", "mine", "everything"];
@@ -129,14 +129,14 @@ function StartCalling() {
       setData(await getSources());
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not work out who there is to call");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     }
   }, []);
 
   useEffect(() => {
     getSources()
       .then(setData)
-      .catch((e) => setError(e instanceof Error ? e.message : "Could not work out who there is to call"));
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load. Try again."));
   }, []);
 
   const start = useCallback(
@@ -146,18 +146,18 @@ function StartCalling() {
       try {
         const s = await startRun(source, opts);
         if (s.empty || !s.session) {
-          toast.info("Nobody to call there right now", "Everyone in it is called, booked for later, or with a colleague.");
+          toast.info("No one to call here right now");
           setStarting(null);
           void reload();
           return false;
         }
         if (s.adopted?.created) {
           toast.success(
-            `Added ${number(s.adopted.created)} new ${s.adopted.created === 1 ? "person" : "people"} from the website`
+            `Added ${number(s.adopted.created)} new ${s.adopted.created === 1 ? "person" : "people"}`
           );
         }
-        if (opts.restart) toast.success("Started over from the top");
-        else if (s.resumed) toast.info("Carrying on where you left off");
+        if (opts.restart) toast.success("Started over");
+        else if (s.resumed) toast.info("Continuing where you stopped");
         router.push(runHref(s.session.id));
         return true;
       } catch (e) {
@@ -187,23 +187,23 @@ function StartCalling() {
   async function finishRun(run: OpenRun) {
     try {
       const r = await endRun(run.id);
-      toast.success(`Finished ${run.label}`, `${r.summary.calls} call${r.summary.calls === 1 ? "" : "s"} logged`);
+      toast.success(`Finished ${run.label}`, `${r.summary.calls} call${r.summary.calls === 1 ? "" : "s"}`);
       await reload();
     } catch (e) {
-      toast.error("Could not finish that", e instanceof Error ? e.message : undefined);
+      toast.error("Could not finish. Try again.", e instanceof Error ? e.message : undefined);
     }
   }
 
   const openByKey = new Map((data?.open ?? []).map((o) => [o.key, o]));
   const fixed = ORDER.map((k) => data?.sources.find((s) => s.kind === k)).filter((s): s is SourceCard => !!s);
-  const firstName = user?.name?.split(" ")[0];
+
 
   return (
     <div>
       <PageHeader
         eyebrow="Calling"
         title="Whom do you want to call?"
-        subtitle={`${firstName ? `Ready when you are, ${firstName}. ` : ""}Pick who to ring. Stop whenever you like — your place is kept.`}
+        subtitle="Pick who to call."
         actions={
           <>
             {canManage && (
@@ -227,7 +227,7 @@ function StartCalling() {
       {autoList && starting === `list:${autoList}` && (
         <Alert tone="info">
           <span className="inline-flex items-center gap-2">
-            <Spinner size={14} /> Opening that list…
+            <Spinner size={14} /> Opening list…
           </span>
         </Alert>
       )}
@@ -240,7 +240,7 @@ function StartCalling() {
           {data.open.length > 0 && (
             <section className="mb-7">
               <h2 className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
-                Carry on where you left off
+                Continue
               </h2>
               <div className="grid gap-3 sm:grid-cols-2">
                 {data.open.map((r) => (
@@ -265,7 +265,7 @@ function StartCalling() {
           {/* ------------------------------------------------ who to ring */}
           <section className="mb-7">
             <h2 className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
-              {data.open.length ? "Or start something new" : "Who to ring"}
+              {data.open.length ? "Or start new" : "Who to call"}
             </h2>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {fixed.map((s) => {
@@ -280,7 +280,7 @@ function StartCalling() {
                     blurb={meta.blurb}
                     extra={
                       fresh > 0
-                        ? `${number(fresh)} new from the website will be added`
+                        ? `${number(fresh)} new will be added`
                         : undefined
                     }
                     empty={meta.empty}
@@ -304,10 +304,7 @@ function StartCalling() {
             <h2 className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Your lists</h2>
             {data.lists.length === 0 ? (
               <Card>
-                <p className="text-sm text-ink-muted">
-                  No calling lists yet. A list is made when an uploaded sheet is applied, or built from a tag, a
-                  preacher or a city.
-                </p>
+                <p className="text-sm text-ink-muted">No lists yet.</p>
                 {canManage && (
                   <div className="mt-3 flex flex-wrap gap-2">
                     <Link href="/calling/uploads" className={buttonClass("secondary", "md")}>
@@ -328,8 +325,8 @@ function StartCalling() {
                     label={l.label}
                     count={l.count}
                     blurb={l.description || undefined}
-                    badge={l.assigned_to_me ? "Assigned to you" : undefined}
-                    empty="Nobody due in this list today"
+                    badge={l.assigned_to_me ? "Yours" : undefined}
+                    empty="None due today"
                     enabled={l.count > 0}
                     open={openByKey.get(l.key)}
                     starting={starting === l.key}
@@ -382,7 +379,7 @@ function OpenRunCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-base font-semibold text-ink">{run.label}</p>
-          <p className="mt-0.5 text-xs text-ink-muted">Last active {relativeDate(run.last_active_at).toLowerCase()}</p>
+          <p className="mt-0.5 text-xs text-ink-muted">Last used {relativeDate(run.last_active_at).toLowerCase()}</p>
         </div>
         {run.paused && (
           <Badge tone="warn" dot>
@@ -392,7 +389,7 @@ function OpenRunCard({
       </div>
 
       <div className="mt-3">
-        <div className="flex h-2 w-full overflow-hidden rounded-pill bg-surface" aria-label={`${pct}% through`}>
+        <div className="flex h-2 w-full overflow-hidden rounded-pill bg-surface" aria-label={`${pct}% done`}>
           <span className="h-full bg-brand-600" style={{ width: `${donePct}%` }} />
           <span className="h-full bg-warn" style={{ width: `${skipPct}%` }} />
         </div>
@@ -405,7 +402,7 @@ function OpenRunCard({
               · <span className="tabular-nums text-warn">{number(run.skipped)}</span> skipped
             </>
           )}
-          {" "}· <span className="tabular-nums">{number(run.pending)}</span> to go
+          {" "}· <span className="tabular-nums">{number(run.pending)}</span> left
         </p>
       </div>
 
@@ -428,8 +425,8 @@ function OpenRunCard({
             {armed ? "Tap again to start over" : "Start over"}
           </Button>
         )}
-        <Button size="sm" variant="ghost" disabled={busy} onClick={onFinish} title="Done with it - it stops showing here">
-          Finish it
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onFinish} title="Mark as done">
+          Finish
         </Button>
       </div>
     </Card>
@@ -531,14 +528,14 @@ function SourceTile({
         {blurb && <span className="mt-1 line-clamp-2 text-xs text-ink-muted">{blurb}</span>}
         {open && (
           <span className="mt-2 text-xs font-medium text-brand-700">
-            In progress · {number(open.done)} of {number(open.total)} called — tap to carry on
+            In progress · {number(open.done)} of {number(open.total)} called
           </span>
         )}
       </button>
       {seeHref && (
         <div className="border-t border-line-soft px-4 py-2">
           <Link href={seeHref} className="inline-flex min-h-8 items-center gap-1 text-xs font-medium text-brand-700 hover:underline">
-            See who is in it
+            See leads
             <Icon name="arrowRight" size={12} />
           </Link>
         </div>

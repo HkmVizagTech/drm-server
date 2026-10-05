@@ -57,12 +57,12 @@ router.post('/parse', async (req, res) => {
   try {
     buffer = Buffer.from(base64, 'base64');
   } catch {
-    return res.status(400).json({ error: 'That file could not be read' });
+    return res.status(400).json({ error: 'Could not read this file.' });
   }
 
   try {
     const parsed = await parseWorkbook(buffer, filename);
-    if (!parsed.length) return res.status(400).json({ error: 'That file has no rows in it.' });
+    if (!parsed.length) return res.status(400).json({ error: 'The file is empty.' });
 
     const sheets = parsed.map((s) => ({
       name: s.name,
@@ -80,7 +80,7 @@ router.post('/parse', async (req, res) => {
   } catch {
     // The parser only throws on a file that is not the format its extension
     // claims - a renamed PDF, a corrupt download.
-    res.status(400).json({ error: "That file couldn't be read as a spreadsheet." });
+    res.status(400).json({ error: 'Could not read this file. Use Excel or CSV.' });
   }
 });
 

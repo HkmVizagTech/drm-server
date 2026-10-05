@@ -85,9 +85,9 @@ interface FollowUpRow {
 }
 
 const BY_OPTIONS = [
-  { value: "source", label: "Where they came from" },
-  { value: "source_detail", label: "Which list" },
-  { value: "assigned_to", label: "Which caller" },
+  { value: "source", label: "Source" },
+  { value: "source_detail", label: "List" },
+  { value: "assigned_to", label: "Caller" },
   { value: "status", label: "Stage" },
 ];
 
@@ -153,7 +153,7 @@ export default function CallingReportsPage() {
       setFollowUps(f.rows);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the reports");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     } finally {
       setLoading(false);
     }
@@ -172,14 +172,14 @@ export default function CallingReportsPage() {
     <div>
       <PageHeader
         eyebrow="Calling"
-        title="Calling reports"
-        subtitle="Who called, what happened, and what it was worth"
+        title="Reports"
+        subtitle="Calls, callers and money raised."
         actions={
           <ExportButton
             path="/api/crm/reports/callers/export"
             params={filterParams()}
             filename="caller-performance"
-            hint="Every caller's figures for the period on screen"
+            hint="All callers, this period"
           />
         }
       />
@@ -197,27 +197,23 @@ export default function CallingReportsPage() {
       {error && <Alert tone="danger">{error}</Alert>}
 
       {calls && calls.totals.made > 0 && calls.totals.measured === 0 && (
-        <Alert tone="info" title="Read these as reported, not measured.">
-          Calls are made from callers&apos; own phones and logged here afterwards, so the counts, the connected split
-          and the call lengths are what callers recorded — a call nobody logs does not appear at all. These become
-          measured figures the day a cloud telephony provider is connected.
-        </Alert>
+        <Alert tone="info">Call figures are what callers logged.</Alert>
       )}
 
       <div className="space-y-6">
         {/* ------------------------------------------------------- callers */}
         <section>
           <CardHeader
-            title="Caller activity"
-            subtitle="Conversions are credited to whoever the lead was assigned to when the donation arrived"
+            title="Callers"
+            subtitle="Gave is counted for the lead's caller."
           />
           <TableShell>
             <Thead>
               <Th>Caller</Th>
               <Th align="right">Calls</Th>
-              <Th align="right">Got through</Th>
+              <Th align="right">Answered</Th>
               <Th align="right">People</Th>
-              <Th align="right">On the phone</Th>
+              <Th align="right">Talk time</Th>
               <Th align="right">Days active</Th>
               <Th align="right">Gave</Th>
               <Th align="right">Raised</Th>
@@ -229,7 +225,7 @@ export default function CallingReportsPage() {
                 {!callers.length ? (
                   <tr>
                     <td colSpan={8}>
-                      <EmptyState title="No calls in this period" message="Try a wider date range." />
+                      <EmptyState title="No calls in this period" message="Try a longer period." />
                     </td>
                   </tr>
                 ) : (
@@ -237,7 +233,7 @@ export default function CallingReportsPage() {
                     <tr key={c.id ?? "unassigned"}>
                       <Td className="font-medium text-ink">
                         {c.name}
-                        {c.id === null && <span className="ml-1 text-xs font-normal text-ink-faint">(no caller recorded)</span>}
+                        {c.id === null && <span className="ml-1 text-xs font-normal text-ink-faint">(no caller)</span>}
                       </Td>
                       <Td align="right" className="tabular-nums">{number(c.calls)}</Td>
                       <Td align="right" className="tabular-nums">
@@ -264,9 +260,9 @@ export default function CallingReportsPage() {
         {/* --------------------------------------------------------- calls */}
         <div className="grid gap-5 lg:grid-cols-2">
           <Card>
-            <CardHeader title="How calls ended" subtitle="The outcome breakdown — usually the first thing that explains a low conversion rate" />
+            <CardHeader title="Call results" />
             {!calls?.by_disposition.length ? (
-              <EmptyState title="No calls logged" message="Nothing to break down in this period." />
+              <EmptyState title="No calls yet" message="Try a longer period." />
             ) : (
               <ul className="space-y-2.5">
                 {calls.by_disposition.map((d) => {
@@ -276,7 +272,7 @@ export default function CallingReportsPage() {
                       <div className="flex items-baseline justify-between gap-3 text-sm">
                         <span className="flex items-center gap-1.5 truncate">
                           <span className="text-ink-soft">{d.label}</span>
-                          {d.counts_connected && <Badge tone="good">got through</Badge>}
+                          {d.counts_connected && <Badge tone="good">Answered</Badge>}
                         </span>
                         <span className="whitespace-nowrap tabular-nums text-ink">
                           {number(d.n)} <span className="text-xs text-ink-faint">{pct.toFixed(0)}%</span>
@@ -297,7 +293,7 @@ export default function CallingReportsPage() {
 
           <Card>
             <CardHeader
-              title="When calls connect"
+              title="Best time to call"
               // The hour is the server's, and the server now groups calls by
               // the hour at the temple rather than by UTC. It used to report
               // UTC, so the 10am peak every caller could feel was printed here
@@ -305,12 +301,12 @@ export default function CallingReportsPage() {
               // shifts the number any further.
               subtitle={
                 peakHour && peakHour.calls >= 8
-                  ? `Best so far: around ${peakHour.hour}:00, ${Math.round((peakHour.connected / peakHour.calls) * 100)}% got through`
-                  : "Not enough calls yet to say much"
+                  ? `Around ${peakHour.hour}:00 · ${Math.round((peakHour.connected / peakHour.calls) * 100)}% answered`
+                  : "Not enough calls yet"
               }
             />
             {!calls?.by_hour.length ? (
-              <EmptyState title="No calls logged" message="This fills in as calls are recorded." />
+              <EmptyState title="No calls yet" message="Calls you log show here." />
             ) : (
               <div className="flex items-end gap-1" style={{ height: 128 }}>
                 {Array.from({ length: 24 }).map((_, h) => {
@@ -326,7 +322,7 @@ export default function CallingReportsPage() {
                     <div
                       key={h}
                       className="flex flex-1 flex-col items-center justify-end gap-0.5"
-                      title={`${h}:00 — ${total} call${total === 1 ? "" : "s"}, ${got} got through`}
+                      title={`${h}:00 · ${total} call${total === 1 ? "" : "s"}, ${got} answered`}
                     >
                       <div className="w-full rounded-t bg-line" style={{ height: barPx }}>
                         <div
@@ -346,8 +342,8 @@ export default function CallingReportsPage() {
         {/* ---------------------------------------------------- conversion */}
         <section>
           <CardHeader
-            title="What converted"
-            subtitle="Only donations that actually arrived after the lead was created — not a caller ticking a box"
+            title="Who gave"
+            subtitle="Only real donations after the lead was added."
             action={
               <SegmentedControl size="sm" options={BY_OPTIONS} value={by} onChange={setBy} />
             }
@@ -360,14 +356,14 @@ export default function CallingReportsPage() {
               <Th align="right">Rate</Th>
               <Th align="right">Raised</Th>
               <Th align="right">Per lead</Th>
-              <Th align="right">Avg attempts</Th>
-              <Th align="right">Still hoped for</Th>
+              <Th align="right">Avg calls</Th>
+              <Th align="right">Hoped for</Th>
             </Thead>
             <Tbody>
               {!conversion.length ? (
                 <tr>
                   <td colSpan={8}>
-                    <EmptyState title="No leads in this period" message="Try a wider date range." />
+                    <EmptyState title="No leads in this period" message="Try a longer period." />
                   </td>
                 </tr>
               ) : (
@@ -392,7 +388,7 @@ export default function CallingReportsPage() {
 
         {/* ----------------------------------------------------- follow-ups */}
         <section>
-          <CardHeader title="Promises outstanding" subtitle="Current state, not affected by the date filter above" />
+          <CardHeader title="Follow-ups" subtitle="As of now" />
           <TableShell>
             <Thead>
               <Th>Caller</Th>
@@ -400,14 +396,14 @@ export default function CallingReportsPage() {
               <Th align="right">Late this week</Th>
               <Th align="right">Due today</Th>
               <Th align="right">Coming up</Th>
-              <Th align="right">No date set</Th>
-              <Th>Oldest owed</Th>
+              <Th align="right">No date</Th>
+              <Th>Oldest</Th>
             </Thead>
             <Tbody>
               {!followUps.length ? (
                 <tr>
                   <td colSpan={7}>
-                    <EmptyState title="Nothing outstanding" message="No open leads have a callback booked." />
+                    <EmptyState title="No follow-ups" message="Nothing due." />
                   </td>
                 </tr>
               ) : (

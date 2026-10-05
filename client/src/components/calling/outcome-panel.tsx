@@ -263,7 +263,7 @@ export function OutcomePanel({
         } ${selected && !picked ? "opacity-70" : ""}`}
       >
         {picked && <Icon name="check" size={16} className="flex-none" />}
-        {confirming ? "Tap again — never call them" : d.label}
+        {confirming ? "Tap again to confirm" : d.label}
         {showKeys && shortcutsOn && key && (
           <kbd className="ml-1 text-2xs font-normal opacity-60">{key}</kbd>
         )}
@@ -276,17 +276,11 @@ export function OutcomePanel({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-semibold text-ink">How did it go?</p>
-          <p className="mt-0.5 text-xs text-ink-muted">
-            {logged ? (
-              <>
-                You logged <span className="font-semibold text-ink">{logged}</span>. Tap another to log again.
-              </>
-            ) : askFirst ? (
-              "Tap how it went, then confirm. Everything below the buttons is optional."
-            ) : (
-              "One tap logs the call. Everything below the buttons is optional."
-            )}
-          </p>
+          {logged && (
+            <p className="mt-0.5 text-xs text-ink-muted">
+              Saved: <span className="font-semibold text-ink">{logged}</span>
+            </p>
+          )}
         </div>
         {showKeys && (
           <div className="flex flex-none items-center gap-2">
@@ -316,34 +310,29 @@ export function OutcomePanel({
         <span className="flex min-w-0 items-center gap-2">
           <Icon name="phone" size={15} className={`flex-none ${inbound ? "text-info" : "text-ink-muted"}`} />
           <span className="min-w-0">
-            <span className="font-medium">They rang me</span>
-            <span className="block text-xs opacity-80">
-              {inbound ? "Logged as an incoming call" : "Switch on if they called you back"}
-            </span>
+            <span className="font-medium">They called me</span>
           </span>
         </span>
-        <Toggle on={inbound} onChange={onInboundChange} label="They rang me — log as an incoming call" />
+        <Toggle on={inbound} onChange={onInboundChange} label="They called me" />
       </label>
 
       {/* How much, when they gave on this call. Inline, not a dialog: somebody
           is on the line. Blank falls back to what the lead was expected to
           give, and the donation is still recorded. */}
       <div className="mt-4 flex flex-wrap items-end gap-x-3 gap-y-1">
-        <Field label="If they gave on this call, how much?" htmlFor="donated-amount">
+        <Field label="Amount given" htmlFor="donated-amount">
           <div className="w-40">
             <Input
               id="donated-amount"
               value={form.donatedAmount}
               onChange={(e) => form.setDonatedAmount(e.target.value.replace(/\D/g, ""))}
-              placeholder="₹ optional"
+              placeholder="Optional"
               inputMode="numeric"
               className="tabular-nums"
             />
           </div>
         </Field>
-        {!!form.donatedAmount && (
-          <span className="pb-2.5 text-2xs text-good">recorded with an outcome that means they donated</span>
-        )}
+
       </div>
       {onLinkOther && (
         // A plain button: the label wraps at phone width.
@@ -353,12 +342,12 @@ export function OutcomePanel({
           className="mt-1 inline-flex min-h-11 items-center gap-1.5 text-left text-sm font-medium text-brand-700 underline-offset-2 hover:underline"
         >
           <Icon name="link" size={14} className="flex-none" />
-          <span>Already gave — from another number or name? Find it</span>
+          <span>Gave from another number</span>
         </button>
       )}
 
       <div className="mt-4">
-        <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Got through</p>
+        <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Answered</p>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {connected.map((d) => button(d, variantFor(d)))}
         </div>
@@ -366,10 +355,10 @@ export function OutcomePanel({
 
       <div className="mt-4">
         <p className="mb-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
-          Didn&apos;t get through
+          Not answered
         </p>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{unanswered.map((d) => button(d, "secondary"))}</div>
-        <p className="mt-2 text-xs text-ink-muted">These come back round by themselves — no date needed.</p>
+        <p className="mt-2 text-xs text-ink-muted">We&apos;ll try them again later.</p>
       </div>
 
       {confirm}
@@ -383,12 +372,12 @@ export function OutcomePanel({
           value={form.note}
           onChange={(e) => form.setNote(e.target.value)}
           rows={2}
-          placeholder={showKeys ? "What they said (optional) — press N" : "What they said (optional)"}
+          placeholder={showKeys ? "Note (optional) · N" : "Note (optional)"}
           className={`${textareaClass} resize-y`}
         />
 
         <div>
-          <p className="mb-1.5 text-xs text-ink-muted">Call back on:</p>
+          <p className="mb-1.5 text-xs text-ink-muted">Follow-up:</p>
           <div className="flex flex-wrap items-center gap-1.5">
             {WHEN_PRESETS.map((p) => {
               const iso = atTenAm(p.days);
@@ -417,7 +406,7 @@ export function OutcomePanel({
                   form.setCustomDate(e.target.value);
                   form.setFollowUp(null);
                 }}
-                aria-label="Call back on another date"
+                aria-label="Follow-up date"
                 className="h-11"
               />
             </div>
@@ -427,7 +416,7 @@ export function OutcomePanel({
         {form.remOpen ? (
           <div className="rounded-card border border-brand-200 bg-brand-50 p-3">
             <div className="flex items-center justify-between gap-2">
-              <p className="text-xs font-semibold text-ink-soft">They named a moment</p>
+              <p className="text-xs font-semibold text-ink-soft">Promise</p>
               <Button
                 size="sm"
                 variant="ghost"
@@ -440,28 +429,25 @@ export function OutcomePanel({
                 Remove
               </Button>
             </div>
-            <p className="mt-0.5 text-2xs text-ink-muted">
-              A promise the donor made at a moment they chose. Pick when it should reach you.
-            </p>
             <div className="mt-2 grid gap-2 sm:grid-cols-3">
               <Input
                 value={form.remOccasion}
                 onChange={(e) => form.setRemOccasion(e.target.value)}
-                placeholder="Occasion — Govardhan Puja"
+                placeholder="Occasion (e.g. Govardhan Puja)"
                 aria-label="Occasion"
               />
               <Input
                 type="datetime-local"
                 value={form.remWhen}
                 onChange={(e) => form.setRemWhen(e.target.value)}
-                aria-label="When to remind you"
+                aria-label="Remind me on"
               />
               <Input
                 value={form.remAmount}
                 onChange={(e) => form.setRemAmount(e.target.value.replace(/\D/g, ""))}
                 inputMode="numeric"
-                placeholder="₹ they said"
-                aria-label="Amount they said"
+                placeholder="Amount"
+                aria-label="Amount"
                 className="tabular-nums"
               />
             </div>
@@ -486,7 +472,7 @@ export function OutcomePanel({
                 value={form.remAlerts}
                 onChange={form.setRemAlerts}
                 options={ALERT_OPTIONS}
-                emptyWarning="Nothing ticked means nothing will alert you — it will only sit on the reminders board."
+                emptyWarning="No alert will be sent."
               />
             </div>
           </div>
@@ -500,7 +486,7 @@ export function OutcomePanel({
           >
             <Icon name="bell" size={14} className="flex-none" />
             <span>
-              They promised to give at a particular time — remind me
+              Add a promise
               {showKeys && <kbd className="ml-1 text-2xs text-ink-faint">R</kbd>}
             </span>
           </button>
@@ -508,7 +494,7 @@ export function OutcomePanel({
 
         {form.showMore ? (
           <div className="flex flex-wrap items-end gap-2">
-            <Field label="Roughly how long, in minutes" htmlFor="call-minutes">
+            <Field label="Minutes" htmlFor="call-minutes">
               <div className="w-28">
                 <Input
                   id="call-minutes"
@@ -519,11 +505,11 @@ export function OutcomePanel({
                 />
               </div>
             </Field>
-            <span className="pb-2.5 text-xs text-ink-faint">Self-reported — nothing is timing the call</span>
+
           </div>
         ) : (
           <Button size="sm" variant="ghost" icon="clock" onClick={() => form.setShowMore(true)}>
-            Add call length
+            Add call time
           </Button>
         )}
       </div>

@@ -204,7 +204,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
               HKM Vizag
             </span>
             <span className="block truncate text-2xs leading-tight text-ink-muted">
-              Donor Relationship Manager
+              Donor manager
             </span>
           </span>
         </Link>

@@ -87,27 +87,27 @@ interface Config {
 const SETTING_COPY: Record<string, { label: string; help: string; kind: "number" | "boolean" | "hours" }> = {
   queue_batch_size: {
     label: "Leads loaded at a time",
-    help: "How many the calling screen fetches in one go. Higher means fewer pauses mid-run.",
+    help: "Higher means fewer pauses.",
     kind: "number",
   },
   retry_after_days: {
-    label: "Days before trying an unanswered lead again",
-    help: "When a call goes unanswered and no date is set, the lead comes back round after this many days.",
+    label: "Days before calling a missed lead again",
+    help: "Used when no follow-up date is set.",
     kind: "number",
   },
   max_attempts: {
-    label: "Attempts before parking a lead",
-    help: "After this many tries the lead drops out of the queue instead of being dialled forever. It is not deleted.",
+    label: "Calls before stopping",
+    help: "The lead is not deleted.",
     kind: "number",
   },
   stale_lead_days: {
-    label: "Days before an untouched lead resurfaces",
-    help: "A lead nobody has contacted for this long moves back towards the top of the queue.",
+    label: "Days before an old lead comes back",
+    help: "For leads no one has called.",
     kind: "number",
   },
   callers_see_all_leads: {
-    label: "Callers can see everyone's leads",
-    help: "Off means a caller's queue only holds leads assigned to them, plus unassigned ones.",
+    label: "Callers see all leads",
+    help: "Off: only their leads and leads with no caller.",
     kind: "boolean",
   },
 };
@@ -119,8 +119,8 @@ const SETTING_COPY: Record<string, { label: string; help: string; kind: "number"
  * is set up once and then forgotten.
  */
 const TABS = [
-  { key: "queue", label: "Queue", icon: "list" },
-  { key: "stages", label: "Stages & outcomes", icon: "target" },
+  { key: "queue", label: "Calling", icon: "list" },
+  { key: "stages", label: "Stages & call results", icon: "target" },
   { key: "reminders", label: "Reminders", icon: "bell" },
   { key: "preachers", label: "Preachers", icon: "users" },
   { key: "qr", label: "QR codes", icon: "qr" },
@@ -166,7 +166,7 @@ function CallingSettings() {
       setConfig(await apiClient.get<Config>("/api/crm/config"));
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load settings");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     }
   }, []);
 
@@ -180,7 +180,7 @@ function CallingSettings() {
       await apiClient.put(`/api/crm/settings/${key}`, { value });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
     } finally {
       setSaving(null);
     }
@@ -192,7 +192,7 @@ function CallingSettings() {
       await apiClient.put(`/api/crm/statuses/${slug}`, body);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that stage");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
     } finally {
       setSaving(null);
     }
@@ -204,7 +204,7 @@ function CallingSettings() {
       await apiClient.put(`/api/crm/dispositions/${slug}`, body);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that outcome");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
     } finally {
       setSaving(null);
     }
@@ -218,7 +218,6 @@ function CallingSettings() {
       <PageHeader
         eyebrow="Setup"
         title="Calling settings"
-        subtitle="How the queue behaves, the words your team uses, and what they can send"
       />
 
       {error && <Alert tone="danger">{error}</Alert>}
@@ -238,7 +237,7 @@ function CallingSettings() {
         {tab === "queue" && (
           <>
         <Card>
-          <CardHeader icon="list" title="How the queue behaves" />
+          <CardHeader icon="list" title="Calling" />
           <div className="space-y-4">
             {Object.entries(SETTING_COPY).map(([key, meta]) => {
               const value = config?.settings[key];
@@ -288,14 +287,14 @@ function CallingSettings() {
           <CardHeader
             icon="target"
             title="Stages"
-            subtitle="Where a lead can be. Won and lost are what the conversion reports count; open decides whether it stays in the queue."
+            subtitle="Where a lead is."
           />
           <TableShell>
             <Thead>
               <Th>Stage</Th>
-              <Th align="center">Counts as won</Th>
-              <Th align="center">Counts as lost</Th>
-              <Th align="center">Stays in queue</Th>
+              <Th align="center">Gave</Th>
+              <Th align="center">Lost</Th>
+              <Th align="center">Keep calling</Th>
               <Th align="center">In use</Th>
             </Thead>
             {!config ? (
@@ -307,14 +306,14 @@ function CallingSettings() {
                     <Td>
                       <Input
                         defaultValue={s.label}
-                        aria-label={`Name of the ${s.slug} stage`}
+                        aria-label={`Stage name`}
                         onBlur={(e) => e.target.value !== s.label && void saveStatus(s.slug, { label: e.target.value })}
                       />
                       <span className="mt-1 block text-2xs text-ink-faint">{s.slug}</span>
                     </Td>
-                    <Td align="center"><Toggle on={s.is_won} onChange={(v) => void saveStatus(s.slug, { is_won: v })} label={`${s.label} counts as won`} /></Td>
-                    <Td align="center"><Toggle on={s.is_lost} onChange={(v) => void saveStatus(s.slug, { is_lost: v })} label={`${s.label} counts as lost`} /></Td>
-                    <Td align="center"><Toggle on={s.is_open} onChange={(v) => void saveStatus(s.slug, { is_open: v })} label={`${s.label} stays in the queue`} /></Td>
+                    <Td align="center"><Toggle on={s.is_won} onChange={(v) => void saveStatus(s.slug, { is_won: v })} label={`${s.label}: gave`} /></Td>
+                    <Td align="center"><Toggle on={s.is_lost} onChange={(v) => void saveStatus(s.slug, { is_lost: v })} label={`${s.label}: lost`} /></Td>
+                    <Td align="center"><Toggle on={s.is_open} onChange={(v) => void saveStatus(s.slug, { is_open: v })} label={`${s.label}: keep calling`} /></Td>
                     <Td align="center"><Toggle on={s.active} onChange={(v) => void saveStatus(s.slug, { active: v })} label={`${s.label} in use`} /></Td>
                   </tr>
                 ))}
@@ -332,7 +331,7 @@ function CallingSettings() {
                         value={newStage}
                         aria-label="New stage"
                         onChange={(e) => setNewStage(e.target.value)}
-                        placeholder="Add a stage, e.g. Will give after Kartik"
+                        placeholder="New stage, e.g. Will give after Kartik"
                       />
                     </div>
                     <Button
@@ -357,15 +356,15 @@ function CallingSettings() {
         <div>
           <CardHeader
             icon="phone"
-            title="Call outcomes"
-            subtitle="What a caller taps after a call. The stage it suggests is what makes one tap enough."
+            title="Call results"
+            subtitle="What a caller taps after a call."
           />
           <TableShell>
             <Thead>
-              <Th>Outcome</Th>
-              <Th align="center">Counts as got through</Th>
-              <Th>Moves the lead to</Th>
-              <Th align="center">Books a callback</Th>
+              <Th>Call result</Th>
+              <Th align="center">Answered</Th>
+              <Th>Moves lead to</Th>
+              <Th align="center">Asks for follow-up</Th>
               <Th align="center">In use</Th>
             </Thead>
             {!config ? (
@@ -377,7 +376,7 @@ function CallingSettings() {
                     <Td>
                       <Input
                         defaultValue={d.label}
-                        aria-label={`Name of the ${d.slug} outcome`}
+                        aria-label={`Call result name`}
                         onBlur={(e) => e.target.value !== d.label && void saveDisposition(d.slug, { label: e.target.value })}
                       />
                     </Td>
@@ -385,7 +384,7 @@ function CallingSettings() {
                       <Toggle
                         on={d.counts_connected}
                         onChange={(v) => void saveDisposition(d.slug, { counts_connected: v })}
-                        label={`${d.label} counts as got through`}
+                        label={`${d.label}: answered`}
                       />
                     </Td>
                     <Td>
@@ -395,7 +394,7 @@ function CallingSettings() {
                         className="min-w-[9rem]"
                         ariaLabel={`Stage ${d.label} moves the lead to`}
                       >
-                        <option value="">Leave it alone</option>
+                        <option value="">No change</option>
                         {config.statuses.map((s) => (
                           <option key={s.slug} value={s.slug}>{s.label}</option>
                         ))}
@@ -405,7 +404,7 @@ function CallingSettings() {
                       <Toggle
                         on={d.wants_follow_up}
                         onChange={(v) => void saveDisposition(d.slug, { wants_follow_up: v })}
-                        label={`${d.label} books a callback`}
+                        label={`${d.label}: asks for follow-up`}
                       />
                     </Td>
                     <Td align="center">
@@ -428,14 +427,10 @@ function CallingSettings() {
           <Card>
             <CardHeader
               icon="bell"
-              title="When reminders reach you"
-              subtitle="A reminder is a promise a donor made at a moment they chose. These are the warnings raised before that moment arrives."
+              title="Reminder alerts"
+              subtitle="Default alerts before a promise is due."
             />
 
-            <p className="text-sm text-ink-soft">
-              The temple&apos;s default, used whenever a caller does not pick their own. A caller can always change
-              it on the call, and on a promise recorded from the follow-ups screen.
-            </p>
             <div className="mt-3">
               <AlertPicker
                 value={
@@ -445,18 +440,14 @@ function CallingSettings() {
                 }
                 onChange={(next) => void saveSetting("reminder_lead_times", cleanAlerts(next))}
                 options={ALERT_OPTIONS}
-                emptyWarning="With nothing chosen, a reminder booked without its own alerts will never warn anybody."
+                emptyWarning="No alert will be sent."
               />
             </div>
 
             <div className="mt-5 flex flex-wrap items-start justify-between gap-4 border-t border-line-soft pt-4">
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-ink">Desktop notifications</p>
-                <p className="mt-0.5 text-xs text-ink-muted">
-                  Raises a notification outside the browser when a reminder falls due, so a caller who has DRM in a
-                  background tab still hears about it. Each caller&apos;s browser asks their permission the first
-                  time.
-                </p>
+                <p className="mt-0.5 text-xs text-ink-muted">Alert even when DRM is in another tab.</p>
               </div>
               <Toggle
                 on={!!config?.settings.reminder_desktop_alerts}
@@ -475,18 +466,8 @@ function CallingSettings() {
         {tab === "queue" && (
           <>
         <Card>
-          <CardHeader icon="info" title="Call recording and automatic call logs" />
-          <p className="text-sm text-ink-soft">
-            Calls are made from callers&apos; own phones, so DRM records what they tell it afterwards — there is
-            nothing to switch on here for recording, call duration or automatic connected/unanswered detection.
-          </p>
-          <p className="mt-2 text-sm text-ink-soft">
-            Those become real measurements only with a cloud telephony provider (Exotel, MyOperator, Knowlarity and
-            Twilio all work this way): the caller presses call in DRM, the provider dials both numbers, and its
-            webhook sends back the duration, whether it connected and a recording link. The call log already has
-            columns for all of that, so connecting one later needs no change to the database and no report rewritten
-            — only the dialling itself.
-          </p>
+          <CardHeader icon="info" title="Call recording" />
+          <p className="text-sm text-ink-soft">Not available. Callers use their own phones.</p>
         </Card>
           </>
         )}
@@ -536,7 +517,7 @@ function PreachersSection() {
       );
       setRows(d.preachers);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the preachers");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     }
   }, [q]);
 
@@ -555,7 +536,7 @@ function PreachersSection() {
       // Nearly always a duplicate ID number, and the server's message names
       // who already has it - so it is shown as it came back rather than
       // replaced with something vaguer.
-      setError(e instanceof Error ? e.message : "Could not save that");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
       await load();
     }
   }
@@ -565,13 +546,13 @@ function PreachersSection() {
       <CardHeader
         icon="users"
         title={`Preachers${rows.length ? ` · ${rows.length}` : ""}`}
-        subtitle="The Enrolled By codes from your sheets. Give them real names and every caller sees the name instead of the code."
+        subtitle="Add names to the codes from your sheets."
         action={
           <div className="flex flex-wrap items-center gap-2">
             <SearchInput
               value={q}
               onChange={setQ}
-              placeholder="Search name, code or ID…"
+              placeholder="Name, code or ID"
               className="w-52"
             />
             <Button icon="userPlus" onClick={() => setAdding(true)}>
@@ -587,11 +568,11 @@ function PreachersSection() {
         <Thead>
           <Th>Code</Th>
           <Th>Name</Th>
-          <Th>ID number</Th>
+          <Th>ID No.</Th>
           <Th align="right">Leads</Th>
-          <Th align="right">Still to call</Th>
-          <Th align="right">In temple accounts</Th>
-          <Th align="right">Raised by calling</Th>
+          <Th align="right">To call</Th>
+          <Th align="right">Temple records</Th>
+          <Th align="right">Money raised</Th>
           <Th align="center">In use</Th>
         </Thead>
         {!rows.length ? (
@@ -600,11 +581,11 @@ function PreachersSection() {
               <td colSpan={8}>
                 <EmptyState
                   icon="users"
-                  title={q.trim() ? "Nobody matches that" : "No preachers yet"}
+                  title={q.trim() ? "No match" : "No preachers yet"}
                   message={
                     q.trim()
                       ? `Nothing matches “${q.trim()}”.`
-                      : "None yet — add one, or upload a sheet with an Enrolled By column and they appear on their own."
+                      : "Add one, or upload a sheet."
                   }
                 />
               </td>
@@ -618,7 +599,7 @@ function PreachersSection() {
                 <Td>
                   <Input
                     defaultValue={p.name ?? ""}
-                    placeholder="Their name…"
+                    placeholder="Name"
                     aria-label={`Name for ${p.code}`}
                     onBlur={(e) => e.target.value !== (p.name ?? "") && void save(p.id, { name: e.target.value })}
                   />
@@ -631,7 +612,7 @@ function PreachersSection() {
                     <Input
                       defaultValue={p.id_number ?? ""}
                       placeholder="—"
-                      aria-label={`ID number for ${p.code}`}
+                      aria-label={`ID No. for ${p.code}`}
                       className="tabular-nums"
                       onBlur={(e) =>
                         e.target.value.trim().toUpperCase() !== (p.id_number ?? "") &&
@@ -657,11 +638,7 @@ function PreachersSection() {
         )}
       </TableShell>
 
-      <p className="mt-3 text-xs text-ink-muted">
-        A preacher is somebody the DONOR knows, not somebody who signs in to DRM — which is why this is a separate
-        list from your team. Retiring one keeps every donor they brought in; it only takes the code out of the
-        dropdowns. Name and ID number can be edited straight in the table.
-      </p>
+
 
       {adding && (
         <AddPreacherDialog
@@ -716,12 +693,12 @@ function AddPreacherDialog({ onClose, onDone }: { onClose: () => void; onDone: (
                 });
                 onDone();
               } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not save that preacher");
+                setError(e instanceof Error ? e.message : "Could not save. Try again.");
                 setBusy(false);
               }
             }}
           >
-            Add them
+            Add
           </Button>
         </>
       }
@@ -729,7 +706,7 @@ function AddPreacherDialog({ onClose, onDone }: { onClose: () => void; onDone: (
       {error && <Alert tone="danger">{error}</Alert>}
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Their name" htmlFor="preacher-name">
+        <Field label="Name" htmlFor="preacher-name">
           <Input
             id="preacher-name"
             value={name}
@@ -737,7 +714,7 @@ function AddPreacherDialog({ onClose, onDone }: { onClose: () => void; onDone: (
             placeholder="e.g. Jagat Tarini Mataji"
           />
         </Field>
-        <Field label="Short form (code)" htmlFor="preacher-code" required>
+        <Field label="Code" htmlFor="preacher-code" required hint="Same as Enrolled By in your sheets">
           <Input
             id="preacher-code"
             value={code}
@@ -746,7 +723,7 @@ function AddPreacherDialog({ onClose, onDone }: { onClose: () => void; onDone: (
             className="tabular-nums"
           />
         </Field>
-        <Field label="ID number" htmlFor="preacher-id">
+        <Field label="ID No." htmlFor="preacher-id">
           <Input
             id="preacher-id"
             value={idNumber}
@@ -755,7 +732,7 @@ function AddPreacherDialog({ onClose, onDone }: { onClose: () => void; onDone: (
             className="tabular-nums"
           />
         </Field>
-        <Field label="Phone (optional)" htmlFor="preacher-phone">
+        <Field label="Mobile Number (optional)" htmlFor="preacher-phone">
           <Input
             id="preacher-phone"
             value={phone}
@@ -766,10 +743,7 @@ function AddPreacherDialog({ onClose, onDone }: { onClose: () => void; onDone: (
         </Field>
       </div>
 
-      <p className="mt-3 text-xs text-ink-muted">
-        The code has to match what your sheets put in the <strong>Enrolled By</strong> column — that is how an upload
-        recognises them. The ID number is your own register&apos;s; DRM stores it and never makes one up.
-      </p>
+
     </Modal>
   );
 }
@@ -833,7 +807,7 @@ function LinksSection() {
       setLinks(d.links);
       setUsers(cfg.users);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the links");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     }
   }, []);
 
@@ -846,7 +820,7 @@ function LinksSection() {
       await api.put(`/api/crm/links/${id}`, body);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that link");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
     }
   }
 
@@ -865,18 +839,18 @@ function LinksSection() {
       await api.put(`/api/crm/links/${id}/credit`, { user_id: userId });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not change who this link credits");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
       await load();
     }
   }
 
   async function remove(id: string, label: string) {
-    if (!confirm(`Delete "${label}"? Callers will no longer be able to send it.`)) return;
+    if (!confirm(`Delete "${label}"?`)) return;
     try {
       await api.delete(`/api/crm/links/${id}`);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not delete that link");
+      setError(e instanceof Error ? e.message : "Could not delete. Try again.");
     }
   }
 
@@ -884,8 +858,8 @@ function LinksSection() {
     <div>
       <CardHeader
         icon="link"
-        title="Links callers can send"
-        subtitle="Picked on the calling screen and sent straight into the donor's WhatsApp. Editing one changes it for everybody. Assign a link to a caller and the donations it brings in are credited to them."
+        title="Links"
+        subtitle="Callers send these on WhatsApp. Changes apply to everyone."
       />
 
       {error && <Alert tone="danger">{error}</Alert>}
@@ -898,9 +872,9 @@ function LinksSection() {
               actually decides. The second one used to read just "Shared",
               which beside a column about crediting is the same question asked
               twice - and the whole point is that they are not the same. */}
-          <Th>Donations credited to</Th>
+          <Th>Counts for</Th>
           <Th align="right">Sent</Th>
-          <Th align="center">In whose picker</Th>
+          <Th align="center">Shown to</Th>
           <Th align="center">In use</Th>
           <Th align="right"><span className="sr-only">Actions</span></Th>
         </Thead>
@@ -910,8 +884,8 @@ function LinksSection() {
               <td colSpan={7}>
                 <EmptyState
                   icon="link"
-                  title="No links saved yet"
-                  message="Add the pages your callers should be sending and they appear in every caller's dropdown."
+                  title="No links yet"
+                  message="Links you add show for all callers."
                 />
               </td>
             </tr>
@@ -927,7 +901,7 @@ function LinksSection() {
                   <Td>
                     <Input
                       defaultValue={l.label}
-                      aria-label={`Name of the ${l.label} link`}
+                      aria-label={`Link name`}
                       onBlur={(e) => e.target.value !== l.label && void save(l.id, { label: e.target.value })}
                     />
                     {l.seva_name && <span className="mt-1 block text-2xs text-ink-faint">{l.seva_name}</span>}
@@ -943,9 +917,9 @@ function LinksSection() {
                         value={l.credit_user_id ?? ""}
                         onChange={(v) => void saveCredit(l.id, v || null)}
                         className="min-w-[10rem]"
-                        ariaLabel={`Who donations through ${l.label} are credited to`}
+                        ariaLabel={`${l.label} counts for`}
                         options={[
-                          { value: "", label: "Nobody" },
+                          { value: "", label: "No one" },
                           ...users.map((u) => ({ value: u.id, label: u.name })),
                         ]}
                       />
@@ -954,7 +928,7 @@ function LinksSection() {
                         {l.credit_user_name}
                       </Badge>
                     ) : (
-                      <span className="text-xs text-ink-faint">Nobody</span>
+                      <span className="text-xs text-ink-faint">No one</span>
                     )}
                     {/* The token is a diagnostic, not something anybody types:
                         it is here so that "why was this donation not credited"
@@ -963,7 +937,7 @@ function LinksSection() {
                     {l.credit_user_id && l.credit_token && (
                       <span
                         className="mt-1 block truncate font-mono text-2xs text-ink-faint"
-                        title="Rides home on the link as utm_campaign. Donations carrying it are credited to this caller."
+                        title="Tracking code on the link"
                       >
                         {l.credit_token}
                       </span>
@@ -974,9 +948,9 @@ function LinksSection() {
                   </Td>
                   <Td align="center">
                     {l.owner_user_id ? (
-                      <Badge tone="neutral">{l.owner_name ?? "private"}</Badge>
+                      <Badge tone="neutral">{l.owner_name ?? "Private"}</Badge>
                     ) : (
-                      <Badge tone="good">everyone</Badge>
+                      <Badge tone="good">Everyone</Badge>
                     )}
                   </Td>
                   <Td align="center">
@@ -1009,17 +983,17 @@ function LinksSection() {
                       <Field label="Link" className="mb-2">
                         <Input
                           defaultValue={l.url}
-                          aria-label={`Address of the ${l.label} link`}
+                          aria-label={`Link`}
                           onBlur={(e) => e.target.value !== l.url && void save(l.id, { url: e.target.value })}
                         />
                       </Field>
                       <Field
                         label="Message"
-                        hint={`${"{name}"} ${"{seva}"} ${"{link}"} ${"{amount}"} are filled in for each donor`}
+                        hint={`${"{name}"} ${"{seva}"} ${"{link}"} ${"{amount}"} are filled in`}
                       >
                         <Textarea
                           defaultValue={l.message ?? ""}
-                          aria-label={`Message sent with the ${l.label} link`}
+                          aria-label={`Message`}
                           onBlur={(e) => e.target.value !== (l.message ?? "") && void save(l.id, { message: e.target.value })}
                           rows={4}
                           className="resize-y"
@@ -1034,32 +1008,9 @@ function LinksSection() {
         )}
       </TableShell>
 
-      <div className="mt-3 space-y-2">
-        <p className="text-xs text-ink-muted">
-          <strong className="font-medium text-ink-soft">Donations credited to</strong> is who is counted as having
-          raised the money: assign a link to a caller and every donation that arrives through it is credited to
-          them. That is a different question from{" "}
-          <strong className="font-medium text-ink-soft">in whose picker</strong>, which
-          only decides who sees the link to send — a link everyone can send can still credit one caller, and often
-          does.
-        </p>
-        <p className="text-xs text-ink-muted">
-          An assigned link carries a short tracking token, shown under whoever it credits. It goes out on the end of
-          the link and comes home on the donation, which is what ties the two together. A link keeps the same token when it
-          is reassigned to somebody else, on purpose: the links already sitting in donors&apos; WhatsApp are opened
-          weeks later, and they go on working — the credit simply follows whoever the link is assigned to now.
-        </p>
-        <p className="text-xs text-ink-muted">
-          These go out from the caller&apos;s own WhatsApp, so there is no Meta template to approve and nothing to pay
-          per message. DRM opens the chat with the text ready — the caller still presses send, which is why the
-          history says &ldquo;opened WhatsApp&rdquo; rather than claiming it was delivered.
-        </p>
-        {!isAdmin && (
-          <p className="text-xs text-ink-faint">
-            Only an admin can change who a link credits, so these are shown here but cannot be edited.
-          </p>
-        )}
-      </div>
+      {!isAdmin && (
+        <p className="mt-3 text-xs text-ink-faint">Only an admin can change who a link counts for.</p>
+      )}
     </div>
   );
 }
@@ -1115,7 +1066,7 @@ function QrSection() {
       setRows(q.qrs);
       setUsers(cfg.users);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the QR codes");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     }
   }, []);
 
@@ -1129,7 +1080,7 @@ function QrSection() {
       await api.put(`/api/crm/qrs/${id}`, body);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
       await load();
     }
   }
@@ -1139,7 +1090,7 @@ function QrSection() {
       <CardHeader
         icon="qr"
         title={`Razorpay QR codes${rows.length ? ` · ${rows.length}` : ""}`}
-        subtitle="Make them in the Razorpay dashboard, then paste each one's id here and say whose it is."
+        subtitle="Make the QR in Razorpay, then add its ID here."
         action={
           <Button icon="plus" onClick={() => setAdding(true)}>
             Add a QR
@@ -1156,9 +1107,9 @@ function QrSection() {
 
       <TableShell>
         <Thead>
-          <Th>Label</Th>
-          <Th>Razorpay id</Th>
-          <Th>Whose</Th>
+          <Th>Name</Th>
+          <Th>Razorpay ID</Th>
+          <Th>Caller</Th>
           <Th>Receipt from</Th>
           <Th align="right">Sent</Th>
           <Th align="right">Paid</Th>
@@ -1174,7 +1125,7 @@ function QrSection() {
                 <EmptyState
                   icon="qr"
                   title="No QR codes yet"
-                  message="A caller sees no QR option until one is added here."
+                  message="Add a QR so callers can send it."
                   action={
                     <Button icon="plus" onClick={() => setAdding(true)}>
                       Add a QR
@@ -1194,7 +1145,7 @@ function QrSection() {
                 <Td className="min-w-[11rem]">
                   <Input
                     defaultValue={q.label}
-                    aria-label={`Label for ${q.qr_id}`}
+                    aria-label={`Name for ${q.qr_id}`}
                     onBlur={(e) => e.target.value.trim() && e.target.value !== q.label && void save(q.id, { label: e.target.value })}
                   />
                   {q.purpose && <p className="mt-1 text-2xs text-ink-muted">{q.purpose}</p>}
@@ -1205,9 +1156,9 @@ function QrSection() {
                     value={q.owner_id ?? ""}
                     onChange={(v) => void save(q.id, { owner_id: v || null })}
                     className="min-w-[10rem]"
-                    ariaLabel={`Whose ${q.label} is`}
+                    ariaLabel={`Caller for ${q.label}`}
                     options={[
-                      { value: "", label: "The temple's (everyone)" },
+                      { value: "", label: "Temple (everyone)" },
                       ...users.map((u) => ({ value: u.id, label: u.name })),
                     ]}
                   />
@@ -1220,9 +1171,9 @@ function QrSection() {
                     value={q.receipt_site ?? ""}
                     onChange={(v) => void save(q.id, { receipt_site: v || null })}
                     className="min-w-[9rem]"
-                    ariaLabel={`Which site issues the receipt for ${q.label}`}
+                    ariaLabel={`Receipt site for ${q.label}`}
                     options={[
-                      { value: "", label: "None — no receipt" },
+                      { value: "", label: "No receipt" },
                       { value: "hkmv", label: "harekrishnavizag.org" },
                       { value: "annadan", label: "annadan" },
                     ]}
@@ -1244,7 +1195,7 @@ function QrSection() {
                   {Number(q.raised) ? currency(Number(q.raised)) : <span className="text-ink-faint">—</span>}
                   {q.unattributed > 0 && (
                     <p className="text-2xs font-normal text-warn">
-                      {number(q.unattributed)} not matched
+                      {number(q.unattributed)} not linked yet
                     </p>
                   )}
                 </Td>
@@ -1264,21 +1215,14 @@ function QrSection() {
       </TableShell>
 
       <div className="mt-3">
-        <p className="text-xs text-ink-muted">
-          When a caller shares a QR, DRM records who it went to. Razorpay then reports the payment to
-          <span className="font-mono"> /api/razorpay/webhook</span>, and DRM matches it back to that lead by the QR,
-          the timing and the amount. A payment it cannot place with confidence waits on the unmatched list rather
-          than being credited to a guess.
-        </p>
         {/* Named explicitly because it is the one setting that silently stops
             all of this working: a Razorpay payment object does not say which QR
             it was paid into, and qr_code.credited is the only delivery that
             does. Subscribed to payment.captured alone, every QR donation
             arrives attached to nothing. */}
-        <p className="mt-2 text-xs text-ink-muted">
-          In Razorpay&apos;s webhook settings, tick <span className="font-mono">qr_code.credited</span>. That is the
-          only event that tells DRM which QR the money went into — <span className="font-mono">payment.captured</span>{" "}
-          on its own does not carry it, and every donation would land unmatched.
+        <p className="text-xs text-ink-muted">
+          In Razorpay, turn on <span className="font-mono">qr_code.credited</span> for{" "}
+          <span className="font-mono">/api/razorpay/webhook</span>.
         </p>
       </div>
 
@@ -1367,40 +1311,37 @@ function AddQrDialog({
                       base64: toBase64(await file.arrayBuffer()),
                     });
                   } catch (e) {
-                    warning = `${label.trim()} is saved, but the picture did not upload: ${
+                    warning = `${label.trim()} saved. Picture did not upload: ${
                       e instanceof Error ? e.message : "unknown error"
-                    } You can try again with Upload on its row.`;
+                    } Tap Upload to try again.`;
                   }
                 }
                 onDone(warning);
               } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not save that QR");
+                setError(e instanceof Error ? e.message : "Could not save. Try again.");
                 setBusy(false);
               }
             }}
           >
-            Add it
+            Add
           </Button>
         </>
       }
     >
       {error && <Alert tone="danger">{error}</Alert>}
 
-      <p className="mb-4 text-sm text-ink-soft">
-        In Razorpay, open the QR you want to use and copy its id. DRM never creates or changes a QR — it only needs
-        to recognise payments that come through one.
-      </p>
+
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="What the caller will see" htmlFor="qr-label" required>
+        <Field label="Name" htmlFor="qr-label" required>
           <Input
             id="qr-label"
             value={label}
             onChange={(e) => setLabel(e.target.value)}
-            placeholder="e.g. Annadan — Ravi"
+            placeholder="e.g. Annadan Ravi"
           />
         </Field>
-        <Field label="Razorpay QR id" htmlFor="qr-id" required>
+        <Field label="Razorpay QR ID" htmlFor="qr-id" required hint="Copy it from Razorpay">
           <Input
             id="qr-id"
             value={qrId}
@@ -1415,7 +1356,7 @@ function AddQrDialog({
             there underneath for the case where the image already lives
             somewhere public. */}
         <div className="sm:col-span-2">
-          <p className="mb-1 block text-xs font-medium text-ink-soft">The QR picture</p>
+          <p className="mb-1 block text-xs font-medium text-ink-soft">QR picture</p>
           <div className="flex items-center gap-3">
             {preview ? (
               // eslint-disable-next-line @next/next/no-img-element
@@ -1439,7 +1380,7 @@ function AddQrDialog({
                   const f = e.target.files?.[0];
                   if (!f) return;
                   if (f.size > 2 * 1024 * 1024) {
-                    setError("That image is over 2 MB. A QR image should be far smaller.");
+                    setError("Image is over 2 MB. Pick a smaller one.");
                     return;
                   }
                   setError(null);
@@ -1447,16 +1388,16 @@ function AddQrDialog({
                 }}
               />
               <Button variant="secondary" icon="upload" onClick={() => fileRef.current?.click()}>
-                {file ? "Choose a different picture" : "Choose a picture"}
+                {file ? "Change picture" : "Pick a picture"}
               </Button>
               <p className="mt-1 truncate text-2xs text-ink-faint">
-                {file ? file.name : "PNG or JPG, under 2 MB — this is what the donor receives on WhatsApp."}
+                {file ? file.name : "PNG or JPG, under 2 MB"}
               </p>
             </div>
           </div>
 
           {!file && (
-            <Field label="Or paste a link to an image that is already online" htmlFor="qr-image-url" className="mt-2">
+            <Field label="Or paste an image link" htmlFor="qr-image-url" className="mt-2">
               <Input
                 id="qr-image-url"
                 value={imageUrl}
@@ -1466,7 +1407,7 @@ function AddQrDialog({
             </Field>
           )}
         </div>
-        <Field label="What it is for" htmlFor="qr-purpose">
+        <Field label="Seva" htmlFor="qr-purpose">
           <Input
             id="qr-purpose"
             value={purpose}
@@ -1474,30 +1415,26 @@ function AddQrDialog({
             placeholder="e.g. Annadan Seva"
           />
         </Field>
-        <Field label="Whose QR is it">
+        <Field label="Caller">
           <Select
             value={owner}
             onChange={setOwner}
-            ariaLabel="Whose QR is it"
+            ariaLabel="Caller"
             options={[
-              { value: "", label: "The temple's (everyone)" },
+              { value: "", label: "Temple (everyone)" },
               ...users.map((u) => ({ value: u.id, label: u.name })),
             ]}
           />
         </Field>
-        <Field
-          label="Which site issues the 80G receipt"
-          className="sm:col-span-2"
-          hint="When a donor pays through this QR, DRM raises the receipt on that site from its own 80G series, the same way a cash donation is entered there."
-        >
+        <Field label="80G receipt from" className="sm:col-span-2">
           <Select
             value={site}
             onChange={setSite}
-            ariaLabel="Which site issues the 80G receipt"
+            ariaLabel="80G receipt from"
             options={[
               { value: "hkmv", label: "harekrishnavizag.org" },
               { value: "annadan", label: "annadan" },
-              { value: "", label: "None — record it, issue nothing" },
+              { value: "", label: "No receipt" },
             ]}
           />
         </Field>
@@ -1530,7 +1467,7 @@ function QrImageButton({
 
   async function upload(file: File) {
     if (file.size > 2 * 1024 * 1024) {
-      return onError("That image is over 2 MB. A QR image should be far smaller.");
+      return onError("Image is over 2 MB. Pick a smaller one.");
     }
     setBusy(true);
     try {
@@ -1540,7 +1477,7 @@ function QrImageButton({
       });
       await onDone();
     } catch (e) {
-      onError(e instanceof Error ? e.message : "Could not upload that image");
+      onError(e instanceof Error ? e.message : "Could not upload. Try again.");
     } finally {
       setBusy(false);
     }
@@ -1569,13 +1506,13 @@ function QrImageButton({
           name="trash"
           size="sm"
           variant="dangerSoft"
-          label={`Remove the picture on ${qr.label}`}
+          label={`Remove picture`}
           onClick={async () => {
             try {
               await api.delete(`/api/crm/qrs/${qr.id}/image`);
               await onDone();
             } catch (e) {
-              onError(e instanceof Error ? e.message : "Could not remove that image");
+              onError(e instanceof Error ? e.message : "Could not remove. Try again.");
             }
           }}
         />
@@ -1625,8 +1562,8 @@ function StorageSection() {
         title="File storage"
         subtitle={
           s.configured
-            ? "Original uploads, branded QR images and cached receipts."
-            : "Not set up. Everything still works — these three things are simply not kept."
+            ? "Uploaded files, QR pictures and receipts."
+            : "Not set up. Everything else still works."
         }
       />
 
@@ -1638,42 +1575,29 @@ function StorageSection() {
                 {number(s.sheets_kept)}
                 <span className="text-base font-normal text-ink-faint"> / {number(s.sheets_total)}</span>
               </p>
-              <p className="text-xs text-ink-soft">uploaded sheets kept as files</p>
+              <p className="text-xs text-ink-soft">Sheets saved</p>
             </div>
             <div>
               <p className="text-2xl font-semibold tabular-nums text-ink">{number(s.receipts_cached)}</p>
-              <p className="text-xs text-ink-soft">receipts cached · {mb(s.receipt_bytes)}</p>
+              <p className="text-xs text-ink-soft">Receipts saved · {mb(s.receipt_bytes)}</p>
             </div>
             <div>
               <p className="text-2xl font-semibold tabular-nums text-ink">{number(s.qr_images)}</p>
-              <p className="text-xs text-ink-soft">branded QR images</p>
+              <p className="text-xs text-ink-soft">QR pictures</p>
             </div>
           </div>
 
           {!s.public_urls && (
             <Alert tone="warn" className="mt-3">
-              The bucket has no public address set, so branded QR images cannot be uploaded — a donor&apos;s phone
-              fetches that image straight from WhatsApp and could not load a private one. Set{" "}
-              <span className="font-mono">R2_PUBLIC_BASE_URL</span> to enable it. Everything else works as it is.
+              QR pictures cannot be uploaded. Set <span className="font-mono">R2_PUBLIC_BASE_URL</span> to turn it on.
             </Alert>
           )}
 
-          <p className="mt-3 text-xs text-ink-muted">
-            A cached receipt can never go out of date: its stored name contains a fingerprint of what the receipt
-            prints — its number, the amount, the donor&apos;s name and address. Correct any of those and the
-            fingerprint changes, so DRM looks for a different file, doesn&apos;t find one, and fetches a fresh
-            receipt from the site. The old copy is never read again rather than needing to be cleared.
-          </p>
+
         </>
       ) : (
         <div className="text-sm text-ink-soft">
-          <p>Without a bucket, three things are not happening:</p>
-          <p className="mt-2">
-            The original workbook the office sends is not kept — every row is still stored and searchable, but
-            &ldquo;send me the file itself&rdquo; has no answer. Donors receive Razorpay&apos;s plain QR square
-            rather than a branded image. And every receipt reprint calls the donation site afresh instead of
-            being served from a copy.
-          </p>
+          <p>Uploaded files, QR pictures and receipts are not saved.</p>
           <p className="mt-2 text-xs text-ink-muted">
             To turn it on, set <span className="font-mono">R2_ACCOUNT_ID</span>,{" "}
             <span className="font-mono">R2_ACCESS_KEY_ID</span>,{" "}

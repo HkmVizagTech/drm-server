@@ -187,7 +187,7 @@ async function main() {
   check('Ana is never handed the person Bhavin rang', !seen.has(victim), [...seen]);
   check('Ana is never handed the person Bhavin is on now', !seen.has(bStart.body.lead.id));
   const taken = await pool.query(`SELECT note FROM calling_session_items WHERE session_id = $1 AND lead_id = $2`, [sid, victim]);
-  check('and the run says why', /Rung by Bhavin/.test(taken.rows[0]?.note ?? ''), taken.rows[0]);
+  check('and the run says why', /Called by Bhavin/.test(taken.rows[0]?.note ?? ''), taken.rows[0]);
   check('the run reaches its end', state.body.finished === true, state.body.counts);
 
   console.log('\n5. go back to the skipped ones');

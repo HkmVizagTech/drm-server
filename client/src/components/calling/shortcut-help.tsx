@@ -42,16 +42,16 @@ export function ShortcutHelp({
     ...(inRun
       ? ([
           ["←", "Previous person"],
-          ["→", "Next person (skips if not called)"],
-          ["S", "Skip for now"],
+          ["→", "Next person"],
+          ["S", "Skip"],
         ] as [string, string][])
       : []),
-    ["U", "Undo the last call"],
+    ["U", "Undo last call"],
     ["N", "Write a note"],
-    ["R", "They promised a time — remind me"],
-    ["C", "Copy the number"],
-    ["W", "Send the WhatsApp link"],
-    ["Esc", "Leave a text box"],
+    ["R", "Add a promise"],
+    ["C", "Copy number"],
+    ["W", "Send WhatsApp link"],
+    ["Esc", "Leave text box"],
   ];
 
   return (
@@ -62,7 +62,7 @@ export function ShortcutHelp({
       className="fade-rise absolute right-0 z-50 mt-2 w-80 rounded-control border border-line-strong bg-surface p-4 shadow-float"
     >
       <p className="text-sm font-semibold text-ink">Keyboard shortcuts</p>
-      <p className="mt-0.5 text-xs text-ink-muted">Not while you are typing in a box.</p>
+
       <ul className="mt-3 space-y-1 text-sm">
         {keyed.map((k) => (
           <li key={k.n} className="flex items-center justify-between gap-3">
@@ -79,10 +79,7 @@ export function ShortcutHelp({
           </li>
         ))}
       </ul>
-      <p className="mt-3 text-2xs text-ink-faint">
-        &ldquo;Asked not to be called&rdquo;, wrong and invalid numbers have no key on purpose — they close a lead, so
-        they are always a deliberate tap.
-      </p>
+
     </div>
   );
 }

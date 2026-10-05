@@ -373,7 +373,7 @@ async function exportDonationsFile(
     });
   } catch (err) {
     console.error('donations.export error:', err);
-    res.status(500).json({ error: 'Could not build that export' });
+    res.status(500).json({ error: 'Could not download. Try again.' });
   }
 }
 
@@ -450,24 +450,41 @@ router.post('/offline', async (req, res) => {
   // DRM beats a round trip that comes back with another system's wording, and
   // it keeps an obviously bad entry off a live donation database entirely.
   const errors: string[] = [];
-  if (site !== 'hkmv' && site !== 'annadan') errors.push('Choose which site should issue the receipt');
-  else if (!isSiteConfigured(site)) errors.push(`The ${site} site is not configured on this server`);
+  if (site !== 'hkmv' && site !== 'annadan') errors.push('Pick the site for the receipt.');
+  else if (!isSiteConfigured(site)) errors.push(`The ${site} site is not connected.`);
 
   const amt = Number(amount);
-  if (!String(donor_name || '').trim()) errors.push('Donor name is required');
-  if (!String(donor_mobile || '').replace(/\D/g, '')) errors.push('A mobile number is required for the receipt');
-  if (!Number.isFinite(amt) || amt <= 0) errors.push('Enter a valid amount');
-  if (!String(reference_no || '').trim()) {
-    errors.push('A reference number is required — the UTR, cheque number or receipt book number');
+  if (!String(donor_name || '').trim()) errors.push('Enter the Donor Name.');
+  if (!String(donor_mobile || '').replace(/\D/g, '')) errors.push('Enter the Mobile Number.');
+  if (!Number.isFinite(amt) || amt <= 0) errors.push('Enter a valid amount.');
+  // The reference ties the receipt to the money: the UTR (the 12-digit UPI or
+  // bank transaction number), the cheque number, or for cash the number on
+  // the paper receipt handed over. Cash often comes with no paper receipt at
+  // all, so for cash DRM makes one up rather than refusing - it only has to be
+  // unique, because both sites refuse a second entry against the same one.
+  const ref =
+    String(reference_no || '').trim() ||
+    (payment_mode === 'cash'
+      ? `CASH-${new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }).replace(/-/g, '')}-${Math.random()
+          .toString(36)
+          .slice(2, 8)
+          .toUpperCase()}`
+      : '');
+  if (!ref) {
+    errors.push(
+      payment_mode === 'cheque'
+        ? 'Enter the Cheque No.'
+        : 'Enter the Transaction ID (UTR).'
+    );
   }
   if (!['cash', 'cheque', 'upi', 'bank'].includes(String(payment_mode))) {
-    errors.push('Payment mode must be cash, cheque, upi or bank');
+    errors.push('Pick Cash, UPI, Cheque or Bank Transfer.');
   }
   if (want_prasadam && !String(prasadam_address || '').trim()) {
-    errors.push('A delivery address is needed when prasadam is requested');
+    errors.push('Enter the address for Maha Prasadam.');
   }
   if (want_certificate && !String(pan_number || '').trim()) {
-    errors.push('A PAN is needed for an 80G certificate');
+    errors.push('Enter the PAN Number for 80G Tax Exemption.');
   }
   if (errors.length) return res.status(400).json({ error: errors[0], errors });
 
@@ -500,7 +517,7 @@ router.post('/offline', async (req, res) => {
       donorEmail: donor_email ? String(donor_email).trim() : null,
       amount: amt,
       paymentMode: String(payment_mode),
-      referenceNo: String(reference_no).trim(),
+      referenceNo: ref,
       paymentDate: payment_date || null,
       sevaName: seva_name ? String(seva_name).trim() : null,
       panNumber: pan_number ? String(pan_number).trim() : null,
@@ -569,7 +586,7 @@ router.post('/offline', async (req, res) => {
             issued.externalId,
             result.personId,
             String(payment_mode),
-            String(reference_no).trim(),
+            ref,
             sevakName,
             sevakMobile,
           ]
@@ -590,8 +607,8 @@ router.post('/offline', async (req, res) => {
     synced,
     message: issued.receiptNumber
       ? `Receipt ${issued.receiptNumber} issued by the ${siteKey === 'annadan' ? 'annadan' : 'main'} site.` +
-        (synced ? '' : ' It will show in this list after the next import.')
-      : 'Donation recorded. The receipt number has not come back yet — it will appear once DCC responds.',
+        (synced ? '' : ' It will show here soon.')
+      : 'Donation saved. Receipt No. will show soon.',
   });
 });
 
@@ -672,11 +689,11 @@ router.post('/:id/resend-receipt', async (req, res) => {
 
   if (!external_ref) {
     return res.status(400).json({
-      error: 'This donation was recorded directly in DRM, so there is no site receipt to resend.',
+      error: 'This donation has no website receipt to resend.',
     });
   }
   if (!receipt_generated) {
-    return res.status(400).json({ error: 'No receipt has been issued for this donation yet.' });
+    return res.status(400).json({ error: 'No receipt yet for this donation.' });
   }
 
   try {
@@ -728,7 +745,7 @@ router.get('/:id/receipt-file', authorize('admin', 'accountant'), async (req, re
       const exists = await pool.query('SELECT 1 FROM donations WHERE id = $1', [id]);
       if (!exists.rows.length) return res.status(404).json({ error: 'Donation not found' });
       return res.status(400).json({
-        error: 'This donation has no linked site record to fetch a receipt file from.',
+        error: 'No receipt file for this donation.',
       });
     }
 

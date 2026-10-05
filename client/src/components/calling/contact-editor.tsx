@@ -63,11 +63,11 @@ export function ContactEditor({
     setClash(null);
     try {
       await apiClient.put(`/api/crm/leads/${lead.id}`, body);
-      toast(body.phone ? `Number changed to ${formatPhone(digits(phone))}` : "Contact details saved");
+      toast(body.phone ? `Number changed to ${formatPhone(digits(phone))}` : "Saved");
       await onSaved();
       onClose();
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Could not save that";
+      const message = e instanceof Error ? e.message : "Could not save. Try again.";
       setError(message);
       if (/already has that number/i.test(message)) {
         // Best effort: the refusal itself is the important part.
@@ -89,7 +89,7 @@ export function ContactEditor({
 
   return (
     <Modal
-      title="Name and numbers"
+      title="Edit name and number"
       onClose={onClose}
       footer={
         <>
@@ -120,16 +120,15 @@ export function ContactEditor({
         </Alert>
       )}
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Name" htmlFor="contact-name" className="sm:col-span-2">
+        <Field label="Donor Name" htmlFor="contact-name" className="sm:col-span-2">
           <Input
             id="contact-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="As they said it"
             autoComplete="off"
           />
         </Field>
-        <Field label="Mobile number" htmlFor="contact-phone" hint="10 digits. Changing it keeps all their history.">
+        <Field label="Mobile Number" htmlFor="contact-phone" hint="10 digits">
           <Input
             id="contact-phone"
             value={phone}
@@ -139,7 +138,7 @@ export function ContactEditor({
             invalid={!!error && /number/i.test(error)}
           />
         </Field>
-        <Field label="Other number" htmlFor="contact-alt" hint="Leave blank to remove it.">
+        <Field label="Other Number" htmlFor="contact-alt">
           <Input
             id="contact-alt"
             value={alt}

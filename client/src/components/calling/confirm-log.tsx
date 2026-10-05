@@ -64,12 +64,12 @@ export function ConfirmLog({
 
   // What will ride along with the outcome, in words.
   const extras: string[] = [];
-  if (inbound) extras.push("They rang you");
+  if (inbound) extras.push("They called you");
   if (form.followUp) extras.push(`Call back ${shortDate(form.followUp)}`);
   else if (form.customDate) extras.push(`Call back ${shortDate(istInstant(form.customDate, "10:00").toISOString())}`);
   if (form.remWhen) {
     extras.push(
-      `Promise: ${form.remOccasion.trim() || "remind me"} · ${dateTime(istInputToISO(form.remWhen))}${
+      `Promise: ${form.remOccasion.trim() || "Reminder"} · ${dateTime(istInputToISO(form.remWhen))}${
         form.remAmount ? ` · ${currency(Number(form.remAmount))}` : ""
       }`
     );
@@ -97,19 +97,19 @@ export function ConfirmLog({
       <div className={layout === "sheet" ? "mx-auto max-w-2xl" : ""}>
         {layout === "sheet" && <div className="mx-auto mb-2 h-1 w-10 rounded-pill bg-line-strong" aria-hidden />}
         <p id="confirm-log-title" className={`text-base font-semibold leading-snug ${closing ? "text-danger" : "text-ink"}`}>
-          Log &ldquo;{outcome.label}&rdquo; for {name}?
+          Save &ldquo;{outcome.label}&rdquo; for {name}?
         </p>
         <div id="confirm-log-desc" className="mt-1 space-y-0.5 text-xs text-ink-muted">
           {closing && (
             <p className="flex items-start gap-1.5 font-medium text-danger">
               <Icon name="alert" size={13} className="mt-px flex-none" />
-              This closes them — they will not come up in a calling run again.
+              They will not be called again.
             </p>
           )}
-          {qr && <p>You stay on them afterwards, so the QR can go next.</p>}
+          {qr && <p>Send the QR next.</p>}
           {extras.length > 0 && <p className="text-ink-soft">{extras.join(" · ")}</p>}
           {note && <p className="line-clamp-2 text-ink-soft">“{note}”</p>}
-          {missingCallback && <p>No callback date picked — they come back round by themselves.</p>}
+          {missingCallback && <p>No date picked. We&apos;ll try them again later.</p>}
         </div>
 
         {/* The one field worth having right here: "Donated now" with no
@@ -118,7 +118,7 @@ export function ConfirmLog({
         {donated && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <label htmlFor="confirm-donated" className="text-xs font-medium text-ink-soft">
-              How much?
+              Amount
             </label>
             <div className="w-36">
               <Input
@@ -132,7 +132,7 @@ export function ConfirmLog({
             </div>
             {!form.donatedAmount && (
               <span className="text-2xs text-ink-muted">
-                {expectedAmount ? `Blank uses ${currency(Number(expectedAmount))}, what they were hoping to give` : "Optional"}
+                {expectedAmount ? `Blank uses ${currency(Number(expectedAmount))}` : "Optional"}
               </span>
             )}
           </div>
@@ -162,7 +162,7 @@ export function ConfirmLog({
             loading={saving}
             onClick={() => onConfirm(false)}
           >
-            {canAdvance ? "Log it, stay" : "Log it"}
+            {canAdvance ? "Save, stay" : "Save"}
             {layout === "inline" && !canAdvance && <kbd className="ml-1 text-2xs font-normal opacity-70">Enter</kbd>}
           </Button>
           {canAdvance && (
@@ -181,7 +181,7 @@ export function ConfirmLog({
           )}
         </div>
         {layout === "sheet" && (
-          <p className="mt-2 text-center text-2xs text-ink-faint">Tap another outcome above to change your pick.</p>
+          <p className="mt-2 text-center text-2xs text-ink-faint">Tap another result to change.</p>
         )}
       </div>
     </div>

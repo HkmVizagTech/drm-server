@@ -86,9 +86,9 @@ router.post('/collections', async (req, res) => {
   const donorName = str(req.body?.donor_name, 160);
   const donorPhone = phone10(req.body?.donor_phone);
 
-  if (amount === null || amount <= 0) return res.status(400).json({ error: 'How much came in?' });
-  if (!donorName) return res.status(400).json({ error: 'Who gave it?' });
-  if (!donorPhone) return res.status(400).json({ error: 'A ten-digit mobile number, so the donor can be found again' });
+  if (amount === null || amount <= 0) return res.status(400).json({ error: 'Enter the amount.' });
+  if (!donorName) return res.status(400).json({ error: 'Enter the Donor Name.' });
+  if (!donorPhone) return res.status(400).json({ error: 'Enter a 10-digit mobile number.' });
 
   // A caller may only record money as their own. Anything else would make a
   // leaderboard something a person could write entries into.
@@ -112,7 +112,7 @@ router.post('/collections', async (req, res) => {
         occurredAt: when,
         leadId: str(req.body?.lead_id, 36),
         personId: str(req.body?.person_id, 36),
-        note: str(req.body?.note, 300) ?? `${donorName} — collected by PhonePe`,
+        note: str(req.body?.note, 300) ?? `${donorName}, collected by PhonePe`,
         createdBy: me,
         // The one path that reports money rather than observing it.
         verified: false,
@@ -122,7 +122,7 @@ router.post('/collections', async (req, res) => {
 
     if (!credit) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'That one is already recorded' });
+      return res.status(409).json({ error: 'Already added.' });
     }
 
     await client.query(
@@ -157,7 +157,7 @@ router.post('/collections', async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.recordCollection error:', err);
-    res.status(500).json({ error: 'Could not record that' });
+    res.status(500).json({ error: 'Could not save. Try again.' });
   } finally {
     client.release();
   }
@@ -227,7 +227,7 @@ router.get('/collections', async (req, res) => {
     });
   } catch (err) {
     console.error('crm.collections error:', err);
-    res.status(500).json({ error: 'Could not load what was collected' });
+    res.status(500).json({ error: 'Could not load collections.' });
   }
 });
 
@@ -268,7 +268,7 @@ async function exportCollections(
     });
   } catch (err) {
     console.error('crm.exportCollections error:', err);
-    res.status(500).json({ error: 'Could not build that export' });
+    res.status(500).json({ error: 'Could not download. Try again.' });
   }
 }
 
@@ -286,11 +286,11 @@ router.get('/collections/export.xlsx', (req, res) => exportCollections(req, res,
 router.post('/collections/:creditId/verify', authorize('admin', 'accountant'), async (req, res) => {
   try {
     const ok = await verifyCredit(String(req.params.creditId), req.user?.userId ?? '');
-    if (!ok) return res.status(404).json({ error: 'Nothing to check off there' });
+    if (!ok) return res.status(404).json({ error: 'Nothing to mark.' });
     res.json({ verified: true });
   } catch (err) {
     console.error('crm.verifyCollection error:', err);
-    res.status(500).json({ error: 'Could not check that off' });
+    res.status(500).json({ error: 'Could not mark. Try again.' });
   }
 });
 
@@ -306,13 +306,13 @@ router.delete('/collections/:creditId', authorize('admin', 'accountant'), async 
     const ok = await reverseCredit(
       String(req.params.creditId),
       req.user?.userId ?? '',
-      str(req.body?.reason, 300) ?? 'Could not be found on the statement'
+      str(req.body?.reason, 300) ?? 'Not in the bank statement'
     );
-    if (!ok) return res.status(404).json({ error: 'Nothing to reverse there' });
+    if (!ok) return res.status(404).json({ error: 'Nothing to undo.' });
     res.json({ reversed: true });
   } catch (err) {
     console.error('crm.reverseCollection error:', err);
-    res.status(500).json({ error: 'Could not reverse that' });
+    res.status(500).json({ error: 'Could not undo. Try again.' });
   }
 });
 
@@ -344,20 +344,20 @@ router.post('/collections/:creditId/receipt', async (req, res) => {
           AND ($2::uuid IS NULL OR c.user_id = $2::uuid)`,
       [req.params.creditId, req.user?.role === 'caller' ? me : null]
     );
-    if (!rows.length) return res.status(404).json({ error: 'No such collection' });
+    if (!rows.length) return res.status(404).json({ error: 'Entry not found.' });
     const c = rows[0];
 
     if (c.receipt_status === 'issued') {
-      return res.status(409).json({ error: 'A receipt has already been raised for this', receipt_number: c.receipt_number });
+      return res.status(409).json({ error: 'Receipt already issued.', receipt_number: c.receipt_number });
     }
     if (!c.reference) {
       return res.status(400).json({
-        error: 'Add the UTR or payment reference first — it is what makes the receipt traceable and stops a duplicate.',
+        error: 'Enter the Transaction ID (UTR) first.',
       });
     }
 
     const site = (str(req.body?.site, 20) ?? c.receipt_site) as SiteKey | null;
-    if (!site) return res.status(400).json({ error: 'Which site should issue this receipt?' });
+    if (!site) return res.status(400).json({ error: 'Pick the site for the receipt.' });
 
     await pool.query(
       `UPDATE collections SET receipt_status = 'pending', receipt_error = NULL, receipt_site = $2
@@ -382,7 +382,7 @@ router.post('/collections/:creditId/receipt', async (req, res) => {
         sevakName: c.sevak_name || undefined,
         sevakMobile: c.sevak_phone || undefined,
         enteredByName: `DRM · collected by PhonePe`,
-        note: `Collected directly and recorded in DRM. Reference ${c.reference}.`,
+        note: `Added in DRM. Transaction ID: ${c.reference}.`,
       });
 
       await pool.query(
@@ -405,12 +405,12 @@ router.post('/collections/:creditId/receipt', async (req, res) => {
       );
       if (duplicate) return res.json({ receipt_status: 'issued', duplicate: true });
       res.status(err.status && err.status < 500 ? err.status : 502).json({
-        error: err.message || 'The site refused that receipt',
+        error: err.message || 'The site did not issue the receipt. Try again.',
       });
     }
   } catch (err) {
     console.error('crm.collectionReceipt error:', err);
-    res.status(500).json({ error: 'Could not raise that receipt' });
+    res.status(500).json({ error: 'Could not issue receipt. Try again.' });
   }
 });
 

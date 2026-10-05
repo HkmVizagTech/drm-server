@@ -67,12 +67,12 @@ interface Board {
 // Urgency order. The keys match what the server groups into, and the copy says
 // what each one means rather than repeating the label.
 const BUCKETS: { key: string; title: string; caption: string; tone: "danger" | "warn" | "neutral" | "muted" }[] = [
-  { key: "missed", title: "Missed", caption: "The moment they named has passed", tone: "danger" },
-  { key: "now", title: "Right now", caption: "Within half an hour either way", tone: "warn" },
+  { key: "missed", title: "Missed", caption: "Time has passed", tone: "danger" },
+  { key: "now", title: "Right now", caption: "Within 30 minutes", tone: "warn" },
   { key: "today", title: "Later today", caption: "", tone: "neutral" },
   { key: "tomorrow", title: "Tomorrow", caption: "", tone: "neutral" },
   { key: "this_week", title: "This week", caption: "", tone: "muted" },
-  { key: "later", title: "Later", caption: "Nothing to do yet", tone: "muted" },
+  { key: "later", title: "Later", caption: "", tone: "muted" },
 ];
 
 const SNOOZE = [
@@ -86,7 +86,7 @@ const SNOOZE = [
 /** What the toast says after each action on a reminder. */
 const DONE_WORDS: Record<string, string> = {
   done: "Marked done",
-  dismiss: "Dropped",
+  dismiss: "Removed",
   reopen: "Reopened",
   snooze: "Snoozed",
 };
@@ -129,7 +129,7 @@ export default function RemindersPage() {
       setBoard(await apiClient.get<Board>(`/api/crm/reminders?${filterParams()}`));
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load reminders");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     }
   }, [filterParams]);
 
@@ -144,7 +144,7 @@ export default function RemindersPage() {
         setBoard(b);
         setError(null);
       })
-      .catch((e) => live && setError(e instanceof Error ? e.message : "Could not load reminders"))
+      .catch((e) => live && setError(e instanceof Error ? e.message : "Could not load. Try again."))
       .finally(() => live && setLoading(false));
     return () => {
       live = false;
@@ -155,10 +155,10 @@ export default function RemindersPage() {
     try {
       await apiClient.put(`/api/crm/reminders/${r.id}`, { action, minutes });
       const snoozed = action === "snooze" ? SNOOZE.find((s) => s.minutes === minutes)?.label.toLowerCase() : null;
-      toast(`${DONE_WORDS[action] ?? "Updated"}${snoozed ? ` for ${snoozed}` : ""} — ${r.lead_name || r.lead_phone}`);
+      toast(`${DONE_WORDS[action] ?? "Updated"}${snoozed ? ` for ${snoozed}` : ""} · ${r.lead_name || r.lead_phone}`);
       await load();
     } catch (e) {
-      toast.error("Could not update that reminder", e instanceof Error ? e.message : undefined);
+      toast.error("Could not update. Try again.", e instanceof Error ? e.message : undefined);
     }
   }
 
@@ -171,14 +171,14 @@ export default function RemindersPage() {
     try {
       const s = await startRun({ kind: "reminders" });
       if (s.empty || !s.session) {
-        toast.info("Nobody to call right now", "No promises are due, or a colleague has them.");
+        toast.info("No one to call right now");
         setStarting(false);
         return;
       }
-      if (s.resumed) toast.info("Carrying on where you left off");
+      if (s.resumed) toast.info("Continuing where you stopped");
       router.push(runHref(s.session.id));
     } catch (e) {
-      toast.error("Could not start calling", e instanceof Error ? e.message : undefined);
+      toast.error("Could not start calling. Try again.", e instanceof Error ? e.message : undefined);
       setStarting(false);
     }
   }
@@ -191,7 +191,7 @@ export default function RemindersPage() {
       <PageHeader
         eyebrow="Calling"
         title="Reminders"
-        subtitle="Donors who named a day, an occasion or a time — and what the temple owes them"
+        subtitle="Donors who promised to give on a day."
         actions={
           <>
             <ExportButton
@@ -200,7 +200,7 @@ export default function RemindersPage() {
               filename="reminders"
             />
             <Button icon="phoneOutgoing" loading={starting} onClick={() => void callEveryone()}>
-              Call everyone due
+              Call all due
             </Button>
           </>
         }
@@ -213,18 +213,18 @@ export default function RemindersPage() {
           setShowDone(false);
         }}
       >
-        <Field label="Whose">
+        <Field label="Show">
           <SegmentedControl
             options={[
-              { value: "everyone", label: "Everyone" },
-              { value: "mine", label: "Just mine" },
+              { value: "everyone", label: "All" },
+              { value: "mine", label: "Mine" },
             ]}
             value={mine ? "mine" : "everyone"}
             onChange={(v) => setMine(v === "mine")}
           />
         </Field>
         <div className="flex h-9.5 items-center">
-          <Checkbox checked={showDone} onChange={setShowDone} label="Include finished" />
+          <Checkbox checked={showDone} onChange={setShowDone} label="Show done" />
         </div>
       </Toolbar>
 
@@ -233,20 +233,18 @@ export default function RemindersPage() {
       {!loading && urgent > 0 && (
         <Alert
           tone="warn"
-          title={`${number(urgent)} reminder${urgent === 1 ? "" : "s"} need${urgent === 1 ? "s" : ""} you now.`}
-        >
-          These donors chose the moment themselves — being late to one is worse than being early to any of the rest.
-        </Alert>
+          title={`${number(urgent)} reminder${urgent === 1 ? "" : "s"} due now.`}
+        />
       )}
 
       {!loading && total === 0 && !showDone && (
         <Card padded={false}>
           <EmptyState
             title="No reminders yet"
-            message="When a donor says they will give on a particular day or at a festival, set a reminder during the call — the box is right under the outcome buttons on the calling screen."
+            message="Add a promise during a call."
             action={
               <Link href="/calling/start" className={buttonPrimary}>
-                Choose who to call
+                Start calling
               </Link>
             }
           />
@@ -254,7 +252,7 @@ export default function RemindersPage() {
       )}
 
       <div className="space-y-5">
-        {BUCKETS.concat(showDone ? [{ key: "done", title: "Finished", caption: "Done or dismissed", tone: "muted" }] : []).map((b) => {
+        {BUCKETS.concat(showDone ? [{ key: "done", title: "Done", caption: "", tone: "muted" }] : []).map((b) => {
           const rows = board?.buckets[b.key] ?? [];
           if (!loading && !rows.length) return null;
 
@@ -289,10 +287,10 @@ export default function RemindersPage() {
                             </Link>
                             {r.occasion && <Badge tone="brand">{r.occasion}</Badge>}
                             {r.expected_amount && (
-                              <Badge tone="good">said {currency(Number(r.expected_amount))}</Badge>
+                              <Badge tone="good">{currency(Number(r.expected_amount))}</Badge>
                             )}
                             {r.snooze_count >= 3 && (
-                              <Badge tone="warn">pushed back {r.snooze_count} times</Badge>
+                              <Badge tone="warn">Snoozed {r.snooze_count} times</Badge>
                             )}
                           </div>
 
@@ -305,10 +303,10 @@ export default function RemindersPage() {
                             <span className={b.tone === "danger" ? "font-medium text-danger" : b.tone === "warn" ? "font-medium text-warn" : ""}>
                               {whenText(r.due_at)}
                             </span>
-                            <span className="text-ink-faint"> · {`alerts ${alertSummary(r.lead_times)}`}</span>
+                            <span className="text-ink-faint"> · {`Alerts: ${alertSummary(r.lead_times)}`}</span>
                             {r.assigned_to_name && <span className="text-ink-faint"> · {r.assigned_to_name}</span>}
                             {r.donation_count ? (
-                              <span className="text-ink-faint"> · has given {currency(Number(r.total_donated ?? 0))}</span>
+                              <span className="text-ink-faint"> · gave {currency(Number(r.total_donated ?? 0))}</span>
                             ) : null}
                           </p>
                         </div>
@@ -350,15 +348,15 @@ export default function RemindersPage() {
                               size="sm"
                               className="max-sm:h-11"
                               onClick={() => void act(r, "dismiss")}
-                              title="Not happening — take it off the list without marking it done"
+                              title="Remove without marking done"
                             >
-                              Drop
+                              Remove
                             </Button>
                           </div>
                         ) : (
                           <div className="flex items-center gap-2">
                             <Badge tone={r.status === "done" ? "good" : "neutral"}>
-                              {r.status === "done" ? "Done" : "Dropped"}
+                              {r.status === "done" ? "Done" : "Removed"}
                             </Badge>
                             <Button variant="ghost" size="xs" onClick={() => void act(r, "reopen")}>
                               Reopen

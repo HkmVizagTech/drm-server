@@ -120,7 +120,7 @@ const PERIODS: { value: Period; label: string }[] = [
   { value: "last_7", label: "Last 7 days" },
   { value: "this_month", label: "This month" },
   { value: "all", label: "All time" },
-  { value: "custom", label: "Custom range" },
+  { value: "custom", label: "Pick dates" },
 ];
 
 /** IST calendar days. Resolved here because the call log takes plain from/to dates. */
@@ -325,7 +325,7 @@ function MyCalls() {
     (k: string) =>
       apiClient.get<Answer>(`/api/crm/calls?${k}`).then(
         (d) => settle(k, d, null),
-        (e) => settle(k, null, e instanceof Error ? e.message : "Could not load your calls")
+        (e) => settle(k, null, e instanceof Error ? e.message : "Could not load. Try again.")
       ),
     [settle]
   );
@@ -343,10 +343,10 @@ function MyCalls() {
     setUndoing(r.id);
     try {
       await apiClient.delete(`/api/crm/activities/${r.id}`);
-      toast(`Call with ${who(r)} undone`, { body: "Taken off the record, as if it had not been logged" });
+      toast(`Call with ${who(r)} undone`);
       await reload();
     } catch (e) {
-      toast.error("Could not undo that call", e instanceof Error ? e.message : undefined);
+      toast.error("Could not undo. Try again.", e instanceof Error ? e.message : undefined);
     } finally {
       setUndoing(null);
     }
@@ -428,9 +428,9 @@ function MyCalls() {
   const title = teamView ? "Team calls" : otherName ? `${otherName}'s calls` : "My calls";
   const periodLabel =
     period === "custom"
-      ? "in this range"
+      ? "in these dates"
       : period === "all"
-        ? "so far"
+        ? "all time"
         : PERIODS.find((p) => p.value === period)?.label.toLowerCase() ?? "";
 
   /* ------------------------------------------------------------ pieces */
@@ -449,7 +449,7 @@ function MyCalls() {
     return (
       <span className={`inline-flex items-center gap-1 text-xs ${inbound ? "font-medium text-info" : "text-ink-muted"}`}>
         <Icon name={inbound ? "phone" : "phoneOutgoing"} size={12} />
-        {inbound ? "They rang" : "Rang them"}
+        {inbound ? "They called" : "I called"}
       </span>
     );
   }
@@ -472,7 +472,7 @@ function MyCalls() {
             title={dateTime(r.next_follow_up_at)}
           >
             <Icon name="clock" size={12} />
-            Callback {dueLabel(r.next_follow_up_at)}
+            Follow-up {dueLabel(r.next_follow_up_at)}
           </span>
         )}
       </div>
@@ -511,7 +511,7 @@ function MyCalls() {
             loading={undoing === r.id}
             disabled={undoing !== null}
             onClick={() => void undo(r)}
-            title="Logged by mistake? Take it off the record (within 30 minutes)"
+            title="Undo within 30 minutes"
           >
             Undo
           </Button>
@@ -527,8 +527,8 @@ function MyCalls() {
         title="No calls match"
         message={
           leadId && !activeFilters
-            ? "No calls with this person have been logged yet."
-            : "Nothing logged matches these filters. Try a longer period, or clear them."
+            ? "No calls with this person yet."
+            : "Try a longer period or clear filters."
         }
         action={
           activeFilters ? (
@@ -542,7 +542,7 @@ function MyCalls() {
       <EmptyState
         icon="phone"
         title={period === "today" ? "No calls yet today" : "No calls in this period"}
-        message="Calls you log on the call screen appear here, with what came of each one since."
+        message="Calls you log show here."
         action={
           <Link href="/calling/start" className={buttonClass("primary", "md")}>
             <Icon name="phoneOutgoing" size={15} />
@@ -557,17 +557,17 @@ function MyCalls() {
       <PageHeader
         eyebrow="Calling"
         title={title}
-        subtitle="Every call logged — who, when, and what came of it since. Someone ringing back? Log it here."
+        subtitle="Calls you logged."
         actions={
           <>
             <Button icon="phone" onClick={() => setRangMe(true)}>
-              Someone rang me
+              Someone called me
             </Button>
             <ExportButton
               path="/api/crm/calls/export"
               params={filterQuery()}
               filename={teamView ? "team-calls" : "my-calls"}
-              hint={totals ? `${number(totals.calls)} ${plural(totals.calls, "call", "calls")} match these filters` : undefined}
+              hint={totals ? `${number(totals.calls)} ${plural(totals.calls, "call", "calls")}` : undefined}
             />
           </>
         }
@@ -609,7 +609,7 @@ function MyCalls() {
               id="calls-search"
               value={search}
               onChange={setSearch}
-              placeholder="Name, number or note…"
+              placeholder="Name, mobile or note"
               className="flex-1"
             />
             <Button
@@ -624,34 +624,34 @@ function MyCalls() {
           </div>
         </Field>
         <div className={showFilters ? "contents" : "hidden md:contents"}>
-          <Field label="Outcome" className="w-full sm:w-48">
+          <Field label="Call result" className="w-full sm:w-48">
             <OutcomePicker
               options={outcomeOptions}
               value={outcomes}
               onChange={(next) => setParams({ disposition: next.length ? next.join(",") : null })}
             />
           </Field>
-          <Field label="Got through" className="w-full sm:w-36">
+          <Field label="Answered" className="w-full sm:w-36">
             <Select
               value={connected}
               onChange={(v) => setParams({ connected: v || null })}
-              ariaLabel="Got through"
+              ariaLabel="Answered"
               options={[
                 { value: "", label: "Any" },
-                { value: "true", label: "Yes, spoke" },
+                { value: "true", label: "Yes" },
                 { value: "false", label: "No" },
               ]}
             />
           </Field>
-          <Field label="Direction" className="w-full sm:w-44">
+          <Field label="Who called" className="w-full sm:w-44">
             <Select
               value={direction}
               onChange={(v) => setParams({ direction: v || null })}
-              ariaLabel="Direction"
+              ariaLabel="Who called"
               options={[
                 { value: "", label: "Any" },
-                { value: "outbound", label: "I rang them" },
-                { value: "inbound", label: "They rang me" },
+                { value: "outbound", label: "I called them" },
+                { value: "inbound", label: "They called me" },
               ]}
             />
           </Field>
@@ -676,7 +676,7 @@ function MyCalls() {
             </span>
             <button
               type="button"
-              aria-label="Show everyone's calls, not just this person's"
+              aria-label="Show all calls"
               onClick={() => setParams({ lead_id: null })}
               className="grid h-8 w-8 flex-none place-items-center rounded-full text-brand-700 transition-colors hover:bg-brand-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45"
             >
@@ -698,7 +698,7 @@ function MyCalls() {
           sub={periodLabel}
         />
         <StatTile
-          label="Got through"
+          label="Answered"
           value={number(totals?.connected ?? 0)}
           loading={loading && !data}
           accent="brand"
@@ -709,25 +709,23 @@ function MyCalls() {
           value={number(totals?.people ?? 0)}
           loading={loading && !data}
           icon="users"
-          sub="different people"
         />
         <StatTile
-          label="They rang me"
+          label="They called me"
           value={number(totals?.inbound ?? 0)}
           loading={loading && !data}
           icon="phone"
-          sub="calls that came in"
         />
         <StatTile
-          label="Gave since"
+          label="Gave after"
           value={number(totals?.gave_since ?? 0)}
           loading={loading && !data}
           accent="good"
           icon="rupee"
-          sub="donated after a call"
+          sub="after a call"
         />
         {!!totals?.seconds && totals.seconds > 0 && (
-          <StatTile label="Talk time" value={talkTime(totals.seconds)} icon="clock" sub="where recorded" />
+          <StatTile label="Talk time" value={talkTime(totals.seconds)} icon="clock" />
         )}
       </div>
 
@@ -735,8 +733,8 @@ function MyCalls() {
       {totals && totals.by_outcome.length > 0 && (
         <Card className="mb-4" padded={false}>
           <div className="px-4 pb-1 pt-3.5">
-            <h2 className="text-sm font-semibold text-ink">What came of them</h2>
-            <p className="text-xs text-ink-muted">Tap an outcome to see only those calls.</p>
+            <h2 className="text-sm font-semibold text-ink">Call results</h2>
+            <p className="text-xs text-ink-muted">Tap one to filter.</p>
           </div>
           <div className="grid gap-x-6 px-2 pb-2 sm:grid-cols-2 lg:grid-cols-3">
             {totals.by_outcome.map((o) => {
@@ -755,7 +753,7 @@ function MyCalls() {
                 >
                   <span className="flex items-baseline justify-between gap-3 text-sm">
                     <span className={`truncate ${on ? "font-semibold text-brand-800" : "text-ink-soft"}`}>
-                      {o.label || (slug ? slug.replace(/_/g, " ") : "No outcome")}
+                      {o.label || (slug ? slug.replace(/_/g, " ") : "No result")}
                     </span>
                     <span className="flex-none font-semibold tabular-nums text-ink">{number(o.n)}</span>
                   </span>
@@ -798,7 +796,7 @@ function MyCalls() {
                     <Card key={r.id} padded={false} className="p-4">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <p className="truncate font-medium text-ink">{r.lead_name || "Name not known"}</p>
+                          <p className="truncate font-medium text-ink">{r.lead_name || "No name"}</p>
                           <p className="text-xs tabular-nums text-ink-muted">{formatPhone(r.lead_phone)}</p>
                         </div>
                         <div className="flex-none text-right">
@@ -810,7 +808,7 @@ function MyCalls() {
                       {r.note && <p className="mt-1.5 break-words text-sm text-ink-soft">{r.note}</p>}
                       {details(r)}
                       <div className="mt-2.5 border-t border-line-soft pt-2.5">
-                        <p className="mb-1 text-2xs font-semibold uppercase tracking-wider text-ink-faint">Since</p>
+                        <p className="mb-1 text-2xs font-semibold uppercase tracking-wider text-ink-faint">Now</p>
                         {since(r)}
                       </div>
                       <div className="mt-3 flex flex-wrap gap-2">{actions(r, true)}</div>
@@ -828,9 +826,9 @@ function MyCalls() {
         <TableShell>
           <Thead>
             <Th className="w-24">Time</Th>
-            <Th>Who</Th>
-            <Th>The call</Th>
-            <Th>Since then</Th>
+            <Th>Donor</Th>
+            <Th>Call</Th>
+            <Th>Now</Th>
             <Th align="right"> </Th>
           </Thead>
           {loading && !data ? (
@@ -855,7 +853,7 @@ function MyCalls() {
                         <div className="mt-0.5">{directionTag(r)}</div>
                       </Td>
                       <Td className="align-top">
-                        <div className="font-medium text-ink">{r.lead_name || "Name not known"}</div>
+                        <div className="font-medium text-ink">{r.lead_name || "No name"}</div>
                         <div className="text-xs tabular-nums text-ink-muted">{formatPhone(r.lead_phone)}</div>
                       </Td>
                       <Td className="max-w-sm align-top">

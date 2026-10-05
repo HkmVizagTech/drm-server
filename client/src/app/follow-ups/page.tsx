@@ -71,21 +71,21 @@ const BUCKETS: Bucket[] = [
   {
     key: "overdue",
     title: "Overdue",
-    caption: "Promised a call that hasn't happened",
+    caption: "Should have been called",
     query: "due=overdue",
     tone: "danger",
   },
   {
     key: "today",
     title: "Due today",
-    caption: "Booked for today",
+    caption: "Call today",
     query: "due=today_only",
     tone: "warn",
   },
   {
     key: "upcoming",
     title: "Coming up",
-    caption: "Booked for later — nothing to do yet",
+    caption: "Later",
     query: "due=upcoming",
     tone: "neutral",
   },
@@ -167,7 +167,7 @@ export default function FollowUpsPage() {
       setData(await fetchBuckets());
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load follow-ups");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     }
   }, [fetchBuckets]);
 
@@ -182,7 +182,7 @@ export default function FollowUpsPage() {
         setData(d);
         setError(null);
       })
-      .catch((e) => live && setError(e instanceof Error ? e.message : "Could not load follow-ups"))
+      .catch((e) => live && setError(e instanceof Error ? e.message : "Could not load. Try again."))
       .finally(() => live && setLoading(false));
     return () => {
       live = false;
@@ -204,17 +204,17 @@ export default function FollowUpsPage() {
       toast(`${l.name || l.phone} moved to ${days === 1 ? "tomorrow" : "next week"}`);
       await load();
     } catch (e) {
-      toast.error("Could not move that callback", e instanceof Error ? e.message : undefined);
+      toast.error("Could not move. Try again.", e instanceof Error ? e.message : undefined);
     }
   }
 
   async function drop(l: Lead) {
     try {
       await apiClient.put(`/api/crm/leads/${l.id}`, { next_follow_up_at: null });
-      toast(`Callback for ${l.name || l.phone} dropped`);
+      toast(`Follow-up for ${l.name || l.phone} removed`);
       await load();
     } catch (e) {
-      toast.error("Could not drop that callback", e instanceof Error ? e.message : undefined);
+      toast.error("Could not remove. Try again.", e instanceof Error ? e.message : undefined);
     }
   }
 
@@ -228,14 +228,14 @@ export default function FollowUpsPage() {
     try {
       const s = await startRun({ kind: "follow_ups" });
       if (s.empty || !s.session) {
-        toast.info("Nobody to call right now", "No callbacks are due, or a colleague has them.");
+        toast.info("No one to call right now");
         setStarting(false);
         return;
       }
-      if (s.resumed) toast.info("Carrying on where you left off");
+      if (s.resumed) toast.info("Continuing where you stopped");
       router.push(runHref(s.session.id));
     } catch (e) {
-      toast.error("Could not start calling", e instanceof Error ? e.message : undefined);
+      toast.error("Could not start calling. Try again.", e instanceof Error ? e.message : undefined);
       setStarting(false);
     }
   }
@@ -255,7 +255,7 @@ export default function FollowUpsPage() {
       <PageHeader
         eyebrow="Calling"
         title="Follow-ups"
-        subtitle="Calls the temple said it would make"
+        subtitle="People we said we would call back."
         actions={
           <>
             {/* Who the board is for, as a switch rather than a primary button.
@@ -266,18 +266,18 @@ export default function FollowUpsPage() {
                 filter on and a control that silently does nothing is worse. */}
             <SegmentedControl
               options={[
-                { value: "everyone", label: "Everyone" },
-                { value: "mine", label: "Just mine" },
+                { value: "everyone", label: "All" },
+                { value: "mine", label: "Mine" },
               ]}
               value={mineOnly ? "mine" : "everyone"}
               onChange={(v) => setMineOnly(v === "mine")}
               className={me ? "" : "pointer-events-none opacity-45"}
             />
             <Button variant="secondary" icon="bell" onClick={() => setAdding(true)}>
-              Someone promised to give
+              Add a promise
             </Button>
             <Button icon="phoneOutgoing" loading={starting} onClick={() => void callThese()}>
-              Start calling these
+              Start calling
             </Button>
           </>
         }
@@ -295,7 +295,7 @@ export default function FollowUpsPage() {
             onChange={setBatch}
             ariaLabel="Sheet"
             options={[
-              { value: "", label: "Every sheet" },
+              { value: "", label: "All sheets" },
               { value: "none", label: "Not from a sheet" },
               ...(config?.batches ?? []).map((b) => ({
                 value: b.id,
@@ -313,11 +313,11 @@ export default function FollowUpsPage() {
               onChange={setPreacher}
               ariaLabel="Preacher"
               options={[
-                { value: "", label: "Anyone's" },
+                { value: "", label: "Any" },
                 { value: "none", label: "No preacher" },
                 ...config.preachers.map((p) => ({
                   value: p.id,
-                  label: p.name ? `${p.code} — ${p.name}` : p.code,
+                  label: p.name ? `${p.code} · ${p.name}` : p.code,
                 })),
               ]}
             />
@@ -333,8 +333,8 @@ export default function FollowUpsPage() {
             }}
             ariaLabel="Caller"
             options={[
-              { value: "", label: "Everyone" },
-              { value: "unassigned", label: "Unassigned" },
+              { value: "", label: "All" },
+              { value: "unassigned", label: "No caller" },
               ...(config?.users ?? []).map((u) => ({ value: u.id, label: u.name })),
             ]}
           />
@@ -345,7 +345,7 @@ export default function FollowUpsPage() {
             id="follow-ups-search"
             value={search}
             onChange={setSearch}
-            placeholder="Name, number or town"
+            placeholder="Name, mobile or city"
           />
         </Field>
       </Toolbar>
@@ -353,9 +353,7 @@ export default function FollowUpsPage() {
       {error && <Alert tone="danger">{error}</Alert>}
 
       {!loading && overdueCount === 0 && (
-        <Alert tone="good" title={`Nothing is overdue${extra ? " in what you are looking at" : ""}.`}>
-          Every callback that was promised has either happened or is still in the future.
-        </Alert>
+        <Alert tone="good" title="Nothing overdue." />
       )}
 
       <div className="space-y-6">
@@ -395,7 +393,7 @@ export default function FollowUpsPage() {
                           {l.status_label && <Badge tone="info">{l.status_label}</Badge>}
                           {l.donation_count ? (
                             <span className="text-xs text-ink-muted">
-                              given {currency(Number(l.total_donated ?? 0))}
+                              gave {currency(Number(l.total_donated ?? 0))}
                             </span>
                           ) : null}
                         </div>
@@ -405,8 +403,8 @@ export default function FollowUpsPage() {
                               ? `${shortDate(l.next_follow_up_at)} · ${dueLabel(l.next_follow_up_at)}`
                               : ""}
                           </span>
-                          {l.follow_up_note && <> — “{l.follow_up_note}”</>}
-                          {!l.follow_up_note && l.remarks && <> — “{l.remarks}”</>}
+                          {l.follow_up_note && <> · “{l.follow_up_note}”</>}
+                          {!l.follow_up_note && l.remarks && <> · “{l.remarks}”</>}
                           {l.assigned_to_name && <> · {l.assigned_to_name}</>}
                         </p>
                       </div>
@@ -445,9 +443,9 @@ export default function FollowUpsPage() {
                           size="sm"
                           className="max-sm:h-11"
                           onClick={() => void drop(l)}
-                          title="Remove the callback without changing the lead"
+                          title="Remove follow-up"
                         >
-                          Drop
+                          Remove
                         </Button>
                       </div>
                     </li>
@@ -462,16 +460,16 @@ export default function FollowUpsPage() {
       {!loading && !Object.values(data).some((r) => r.length) && (
         <Card padded={false} className="mt-5">
           <EmptyState
-            title={extra ? "Nothing matches that" : "No callbacks booked"}
+            title={extra ? "No match" : "No follow-ups yet"}
             message={
               extra
-                ? "Try a wider sheet or clear the filters."
-                : "Follow-ups appear here as callers book them during calls, and you can add one yourself when a donor rings the temple."
+                ? "Clear filters to see more."
+                : "Follow-ups you add on calls show here."
             }
             action={
               <Link href="/calling/start" className={buttonClass("primary", "md")}>
                 <Icon name="phoneOutgoing" size={15} />
-                Choose who to call
+                Start calling
               </Link>
             }
           />
@@ -484,7 +482,7 @@ export default function FollowUpsPage() {
           onClose={() => setAdding(false)}
           onDone={async () => {
             setAdding(false);
-            toast.success("Promise recorded", "You will be alerted before the day.");
+            toast.success("Promise saved");
             await load();
           }}
         />
@@ -533,7 +531,7 @@ function PromiseDialog({
 
   return (
     <Modal
-      title="Someone promised to give"
+      title="Add a promise"
       onClose={onClose}
       footer={
         <>
@@ -562,25 +560,22 @@ function PromiseDialog({
                 });
                 await onDone();
               } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not record that");
+                setError(e instanceof Error ? e.message : "Could not save. Try again.");
                 setBusy(false);
               }
             }}
           >
-            {busy ? "Saving…" : "Record it"}
+            {busy ? "Saving…" : "Save"}
           </Button>
         </>
       }
     >
       {error && <Alert tone="danger">{error}</Alert>}
 
-      <p className="mb-4 text-sm text-ink-soft">
-        For a donor who rang the temple and named a date. DRM finds them by number — or adds them if they are new —
-        books the callback, and alerts you before the day arrives.
-      </p>
+
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Their number" htmlFor="promise-phone" required>
+        <Field label="Mobile Number" htmlFor="promise-phone" required>
           <Input
             id="promise-phone"
             value={phone}
@@ -590,16 +585,16 @@ function PromiseDialog({
             className="tabular-nums"
           />
         </Field>
-        <Field label="Their name" htmlFor="promise-name">
+        <Field label="Donor Name" htmlFor="promise-name">
           <Input
             id="promise-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Left blank if you did not catch it"
+            placeholder="Optional"
           />
         </Field>
 
-        <Field label="When they said they would give" htmlFor="promise-when" required>
+        <Field label="Date and time" htmlFor="promise-when" required>
           <Input
             id="promise-when"
             type="datetime-local"
@@ -607,7 +602,7 @@ function PromiseDialog({
             onChange={(e) => setWhen(e.target.value)}
           />
         </Field>
-        <Field label="How much they said" htmlFor="promise-amount">
+        <Field label="Amount" htmlFor="promise-amount">
           <Input
             id="promise-amount"
             value={amount}
@@ -618,7 +613,7 @@ function PromiseDialog({
           />
         </Field>
 
-        <Field label="The occasion they named" htmlFor="promise-occasion">
+        <Field label="Occasion" htmlFor="promise-occasion">
           <Input
             id="promise-occasion"
             value={occasion}
@@ -626,29 +621,29 @@ function PromiseDialog({
             placeholder="e.g. Govardhan Puja, after salary day"
           />
         </Field>
-        <Field label="Who should ring them">
+        <Field label="Caller">
           <Select
             value={assignee}
             onChange={setAssignee}
-            ariaLabel="Who should ring them"
+            ariaLabel="Caller"
             options={[{ value: "", label: "Me" }, ...users.map((u) => ({ value: u.id, label: u.name }))]}
           />
         </Field>
 
-        <Field label="What they said, in their words" htmlFor="promise-note" className="sm:col-span-2">
+        <Field label="Note" htmlFor="promise-note" className="sm:col-span-2">
           <Textarea
             id="promise-note"
             value={note}
             onChange={(e) => setNote(e.target.value)}
             rows={2}
-            placeholder="Read back on the call — worth the extra few seconds now."
+            placeholder="What they said"
           />
         </Field>
 
         {/* The alerts. More than one, because a promise made weeks out needs
             warning long before the morning it falls due — which is the whole
             reason this is a reminder and not just a date on a board. */}
-        <Field label="Warn me" className="sm:col-span-2">
+        <Field label="Remind me" className="sm:col-span-2">
           <div className="mt-1.5">
             <AlertPicker value={alerts} onChange={setAlerts} options={ALERT_OPTIONS} />
           </div>

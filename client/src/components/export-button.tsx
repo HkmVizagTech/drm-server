@@ -100,7 +100,7 @@ export function ExportButton({
     try {
       await download(`${path}.${format}${query()}`, `${filename}-${istToday()}.${format}`);
     } catch (e) {
-      setError((e as Error).message || "The download failed");
+      setError((e as Error).message || "Download failed. Try again.");
     } finally {
       setBusy(null);
     }
@@ -113,13 +113,13 @@ export function ExportButton({
           {
             label: "Excel (.xlsx)",
             icon: "sheet",
-            hint: hint ?? "Opens cleanly, keeps phone numbers readable",
+            hint: hint ?? "Opens in Excel",
             onSelect: () => void run("xlsx"),
           },
           {
             label: "CSV (.csv)",
             icon: "fileText",
-            hint: "For importing into another system",
+            hint: "For other systems",
             onSelect: () => void run("csv"),
           },
         ]}

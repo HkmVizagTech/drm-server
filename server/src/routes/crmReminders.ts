@@ -242,7 +242,7 @@ async function exportRemindersFile(
     });
   } catch (err) {
     console.error('crm.exportReminders error:', err);
-    res.status(500).json({ error: 'Could not build that export' });
+    res.status(500).json({ error: 'Could not download. Try again.' });
   }
 }
 
@@ -323,9 +323,9 @@ router.get('/reminders/alerts', async (req, res) => {
 router.post('/leads/:id/reminders', async (req, res) => {
   const b = req.body ?? {};
   const due = asDate(b.due_at);
-  if (!due) return res.status(400).json({ error: 'When should this remind you?' });
+  if (!due) return res.status(400).json({ error: 'Pick a date and time.' });
   const title = str(b.title, 200);
-  if (!title) return res.status(400).json({ error: 'Say what the reminder is for' });
+  if (!title) return res.status(400).json({ error: 'Write what the reminder is for.' });
 
   try {
     const result = await pool.query(
@@ -406,7 +406,7 @@ router.put('/reminders/:id', async (req, res) => {
   const action = String(b.action ?? 'update');
 
   if (!(await mayTouchReminder(req.params.id, req.user))) {
-    return res.status(404).json({ error: 'No such reminder' });
+    return res.status(404).json({ error: 'Reminder not found.' });
   }
 
   try {
@@ -479,7 +479,7 @@ router.put('/reminders/:id', async (req, res) => {
 
 router.delete('/reminders/:id', async (req, res) => {
   if (!(await mayTouchReminder(req.params.id, req.user))) {
-    return res.status(404).json({ error: 'No such reminder' });
+    return res.status(404).json({ error: 'Reminder not found.' });
   }
 
   try {

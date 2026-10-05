@@ -77,7 +77,7 @@ export default function SubscriptionsPage() {
       <PageHeader
         eyebrow="Donors"
         title="Recurring donations"
-        subtitle="Standing donations and when each one is next due."
+        subtitle="Monthly, quarterly and yearly donations"
         actions={
           <>
             <ExportButton
@@ -86,7 +86,7 @@ export default function SubscriptionsPage() {
               filename="recurring-donations"
             />
             <Button icon="plus" onClick={() => setShowModal(true)}>
-              New subscription
+              Add recurring
             </Button>
           </>
         }
@@ -106,7 +106,7 @@ export default function SubscriptionsPage() {
           <Th align="right">Amount</Th>
           <Th>Frequency</Th>
           <Th>Purpose</Th>
-          <Th>Next charge</Th>
+          <Th>Next due</Th>
           <Th>Status</Th>
         </Thead>
         {subscriptions.length === 0 ? (
@@ -115,8 +115,8 @@ export default function SubscriptionsPage() {
               <td colSpan={6}>
                 <EmptyState
                   icon="refresh"
-                  title="No recurring donations here"
-                  message="Nothing matches this status. Try another tab, or set one up with the button above."
+                  title="No recurring donations"
+                  message="Try another tab."
                 />
               </td>
             </tr>
@@ -148,7 +148,7 @@ export default function SubscriptionsPage() {
           </Tbody>
         )}
       </TableShell>
-      <p className="mt-4 text-sm text-ink-muted">{number(total)} total records</p>
+      <p className="mt-4 text-sm text-ink-muted">{number(total)} total</p>
 
       {showModal && <NewSubscriptionModal onClose={() => setShowModal(false)} onAdded={fetchData} />}
     </div>
@@ -187,7 +187,7 @@ function NewSubscriptionModal({ onClose, onAdded }: { onClose: () => void; onAdd
       onAdded();
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create subscription");
+      setError(err instanceof Error ? err.message : "Could not save. Try again.");
     } finally {
       setLoading(false);
     }
@@ -207,7 +207,7 @@ function NewSubscriptionModal({ onClose, onAdded }: { onClose: () => void; onAdd
               `form` is what still ties it to the form's submit handler, and
               with it Enter in any field does the same thing the button does. */}
           <Button type="submit" form="new-subscription" loading={loading}>
-            Create subscription
+            Save
           </Button>
         </>
       }
@@ -215,17 +215,17 @@ function NewSubscriptionModal({ onClose, onAdded }: { onClose: () => void; onAdd
       <form id="new-subscription" onSubmit={handleSubmit} className="space-y-4">
         {error && <Alert tone="danger">{error}</Alert>}
 
-        <Field label="Donor name" htmlFor="sub-name" required>
+        <Field label="Donor Name" htmlFor="sub-name" required>
           <Input
             id="sub-name"
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
             required
-            placeholder="As it should read on the receipt"
+            placeholder="As on the receipt"
           />
         </Field>
 
-        <Field label="Phone number" htmlFor="sub-phone" required>
+        <Field label="Mobile Number" htmlFor="sub-phone" required>
           <Input
             id="sub-phone"
             value={form.phone}
@@ -235,7 +235,7 @@ function NewSubscriptionModal({ onClose, onAdded }: { onClose: () => void; onAdd
           />
         </Field>
 
-        <Field label="Amount per cycle (₹)" htmlFor="sub-amount" required>
+        <Field label="Amount (₹)" htmlFor="sub-amount" required>
           <Input
             id="sub-amount"
             type="number"

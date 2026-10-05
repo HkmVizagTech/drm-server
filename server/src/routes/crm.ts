@@ -334,7 +334,7 @@ router.put('/dispositions/:slug', authorize('admin'), async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     console.error('crm.putDisposition error:', err);
-    res.status(500).json({ error: 'Could not save that call outcome' });
+    res.status(500).json({ error: 'Could not save call result.' });
   }
 });
 
@@ -597,7 +597,7 @@ router.get('/leads/sample.xlsx', async (_req, res) => {
     res.send(buffer);
   } catch (err) {
     console.error('crm.leadSampleXlsx error:', err);
-    res.status(500).json({ error: 'Could not build the sample file' });
+    res.status(500).json({ error: 'Could not download sample file.' });
   }
 });
 
@@ -660,7 +660,7 @@ async function syncAbandoned(
 
   for (const site of sites) {
     if (!isSiteConfigured(site)) {
-      const error = 'Not connected — its URL and internal secret are not set on DRM, so it was not asked.';
+      const error = 'Not connected.';
       // Not marked as checked: it was not. Only the reason is recorded, so a
       // site that is simply not connected does not also claim a timestamp.
       await pool.query(
@@ -1103,7 +1103,7 @@ router.get('/leads/abandoned', async (req, res) => {
     });
   } catch (err) {
     console.error('crm.abandoned error:', err);
-    res.status(500).json({ error: 'Could not load the unfinished donations' });
+    res.status(500).json({ error: 'Could not load Nearly gave.' });
   }
 });
 
@@ -1170,7 +1170,7 @@ async function exportAbandonedFile(
     });
   } catch (err) {
     console.error('crm.exportAbandoned error:', err);
-    res.status(500).json({ error: 'Could not build that export' });
+    res.status(500).json({ error: 'Could not download. Try again.' });
   }
 }
 
@@ -1212,7 +1212,7 @@ router.post('/leads/abandoned/:id/dismiss', async (req, res) => {
         RETURNING id`,
       [req.params.id, req.user?.userId ?? null]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'No such attempt' });
+    if (!r.rows.length) return res.status(404).json({ error: 'Not found.' });
     res.json({ dismissed: true, attempts: r.rows.length });
   } catch (err) {
     console.error('crm.dismissAbandoned error:', err);
@@ -1372,7 +1372,7 @@ router.post('/leads/abandoned/adopt-bulk', async (req, res) => {
   let assignTo: string | null = me;
   if (b.assign === 'none') assignTo = null;
   else if (b.assign && b.assign !== 'me') {
-    if (!elevated) return res.status(403).json({ error: 'Only an admin can hand leads to somebody else' });
+    if (!elevated) return res.status(403).json({ error: 'Only an admin can give leads to others.' });
     assignTo = str(b.assign, 36);
   }
 
@@ -1399,7 +1399,7 @@ router.post('/leads/abandoned/adopt-bulk', async (req, res) => {
 router.post('/leads/abandoned/adopt', async (req, res) => {
   const b = req.body ?? {};
   const phone = normalizePhone(b.phone);
-  if (!isDialable(phone)) return res.status(400).json({ error: 'That is not a number DRM can ring' });
+  if (!isDialable(phone)) return res.status(400).json({ error: 'Enter a 10-digit mobile number.' });
 
   try {
     const gave = await pool.query(
@@ -1411,7 +1411,7 @@ router.post('/leads/abandoned/adopt', async (req, res) => {
     const last = gave.rows[0]?.last_gift ? new Date(gave.rows[0].last_gift) : null;
     if (last && b.attempted_at && last >= new Date(String(b.attempted_at))) {
       return res.status(409).json({
-        error: 'They gave after that attempt — there is nothing to chase. Refresh the list.',
+        error: 'They have already donated. Refresh the list.',
       });
     }
 
@@ -1598,7 +1598,7 @@ async function upsertLead(
   userId: string | null
 ): Promise<{ lead: Record<string, unknown>; created: boolean }> {
   const phone = normalizePhone(input.phone);
-  if (!phone) throw Object.assign(new Error('A phone number is required'), { status: 400 });
+  if (!phone) throw Object.assign(new Error('Enter a mobile number.'), { status: 400 });
 
   const person = await pool.query(`SELECT id, name, email FROM people WHERE right(regexp_replace(phone,'\\D','','g'), 10) = $1 LIMIT 1`, [phone]);
   const personId = person.rows[0]?.id ?? null;
@@ -1699,10 +1699,10 @@ router.post('/promises', async (req, res) => {
   const b = req.body ?? {};
   const due = b.due_at ? new Date(String(b.due_at)) : null;
   if (!due || Number.isNaN(due.getTime())) {
-    return res.status(400).json({ error: 'When did they say they would give?' });
+    return res.status(400).json({ error: 'Pick the promise date.' });
   }
   if (!normalizePhone(b.phone)) {
-    return res.status(400).json({ error: 'A phone number is required' });
+    return res.status(400).json({ error: 'Enter a mobile number.' });
   }
 
   const client = await pool.connect();
@@ -1776,7 +1776,7 @@ router.post('/promises', async (req, res) => {
         lead.id,
         req.user?.userId ?? null,
         due.toISOString(),
-        `They rang and said they would give. ${title}${b.occasion ? ` — ${String(b.occasion)}` : ''}`,
+        `They called and promised. ${title}${b.occasion ? `, ${String(b.occasion)}` : ''}`,
       ]
     );
 
@@ -1787,7 +1787,7 @@ router.post('/promises', async (req, res) => {
     const status = (err as { status?: number }).status ?? 500;
     if (status === 400) return res.status(400).json({ error: (err as Error).message });
     console.error('crm.promise error:', err);
-    res.status(500).json({ error: 'Could not record that promise' });
+    res.status(500).json({ error: 'Could not save promise. Try again.' });
   } finally {
     client.release();
   }
@@ -1914,10 +1914,10 @@ router.delete('/leads/:id', authorize('admin'), async (req, res) => {
 router.post('/calls/outside', async (req, res) => {
   const b = req.body ?? {};
   const phone = normalizePhone(b.phone);
-  if (!isDialable(phone)) return res.status(400).json({ error: 'A phone number is required' });
+  if (!isDialable(phone)) return res.status(400).json({ error: 'Enter a mobile number.' });
 
   const disposition = str(b.disposition, 30);
-  if (!disposition) return res.status(400).json({ error: 'Pick what came of the call' });
+  if (!disposition) return res.status(400).json({ error: 'Pick a call result.' });
 
   try {
     const d = await pool.query(
@@ -1925,7 +1925,7 @@ router.post('/calls/outside', async (req, res) => {
          FROM crm_dispositions WHERE slug = $1`,
       [disposition]
     );
-    if (!d.rows.length) return res.status(400).json({ error: `Unknown call outcome "${disposition}"` });
+    if (!d.rows.length) return res.status(400).json({ error: `Unknown call result "${disposition}".` });
 
     const { lead, created } = await upsertLead(
       {
@@ -1964,7 +1964,7 @@ router.post('/calls/outside', async (req, res) => {
     const status = (err as { status?: number }).status ?? 500;
     if (status === 400) return res.status(400).json({ error: (err as Error).message });
     console.error('crm.outsideCall error:', err);
-    res.status(500).json({ error: 'Could not record that call' });
+    res.status(500).json({ error: 'Could not save call. Try again.' });
   }
 });
 
@@ -1991,7 +1991,7 @@ router.put('/leads/:id', async (req, res) => {
     let newPhone: string | null = null;
     if (b.phone !== undefined && b.phone !== null && String(b.phone).trim() !== '') {
       const p = normalizePhone(b.phone);
-      if (!isDialable(p)) return res.status(400).json({ error: 'That is not a 10-digit mobile number' });
+      if (!isDialable(p)) return res.status(400).json({ error: 'Enter a 10-digit mobile number.' });
       if (p !== before.rows[0].phone) {
         const clash = await pool.query(`SELECT id, name FROM leads WHERE phone = $1 AND id <> $2`, [p, req.params.id]);
         if (clash.rows.length) {
@@ -2007,7 +2007,7 @@ router.put('/leads/:id', async (req, res) => {
     if (b.alt_phone === null || (typeof b.alt_phone === 'string' && b.alt_phone.trim() === '')) altPhone = null;
     else if (b.alt_phone !== undefined) {
       const a = normalizePhone(b.alt_phone);
-      if (!isDialable(a)) return res.status(400).json({ error: 'The other number is not a 10-digit mobile number' });
+      if (!isDialable(a)) return res.status(400).json({ error: 'Other number must be 10 digits.' });
       altPhone = a;
     }
 
@@ -2136,7 +2136,7 @@ async function logCallForLead(
   user: { userId?: string; role?: string } | null
 ): Promise<{ activity: Record<string, unknown>; lead: Record<string, unknown>; reminder: unknown }> {
   const disposition = str(b.disposition, 30);
-  if (!disposition) throw Object.assign(new Error('Pick what came of the call'), { status: 400 });
+  if (!disposition) throw Object.assign(new Error('Pick a call result.'), { status: 400 });
 
   const client = await pool.connect();
   try {
@@ -2169,7 +2169,7 @@ async function logCallForLead(
     );
     if (!d.rows.length) {
       await client.query('ROLLBACK');
-      throw Object.assign(new Error(`Unknown call outcome "${disposition}"`), { status: 400 });
+      throw Object.assign(new Error(`Unknown call result "${disposition}".`), { status: 400 });
     }
 
     // The caller may say otherwise - a "no answer" that actually connected and
@@ -2449,7 +2449,7 @@ router.post('/leads/:id/call', async (req, res) => {
     const status = (err as { status?: number }).status;
     if (status) return res.status(status).json({ error: (err as Error).message });
     console.error('crm.logCall error:', err);
-    res.status(500).json({ error: 'Could not log that call' });
+    res.status(500).json({ error: 'Could not save call. Try again.' });
   }
 });
 
@@ -2457,7 +2457,7 @@ router.post('/leads/:id/call', async (req, res) => {
 // what they heard at the temple.
 router.post('/leads/:id/note', async (req, res) => {
   const note = str(req.body?.note, 2000);
-  if (!note) return res.status(400).json({ error: 'Write something first' });
+  if (!note) return res.status(400).json({ error: 'Write a note first.' });
   try {
     const result = await pool.query(
       `INSERT INTO lead_activities (lead_id, user_id, kind, note) VALUES ($1,$2,$3,$4) RETURNING *`,
@@ -2502,7 +2502,7 @@ router.post('/leads/:id/follow-up', async (req, res) => {
 router.post('/leads/bulk', authorize('admin', 'accountant'), async (req, res) => {
   const { ids, action } = req.body ?? {};
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'Select at least one lead' });
-  if (ids.length > 5000) return res.status(400).json({ error: 'Too many at once - filter down and work in batches' });
+  if (ids.length > 5000) return res.status(400).json({ error: 'Too many selected. Pick 5000 or fewer.' });
 
   try {
     let result;
@@ -2568,7 +2568,7 @@ router.post('/leads/bulk', authorize('admin', 'accountant'), async (req, res) =>
     res.json({ requested: ids.length, updated: result.rowCount ?? 0 });
   } catch (err) {
     console.error('crm.bulk error:', err);
-    res.status(500).json({ error: 'Could not apply that to the selected leads' });
+    res.status(500).json({ error: 'Could not update leads. Try again.' });
   }
 });
 
@@ -2674,7 +2674,7 @@ router.post('/leads/from-people', authorize('admin', 'accountant'), async (req, 
     res.json({ matched: people.rows.length, added, already_leads: existing });
   } catch (err) {
     console.error('crm.fromPeople error:', err);
-    res.status(500).json({ error: 'Could not build that list' });
+    res.status(500).json({ error: 'Could not make the list. Try again.' });
   }
 });
 
@@ -2767,17 +2767,17 @@ router.post('/leads/import/preview', authorize('admin', 'accountant'), async (re
       .filter((r) => r.some((c) => c.trim() !== ''));
   } else {
     const text = String(req.body?.csv ?? '');
-    if (!text.trim()) return res.status(400).json({ error: 'The file looks empty' });
+    if (!text.trim()) return res.status(400).json({ error: 'The file is empty.' });
     rows = parseCsv(text);
   }
-  if (rows.length < 2) return res.status(400).json({ error: 'The file needs a header row and at least one lead' });
+  if (rows.length < 2) return res.status(400).json({ error: 'Add column names and at least one lead.' });
 
   const header = rows[0];
   const map = mapHeaders(header);
   if (map.phone === undefined) {
     return res.status(400).json({
-      error: 'No phone column found',
-      detail: `Looked for one of: ${HEADER_ALIASES.phone.join(', ')}. Found: ${header.join(', ')}`,
+      error: 'No Mobile Number column found.',
+      detail: `Use one of: ${HEADER_ALIASES.phone.join(', ')}. Your file has: ${header.join(', ')}`,
     });
   }
 
@@ -2865,7 +2865,7 @@ router.post('/leads/import/preview', authorize('admin', 'accountant'), async (re
 router.post('/leads/import/commit', authorize('admin', 'accountant'), async (req, res) => {
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
   if (!rows.length) return res.status(400).json({ error: 'Nothing to import' });
-  if (rows.length > 10000) return res.status(400).json({ error: 'That is more than 10,000 rows - split the file' });
+  if (rows.length > 10000) return res.status(400).json({ error: 'Too many leads. Upload 10,000 or fewer.' });
 
   const listName = str(req.body?.list_name, 255) ?? 'Uploaded list';
   const assignedTo = str(req.body?.assigned_to, 36);
@@ -2981,7 +2981,7 @@ async function exportLeadsFile(
     });
   } catch (err) {
     console.error('crm.exportLeads error:', err);
-    res.status(500).json({ error: 'Could not build that export' });
+    res.status(500).json({ error: 'Could not download. Try again.' });
   }
 }
 
@@ -3009,7 +3009,7 @@ router.get('/queue', async (req, res) => {
     // urgent within it, so choosing a list can never put an overdue promise
     // behind a stranger nobody has rung.
     const list = listId ? await loadList(listId) : null;
-    if (listId && !list) return res.status(404).json({ error: 'That list is not available' });
+    if (listId && !list) return res.status(404).json({ error: 'List not found.' });
     const pred = listPredicate(list, 4);
 
     const rows = await pool.query(
@@ -3054,7 +3054,7 @@ router.get('/queue', async (req, res) => {
     });
   } catch (err) {
     console.error('crm.queue error:', err);
-    res.status(500).json({ error: 'Could not load the calling queue' });
+    res.status(500).json({ error: 'Could not load your list.' });
   }
 });
 
@@ -3090,7 +3090,7 @@ router.delete('/activities/:id', async (req, res) => {
     );
     if (!act.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Nothing to undo - that call is too old, was already undone, or was not yours.' });
+      return res.status(404).json({ error: "Can't undo this call now." });
     }
 
     const a = act.rows[0];
@@ -3259,7 +3259,7 @@ router.post('/conversions/seen', async (req, res) => {
   // condition collapsed to `AND TRUE`. One request from any caller cleared
   // every colleague's unseen-donation notices.
   if (!Array.isArray(req.body?.ids) || !req.body.ids.length) {
-    return res.status(400).json({ error: 'Which conversions have been seen?' });
+    return res.status(400).json({ error: 'Nothing selected.' });
   }
   const ids: string[] = (req.body.ids as string[]).slice(0, 500).map(String);
   try {
@@ -3271,7 +3271,7 @@ router.post('/conversions/seen', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('crm.markConversionsSeen error:', err);
-    res.status(500).json({ error: 'Could not update those' });
+    res.status(500).json({ error: 'Could not update. Try again.' });
   }
 });
 
@@ -3291,7 +3291,7 @@ router.post('/conversions/seen', async (req, res) => {
  */
 router.post('/leads/:id/donated', async (req, res) => {
   const amount = num(req.body?.amount);
-  if (amount === null || amount <= 0) return res.status(400).json({ error: 'How much did they give?' });
+  if (amount === null || amount <= 0) return res.status(400).json({ error: 'Enter the amount.' });
 
   const client = await pool.connect();
   try {
@@ -3338,7 +3338,7 @@ router.post('/leads/:id/donated', async (req, res) => {
           occurredAt: result.rows[0].converted_at ?? new Date(),
           leadId: String(req.params.id),
           personId: result.rows[0].person_id ?? null,
-          note: str(req.body?.note, 300) ?? 'Recorded by hand after a call',
+          note: str(req.body?.note, 300) ?? 'Added by hand after a call',
           createdBy: recordedBy,
         },
         client
@@ -3352,7 +3352,7 @@ router.post('/leads/:id/donated', async (req, res) => {
         req.params.id,
         req.user?.userId ?? null,
         before.rows[0].status,
-        `Donated ${amount}${req.body?.note ? ` — ${String(req.body.note).slice(0, 200)}` : ''} (recorded by hand)`,
+        `Donated ${amount}${req.body?.note ? `: ${String(req.body.note).slice(0, 200)}` : ''} (added by hand)`,
       ]
     );
 
@@ -3361,7 +3361,7 @@ router.post('/leads/:id/donated', async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.markDonated error:', err);
-    res.status(500).json({ error: 'Could not record that donation' });
+    res.status(500).json({ error: 'Could not save donation. Try again.' });
   } finally {
     client.release();
   }
@@ -3564,7 +3564,7 @@ router.post('/leads/sync-abandoned', authorize('admin', 'accountant'), async (re
     });
   } catch (err) {
     console.error('crm.syncAbandoned error:', err);
-    res.status(500).json({ error: 'Could not fetch unfinished donations from the sites' });
+    res.status(500).json({ error: 'Could not load Nearly gave. Try again.' });
   }
 });
 

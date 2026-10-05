@@ -568,7 +568,7 @@ export function StatusBadge({ status }: { status: string }) {
   };
   return (
     <Badge tone={map[status] ?? "neutral"} dot>
-      {status.replace(/_/g, " ")}
+      {status === "captured" ? "paid" : status.replace(/_/g, " ")}
     </Badge>
   );
 }
@@ -798,7 +798,7 @@ export function Pagination({
   total,
   totalPages,
   onPage,
-  unit = "records",
+  unit = "entries",
 }: {
   page: number;
   limit: number;
@@ -1427,7 +1427,7 @@ export function Select({
           tabIndex={-1}
           className="fade-rise absolute z-50 mt-1 max-h-64 w-full overflow-y-auto rounded-control border border-line-strong bg-surface py-1 shadow-float"
         >
-          {!opts.length && <li className="px-3 py-2 text-sm text-ink-faint">Nothing to choose from</li>}
+          {!opts.length && <li className="px-3 py-2 text-sm text-ink-faint">No options</li>}
           {opts.map((o, i) => {
             const isSelected = o.value === value;
             // A heading whenever the group changes. Rendered as a sibling
@@ -1735,7 +1735,7 @@ export function AlertPicker({
   value,
   onChange,
   options,
-  emptyWarning = "With nothing ticked this is only a date on a board — nothing will alert you.",
+  emptyWarning = "No alert picked. You will not be reminded.",
 }: {
   value: number[];
   onChange: (next: number[]) => void;

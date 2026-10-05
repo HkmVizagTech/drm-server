@@ -28,7 +28,7 @@ function StateChip({ item }: { item: RunListItem }) {
       </Badge>
     );
   if (item.state === "skipped") return <Badge tone="warn">Skipped</Badge>;
-  if (item.state === "taken") return <Badge tone="neutral">{item.note || "With a colleague"}</Badge>;
+  if (item.state === "taken") return <Badge tone="neutral">{item.note || "With someone else"}</Badge>;
   return null;
 }
 
@@ -64,7 +64,7 @@ export function UpNextList({
         ))}
       </div>
     );
-  if (!items?.length) return <p className="text-sm text-ink-muted">Nobody in this run.</p>;
+  if (!items?.length) return <p className="text-sm text-ink-muted">No one in this list.</p>;
 
   return (
     <div>
@@ -92,10 +92,10 @@ export function UpNextList({
                   </span>
                   <span className="block truncate text-2xs text-ink-muted">
                     {current
-                      ? "On screen now"
-                      : [it.city, it.next_follow_up_at ? `callback ${dueLabel(it.next_follow_up_at)}` : null]
+                      ? "Now"
+                      : [it.city, it.next_follow_up_at ? `follow-up ${dueLabel(it.next_follow_up_at)}` : null]
                           .filter(Boolean)
-                          .join(" · ") || (it.call_attempts ? `${it.call_attempts} attempts` : "Never rung")}
+                          .join(" · ") || (it.call_attempts ? `${it.call_attempts} calls` : "Never called")}
                   </span>
                 </span>
                 <span className="flex flex-none items-center">
@@ -108,7 +108,7 @@ export function UpNextList({
       </ol>
       {items.length > shown.length || all ? (
         <Button variant="ghost" size="sm" block className="mt-2" onClick={() => setAll((v) => !v)}>
-          {all ? "Show only around where I am" : `Show all ${items.length}`}
+          {all ? "Show less" : `Show all ${items.length}`}
         </Button>
       ) : null}
     </div>

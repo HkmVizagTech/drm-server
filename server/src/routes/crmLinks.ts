@@ -124,7 +124,7 @@ router.post('/links', async (req, res) => {
   if (!label) return res.status(400).json({ error: 'Give the link a name' });
   if (!url) return res.status(400).json({ error: 'Paste the link' });
   if (!/^https?:\/\//i.test(url)) {
-    return res.status(400).json({ error: 'The link needs to start with http:// or https://' });
+    return res.status(400).json({ error: 'Link must start with http:// or https://' });
   }
 
   try {
@@ -287,7 +287,7 @@ router.put('/links/:id/credit', authorize('admin'), async (req, res) => {
   // silently clearing an assignment would quietly stop crediting a caller with
   // nothing on screen to show it had happened.
   if (raw === undefined) {
-    return res.status(400).json({ error: 'Send user_id to assign, or user_id: null to unassign' });
+    return res.status(400).json({ error: 'Pick a caller.' });
   }
   const userId = raw === null || raw === '' ? null : String(raw);
 
@@ -300,7 +300,7 @@ router.put('/links/:id/credit', authorize('admin'), async (req, res) => {
 
     if (userId) {
       const user = await pool.query(`SELECT id FROM users WHERE id = $1::uuid`, [userId]);
-      if (!user.rows.length) return res.status(404).json({ error: 'That caller no longer exists' });
+      if (!user.rows.length) return res.status(404).json({ error: 'Caller not found.' });
     }
 
     // THE TOKEN IS MINTED ONCE AND NEVER REISSUED.
@@ -338,7 +338,7 @@ router.put('/links/:id/credit', authorize('admin'), async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     console.error('crm.setLinkCredit error:', err);
-    res.status(500).json({ error: 'Could not change who this link credits' });
+    res.status(500).json({ error: 'Could not change the caller. Try again.' });
   }
 });
 
@@ -414,7 +414,7 @@ router.post('/leads/:id/send-link', async (req, res) => {
     if (b.link_id) {
       const found = await pool.query(`SELECT * FROM crm_links WHERE id = $1`, [b.link_id]);
       link = found.rows[0] ?? null;
-      if (!link) return res.status(404).json({ error: 'That link no longer exists' });
+      if (!link) return res.status(404).json({ error: 'Link not found.' });
     }
 
     const rawUrl = str(b.url, 2000) ?? (link?.url as string | undefined);
@@ -475,7 +475,7 @@ router.post('/leads/:id/send-link', async (req, res) => {
     res.json({ wa_url: waUrl, url, message, phone: waNumber });
   } catch (err) {
     console.error('crm.sendLink error:', err);
-    res.status(500).json({ error: 'Could not build that WhatsApp message' });
+    res.status(500).json({ error: 'Could not make the WhatsApp message.' });
   }
 });
 

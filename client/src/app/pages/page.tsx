@@ -50,13 +50,13 @@ interface PagesReport {
 // heading so nobody has to guess why a page landed where it did.
 const GROUP_HELP: Record<string, string> = {
   donations:
-    "The /donations page and every festival page nested under it. A new /donations/<festival> is counted here automatically.",
+    "The /donations page and its festival pages",
   donate:
-    "The seva campaign pages reached from /donate. A new seva page has to be added to the list in pageGroups.ts before it appears here.",
+    "Seva pages under /donate",
   other:
-    "Every remaining page — festival and one-off pages that sit at the top level. Each keeps its own row.",
+    "All other pages",
   unattributed:
-    "Donations that arrived with no page recorded at all — usually older rows synced before attribution existed, or entered here by hand.",
+    "Donations with no page",
 };
 
 // The link out of a section header. A plain text link rather than a Button:
@@ -88,7 +88,7 @@ export default function DonationPagesScreen() {
         <PageHeader
           eyebrow="Donors"
           title="Donation pages"
-          subtitle="Which page on which site produced the money"
+          subtitle="Money raised by each page"
         />
         <Card>
           <div className="space-y-3">
@@ -109,10 +109,10 @@ export default function DonationPagesScreen() {
         <PageHeader
           eyebrow="Donors"
           title="Donation pages"
-          subtitle="Which page on which site produced the money"
+          subtitle="Money raised by each page"
         />
         <Card padded={false}>
-          <EmptyState title="Could not load the breakdown" message={error ?? "Unknown error"} />
+          <EmptyState title="Could not load" message={error ?? "Try again."} />
         </Card>
       </div>
     );
@@ -125,7 +125,7 @@ export default function DonationPagesScreen() {
       <PageHeader
         eyebrow="Donors"
         title="Donation pages"
-        subtitle="Which page on which site produced the money"
+        subtitle="Money raised by each page"
         actions={
           <Link href="/donations" className={SECTION_LINK}>
             All donations
@@ -138,13 +138,10 @@ export default function DonationPagesScreen() {
           states what the buckets add up to against what the site actually took,
           and this says so loudly if they ever disagree. */}
       {!data.reconciliation.balanced && (
-        <Alert tone="warn" title="These sections do not add up to the site total.">
+        <Alert tone="warn" title="Totals do not match.">
           <p className="tabular-nums">
-            Sections total {currency(data.reconciliation.bucketSum)}, but the main site took{" "}
-            {currency(hkmvTotal)} — a difference of{" "}
-            {currency(Math.abs(hkmvTotal - data.reconciliation.bucketSum))}. Some donations are
-            being classified into a group this screen does not show, so the figures below are
-            understating. Worth reporting rather than working around.
+            Sections: {currency(data.reconciliation.bucketSum)}. Main site: {currency(hkmvTotal)}.
+            Gap: {currency(Math.abs(hkmvTotal - data.reconciliation.bucketSum))}. Please report this.
           </p>
         </Alert>
       )}
@@ -181,7 +178,7 @@ export default function DonationPagesScreen() {
           </div>
 
           {g.pages.length === 0 ? (
-            <p className="text-sm text-ink-faint">No pages in this group yet.</p>
+            <p className="text-sm text-ink-faint">No pages yet.</p>
           ) : (
             <ul className="divide-y divide-line-soft">
               {g.pages.map((p) => (
@@ -229,7 +226,7 @@ export default function DonationPagesScreen() {
         <Card key={s.site}>
           <CardHeader
             title={siteLabel(s.site)}
-            subtitle="Run separately from the main site, so it keeps its own section rather than being folded into the groups above."
+            subtitle="Separate site"
             action={
               <Link href={`/donations?site=${encodeURIComponent(s.site)}`} className={SECTION_LINK}>
                 View donations
@@ -246,7 +243,7 @@ export default function DonationPagesScreen() {
             </span>
           </div>
           {s.pages.length === 0 ? (
-            <p className="text-sm text-ink-faint">No page attribution recorded.</p>
+            <p className="text-sm text-ink-faint">No pages yet.</p>
           ) : (
             <ul className="divide-y divide-line-soft">
               {s.pages.map((p) => (

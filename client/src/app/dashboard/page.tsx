@@ -114,14 +114,14 @@ export default function DashboardPage() {
     apiClient
       .get<Dashboard>("/api/reports/dashboard")
       .then(setData)
-      .catch((e) => setError(e instanceof Error ? e.message : "Could not load dashboard"));
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load. Try again."));
   }, [user]);
 
   if (error) {
     return (
       <div>
         <PageHeader eyebrow="Overview" title="Dashboard" />
-        <Alert tone="danger" title="Dashboard unavailable">
+        <Alert tone="danger" title="Could not load">
           {error}
         </Alert>
       </div>
@@ -168,19 +168,19 @@ export default function DashboardPage() {
       label: "Receipts not issued",
       value: operations.receiptsPending,
       href: "/donations?receipt=false",
-      hint: "donations awaiting a receipt",
+      hint: "waiting for a receipt",
     },
     {
-      label: "Paused subscriptions",
+      label: "Paused recurring",
       value: recurring.pausedCount,
       href: "/subscriptions",
-      hint: "recurring donations on hold",
+      hint: "on hold",
     },
     {
       label: "Upcoming events",
       value: operations.upcomingEvents,
       href: "/events",
-      hint: "scheduled ahead",
+      hint: "coming up",
     },
   ];
 
@@ -189,7 +189,7 @@ export default function DashboardPage() {
       <PageHeader
         eyebrow="Overview"
         title="Dashboard"
-        subtitle={`${number(people.donors)} donors · ${number(giving.lifetimeCount)} recorded donations`}
+        subtitle={`${number(people.donors)} donors · ${number(giving.lifetimeCount)} donations`}
       />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
@@ -226,8 +226,8 @@ export default function DashboardPage() {
         <Card className="lg:col-span-2">
           <CardHeader
             icon="chart"
-            title="Donations over the last 12 months"
-            subtitle="Hover a month for its total and number of donations"
+            title="Last 12 months"
+            subtitle="Donations per month"
           />
           <MonthlyTrendChart data={data.monthlyTrend} />
         </Card>
@@ -236,7 +236,7 @@ export default function DashboardPage() {
           <CardHeader
             icon="tag"
             title="Where it goes"
-            subtitle="Share of total donations by purpose"
+            subtitle="By purpose"
           />
           <CategoryBars data={data.byPurpose} labelKey="purpose" valueKey="total" />
         </Card>
@@ -250,8 +250,8 @@ export default function DashboardPage() {
           <Card className="sm:col-span-2">
             <EmptyState
               icon="rupee"
-              title="No donations recorded yet"
-              message="Donations made on the HKMV and Annadan sites appear here as soon as the first one arrives."
+              title="No donations yet"
+              message="Donations from HKMV and Annadan show here."
             />
           </Card>
         ) : (
@@ -288,9 +288,9 @@ export default function DashboardPage() {
         <Card className="lg:col-span-2">
           <CardHeader
             icon="list"
-            title="HKM Vizag — by page"
-            subtitle="Where on the main site the donation came from"
-            action={<MoreLink href="/pages">Full breakdown</MoreLink>}
+            title="HKM Vizag by page"
+            subtitle="Main site pages"
+            action={<MoreLink href="/pages">See all</MoreLink>}
           />
 
           {/* Tiles rather than nested Cards: these sit inside a card already,
@@ -319,7 +319,7 @@ export default function DashboardPage() {
                     {currency(g.total)}
                   </p>
                   <p className="mt-1 text-xs tabular-nums text-ink-muted">
-                    {number(g.count)} {g.count === 1 ? "donation" : "donations"} across{" "}
+                    {number(g.count)} {g.count === 1 ? "donation" : "donations"} ·{" "}
                     {number(g.pageCount)} {g.pageCount === 1 ? "page" : "pages"}
                   </p>
                   <p className="mt-2 text-xs tabular-nums text-ink-muted">
@@ -340,8 +340,8 @@ export default function DashboardPage() {
               return (
                 <EmptyState
                   icon="list"
-                  title="No page attribution recorded yet"
-                  message="Donations started carrying the page they came from recently; older ones have nothing to attribute."
+                  title="No pages yet"
+                  message="Pages show here once donations come in."
                 />
               );
             }
@@ -375,8 +375,8 @@ export default function DashboardPage() {
         <Card className="lg:col-span-1">
           <CardHeader
             icon="link"
-            title="Other sites — by page"
-            subtitle="Everything outside the main site"
+            title="Other sites by page"
+            subtitle="Outside the main site"
           />
           {(() => {
             const rest = data.bySourcePage.filter((r) => r.site !== "hkmv");
@@ -384,8 +384,8 @@ export default function DashboardPage() {
               return (
                 <EmptyState
                   icon="link"
-                  title="No page attribution recorded yet"
-                  message="Nothing has come in from the other sites with a page recorded against it."
+                  title="No pages yet"
+                  message="Pages show here once donations come in."
                 />
               );
             }
@@ -456,7 +456,7 @@ export default function DashboardPage() {
             <EmptyState
               icon="users"
               title="No donors yet"
-              message="Import from HKMV or record a donation to get started."
+              message="Donors show here."
             />
           ) : (
             <ul className="divide-y divide-line-soft">
@@ -491,7 +491,7 @@ export default function DashboardPage() {
           <CardHeader
             icon="receipt"
             title="Recent donations"
-            subtitle="Newest donations, including ones pushed live from the website"
+            subtitle="Newest first"
             action={<MoreLink href="/donations">View all</MoreLink>}
           />
           {data.recentDonations.length === 0 ? (
@@ -499,7 +499,7 @@ export default function DashboardPage() {
               <EmptyState
                 icon="rupee"
                 title="No donations yet"
-                message="Donations made on the HKMV site appear here automatically."
+                message="New donations show here."
               />
             </Card>
           ) : (

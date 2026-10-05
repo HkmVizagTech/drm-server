@@ -278,7 +278,7 @@ async function main() {
   await post(qrCredited({}, 'qr_TESTQR0001'));
   p = await row();
   check('stored, unmatched', !!p && !p.share_id);
-  check('reason names the real problem', /not shared from DRM/i.test(p.match_note ?? ''), p.match_note);
+  check('reason names the real problem', /QR was not sent/i.test(p.match_note ?? ''), p.match_note);
 
   console.log('\n7b. the QR id somewhere other than where the docs put it');
   // Insurance, not a documented shape. If Razorpay ever nests the qr_code
@@ -359,7 +359,7 @@ async function main() {
   check('but it scores higher than a silent share', (p.match_score ?? 0) > 25, p.match_score);
   check(
     'and the note names who said they would pay',
-    /said on the call they would pay/.test(p.match_note ?? ''),
+    /Test Donor, who promised/.test(p.match_note ?? ''),
     p.match_note
   );
 

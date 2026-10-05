@@ -86,7 +86,7 @@ export function SendQr({
       const res = await fetch(`/api/crm/qrs/${qrRowId}/image.png`, {
         headers: { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` },
       });
-      if (!res.ok) throw new Error("Could not fetch the image");
+      if (!res.ok) throw new Error("Could not get the image");
       const url = URL.createObjectURL(await res.blob());
       const a = document.createElement("a");
       a.href = url;
@@ -94,7 +94,7 @@ export function SendQr({
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not download that image");
+      setError(e instanceof Error ? e.message : "Could not download. Try again.");
     }
   }
 
@@ -184,7 +184,7 @@ export function SendQr({
       setSent({ label: r.qr.label, at: Date.now(), copied });
       onShared?.();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not share that QR");
+      setError(e instanceof Error ? e.message : "Could not share the QR. Try again.");
     } finally {
       setBusy(false);
     }
@@ -217,7 +217,7 @@ export function SendQr({
               ...shared.map((q) => ({
                 value: q.id,
                 label: q.label,
-                group: "The temple's",
+                group: "Temple QR codes",
                 hint: q.purpose ?? undefined,
               })),
             ]}
@@ -245,7 +245,7 @@ export function SendQr({
           disabled={!chosen}
           loading={busy}
           data-send-qr
-          title="Copies the QR picture and opens WhatsApp in this donor's chat"
+          title="Copy QR and open WhatsApp"
         >
           Copy QR &amp; open chat
         </Button>
@@ -254,7 +254,7 @@ export function SendQr({
       {current?.purpose && (
         <p className="mt-1.5 text-2xs text-ink-muted">
           {current.label} is for {current.purpose}
-          {current.fixed_amount && ` · fixed at ${currency(Number(current.fixed_amount))}`}
+          {current.fixed_amount && ` · Fixed: ${currency(Number(current.fixed_amount))}`}
         </p>
       )}
 
@@ -262,26 +262,25 @@ export function SendQr({
         <Alert tone="good" className="mt-2">
           {sent.copied ? (
             <p>
-              <strong>The QR picture is copied.</strong> In the WhatsApp window that just opened, press{" "}
+              <strong>QR copied.</strong> In WhatsApp, press{" "}
               <kbd className="rounded-md border border-line-strong bg-surface px-1 font-mono">Ctrl</kbd>+
               <kbd className="rounded-md border border-line-strong bg-surface px-1 font-mono">V</kbd> to paste it,
-              then send. The message is already in the box.
+              then send.
             </p>
           ) : (
             <p>
-              {sent.label} opened in WhatsApp with the message ready. The picture could not be copied on this
-              computer —{" "}
+              WhatsApp opened. Could not copy the QR.{" "}
               <button
                 type="button"
                 onClick={() => void downloadImage(chosen)}
                 className="font-medium underline underline-offset-2"
               >
-                download the QR
+                Download the QR
               </button>{" "}
               and attach it.
             </p>
           )}
-          <p className="mt-1">When they pay, it shows up against this lead on its own.</p>
+          <p className="mt-1">When they pay, it shows on this lead.</p>
         </Alert>
       )}
       {error && (

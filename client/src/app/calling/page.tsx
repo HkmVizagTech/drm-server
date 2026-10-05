@@ -143,7 +143,7 @@ const CREDIT_KINDS: { key: CreditKind; label: string }[] = [
   { key: "link", label: "Donation links" },
   { key: "lead", label: "After a call" },
   { key: "offline", label: "Collected by PhonePe" },
-  { key: "manual", label: "Credited by hand" },
+  { key: "manual", label: "Added by hand" },
 ];
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -176,7 +176,7 @@ export default function CallingDashboardPage() {
       setData(await apiClient.get<Dashboard>(`/api/crm/dashboard?preset=${preset}`));
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the dashboard");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     } finally {
       setLoading(false);
     }
@@ -200,7 +200,7 @@ export default function CallingDashboardPage() {
   // "·" only appears when both halves are there.
   const owed = f
     ? [
-        f.overdue > 0 ? `${number(f.overdue)} callback${f.overdue === 1 ? "" : "s"} overdue` : null,
+        f.overdue > 0 ? `${number(f.overdue)} follow-up${f.overdue === 1 ? "" : "s"} overdue` : null,
         f.today > 0 ? `${number(f.today)} due today` : null,
       ]
         .filter(Boolean)
@@ -214,8 +214,8 @@ export default function CallingDashboardPage() {
         title={mine ? "Your calling" : "Calling"}
         subtitle={
           mine
-            ? "Your leads, your calls, and what you are owed — nobody else's"
-            : "Phone outreach to donors — what has been done, and what is owed"
+            ? "Your leads and calls"
+            : "Calls to donors"
         }
         actions={
           <div className="flex flex-wrap gap-2">
@@ -266,12 +266,10 @@ export default function CallingDashboardPage() {
           title={owed}
           action={
             <Link href="/follow-ups" className={buttonPrimary}>
-              Work through them
+              Open follow-ups
             </Link>
           }
-        >
-          Someone was told they would be rung. These are those calls.
-        </Alert>
+        />
       )}
 
       {/* ------------------------------------------------------------ tiles */}
@@ -281,17 +279,17 @@ export default function CallingDashboardPage() {
           value={number(data?.leads.received ?? 0)}
           loading={loading}
           icon="users"
-          sub={mine ? "assigned to you in this period" : "added in this period"}
+          sub={mine ? "Given to you" : "Added"}
         />
         <StatTile
           label={mine ? "Calls you made" : "Calls made"}
           value={number(c?.made ?? 0)}
           loading={loading}
           icon="phone"
-          sub={c ? `across ${number(c.leads_touched)} ${c.leads_touched === 1 ? "person" : "people"}` : undefined}
+          sub={c ? `to ${number(c.leads_touched)} ${c.leads_touched === 1 ? "person" : "people"}` : undefined}
         />
         <StatTile
-          label="Got through"
+          label="Answered"
           value={`${c?.connect_rate ?? 0}%`}
           loading={loading}
           accent="good"
@@ -307,7 +305,7 @@ export default function CallingDashboardPage() {
             kept only until every screen has moved over, and reaching for it is
             how the next tile ends up summing a different table again. */}
         <StatTile
-          label="Raised"
+          label="Money raised"
           value={currency(data?.money.raised ?? 0)}
           loading={loading}
           accent="brand"
@@ -316,7 +314,7 @@ export default function CallingDashboardPage() {
             data
               ? `${number(data.leads.donors_paid)} ${
                   data.leads.donors_paid === 1 ? "donor" : "donors"
-                } paid in this period`
+                } paid`
               : undefined
           }
         />
@@ -324,14 +322,14 @@ export default function CallingDashboardPage() {
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">
         <StatTile
-          label="Conversion"
+          label="Gave"
           value={`${data?.leads.conversion_rate ?? 0}%`}
           loading={loading}
           icon="target"
           sub={
             data
-              ? `${number(data.leads.converted)} of ${number(data.leads.received)} added in this period have given`
-              : "of leads added in this period"
+              ? `${number(data.leads.converted)} of ${number(data.leads.received)} leads`
+              : "of leads"
           }
         />
         <StatTile
@@ -341,17 +339,17 @@ export default function CallingDashboardPage() {
           icon="clock"
           sub={
             c && c.with_duration
-              ? `over the ${number(c.with_duration)} call${c.with_duration === 1 ? "" : "s"} with a length recorded`
-              : "no call lengths recorded"
+              ? `from ${number(c.with_duration)} call${c.with_duration === 1 ? "" : "s"}`
+              : "No call times yet"
           }
         />
         <StatTile
-          label="Pipeline"
+          label="Hoped for"
           value={currency(data?.pipeline.value ?? 0)}
           loading={loading}
           accent="warn"
           icon="trendUp"
-          sub={data ? `hoped for across ${number(data.pipeline.open_leads)} open leads` : undefined}
+          sub={data ? `from ${number(data.pipeline.open_leads)} open leads` : undefined}
         />
         <StatTile
           label="Overdue"
@@ -373,15 +371,15 @@ export default function CallingDashboardPage() {
       {data && data.money.raised > 0 && (
         <Card className="mb-6">
           <CardHeader
-            title="How that was raised"
+            title="How it came in"
             icon="rupee"
-            subtitle={mine ? "Every rupee credited to you in this period" : "Every rupee credited in this period"}
+            subtitle={mine ? "Your total, by type" : "By type"}
             action={
               <Link
                 href="/calling/earnings"
                 className="inline-flex items-center gap-1 text-xs font-medium text-brand-700 hover:underline"
               >
-                Every credit
+                See all
                 <Icon name="arrowRight" size={12} />
               </Link>
             }
@@ -397,17 +395,17 @@ export default function CallingDashboardPage() {
             ))}
           </ul>
           <p className="mt-3 border-t border-line-soft pt-3 text-xs text-ink-muted">
-            {currency(data.money.verified)} confirmed
+            {currency(data.money.verified)} checked
             {data.money.awaiting_verification > 0 && (
               <>
                 {" · "}
                 <span className="font-medium text-warn">
-                  {currency(data.money.awaiting_verification)} awaiting a check
+                  {currency(data.money.awaiting_verification)} not checked yet
                 </span>
               </>
             )}
-            {" — across "}
-            {number(data.money.credits)} credit{data.money.credits === 1 ? "" : "s"}
+            {" · "}
+            {number(data.money.credits)} entr{data.money.credits === 1 ? "y" : "ies"}
           </p>
         </Card>
       )}
@@ -421,33 +419,26 @@ export default function CallingDashboardPage() {
           in words, because "awaiting" looks like an accusation to the person
           whose money it is and it is not one. */}
       {data && data.money.awaiting_verification > 0 && (
-        <Alert tone="info" title="About the money awaiting a check">
-          {currency(data.money.awaiting_verification)} of that was collected directly on a PhonePe or UPI number.
-          Nothing watched it arrive, so it counts on {mine ? "your" : "the caller's"} word until an admin finds it
-          on the bank statement and ticks it off. Awaiting a check means nobody has looked yet.{" "}
+        <Alert tone="info">
+          {currency(data.money.awaiting_verification)} paid by PhonePe or UPI is not checked yet.{" "}
           <Link href="/calling/collected" className="font-medium text-brand-700 hover:underline">
-            {mine ? "Your collections" : "The verification queue"}
+            Collected by PhonePe
           </Link>
         </Alert>
       )}
 
       {/* The honesty note. Renders only while nothing is measured. */}
       {c && c.made > 0 && c.measured === 0 && (
-        <Alert tone="info" title="About the call figures">
-          Calls are placed from callers&apos; own phones and logged here afterwards, so &ldquo;got through&rdquo; and
-          &ldquo;average call&rdquo; are what the caller reported — nothing is measuring them. A call nobody logs is
-          not counted at all. Connecting a cloud telephony provider would make these measured instead; until then,
-          read them as a record of what callers say happened.
-        </Alert>
+        <Alert tone="info">Call figures are what callers logged.</Alert>
       )}
 
       <div className="grid gap-5 lg:grid-cols-2">
         {/* ------------------------------------------------- where leads are */}
         <Card>
           <CardHeader
-            title="Where the leads are"
+            title="Leads by stage"
             icon="chart"
-            subtitle={mine ? "Your leads, by stage" : "Every lead, by stage"}
+            subtitle={mine ? "Your leads" : "All leads"}
           />
           {!data?.by_status.length ? (
             <EmptyState
@@ -455,8 +446,8 @@ export default function CallingDashboardPage() {
               title={mine ? "No leads yet" : "No leads yet"}
               message={
                 mine
-                  ? "Nothing has been assigned to you yet. Ask for a list, or open Lists to see what is going."
-                  : "Add a list or pull some donors in to get started."
+                  ? "Ask your admin for a list."
+                  : "Add a list to start."
               }
             />
           ) : (
@@ -482,16 +473,12 @@ export default function CallingDashboardPage() {
         {/* ------------------------------------------------ where they came from */}
         <Card>
           <CardHeader
-            title="Where they came from"
+            title="Lead sources"
             icon="tag"
-            subtitle={
-              mine
-                ? "Your leads in this period, and how many gave"
-                : "Leads added in this period, and how many gave"
-            }
+            subtitle="And how many gave"
           />
           {!data?.by_source.length ? (
-            <EmptyState icon="inbox" title="Nothing in this period" message="Try a wider date range." />
+            <EmptyState icon="inbox" title="Nothing in this period" message="Try a longer period." />
           ) : (
             <ul className="divide-y divide-line-soft">
               {data.by_source.map((s) => (
@@ -515,15 +502,15 @@ export default function CallingDashboardPage() {
         {!!data?.by_qr.filter((q) => q.payments > 0).length && (
           <Card className="lg:col-span-2">
             <CardHeader
-              title="Raised through each QR"
+              title="Money by QR"
               icon="qr"
-              subtitle="Money that arrived in this period, by the QR it came through"
+              subtitle="Paid in this period"
               action={
                 <Link
                   href="/calling/payments"
                   className="inline-flex items-center gap-1 text-xs font-medium text-brand-700 hover:underline"
                 >
-                  Every payment
+                  See all
                   <Icon name="arrowRight" size={12} />
                 </Link>
               }
@@ -536,11 +523,11 @@ export default function CallingDashboardPage() {
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-ink">{q.label}</span>
                       <span className="block text-2xs text-ink-muted">
-                        {[q.purpose, q.owner_name ?? "the temple's"].filter(Boolean).join(" · ")}
+                        {[q.purpose, q.owner_name ?? "Temple"].filter(Boolean).join(" · ")}
                         {q.unattributed > 0 && (
                           <span className="text-warn">
                             {" "}
-                            · {number(q.unattributed)} not yet matched to a donor
+                            · {number(q.unattributed)} not linked yet
                           </span>
                         )}
                       </span>
@@ -560,20 +547,18 @@ export default function CallingDashboardPage() {
                 (`not_credited`) and is printed here rather than left for the
                 reader to subtract in their head and wonder which is wrong. */}
             <p className="mt-3 border-t border-line-soft pt-3 text-xs text-ink-muted">
-              {currency(data.qr.through_qrs)} through QRs in this period, of which{" "}
-              {currency(data.qr.credited)} has been credited to a caller
+              {currency(data.qr.through_qrs)} through QRs. {currency(data.qr.credited)} counted for callers
               {data.qr.not_credited > 0 && (
                 <>
-                  {" "}
-                  and <span className="text-warn">{currency(data.qr.not_credited)}</span> has not
+                  {" · "}
+                  <span className="text-warn">{currency(data.qr.not_credited)}</span> not counted yet
                 </>
               )}
               .
               {data.qr.unattributed > 0 && (
                 <>
                   {" "}
-                  {number(data.qr.unattributed)} payment{data.qr.unattributed === 1 ? " is" : "s are"} still
-                  waiting to be matched to a donor, which is the only part of this the reports above cannot see.
+                  {number(data.qr.unattributed)} payment{data.qr.unattributed === 1 ? "" : "s"} not linked yet.
                 </>
               )}
             </p>
@@ -588,7 +573,7 @@ export default function CallingDashboardPage() {
           <CardHeader
             title={mine ? "QRs you sent" : "QRs sent"}
             icon="qr"
-            subtitle="Shared during calls, and what came back"
+            subtitle="Sent on calls"
             action={
               <Link
                 href="/calling/payments"
@@ -603,11 +588,11 @@ export default function CallingDashboardPage() {
             <EmptyState
               icon="qr"
               title="No QRs sent in this period"
-              message="During a call, pick a QR and press send — the payment finds its way back here on its own."
+              message="Send a QR during a call."
             />
           ) : (
             <div className="grid gap-4 sm:grid-cols-3">
-              <StatTile label="Sent" value={number(data.qr.shared)} icon="upload" sub="during calls in this period" />
+              <StatTile label="Sent" value={number(data.qr.shared)} icon="upload" sub="On calls" />
               {/* `credited`, not a second sum of its own: this is literally
                   money.by_kind.qr, so the tile and the breakdown above cannot
                   come to different answers about the same QR payments. */}
@@ -616,14 +601,14 @@ export default function CallingDashboardPage() {
                 value={number(data.qr.paid)}
                 accent="good"
                 icon="rupee"
-                sub={`${currency(data.qr.credited)} credited`}
+                sub={`${currency(data.qr.credited)} counted`}
               />
               <StatTile
                 label="Still waiting"
                 value={number(data.qr.awaiting)}
                 accent={data.qr.awaiting > 0 ? "warn" : "default"}
                 icon="clock"
-                sub="sent in the last 7 days, no payment yet"
+                sub="Last 7 days, not paid"
               />
             </div>
           )}
@@ -636,21 +621,21 @@ export default function CallingDashboardPage() {
         {!mine && (
         <Card className="lg:col-span-2">
           <CardHeader
-            title="On the phone today"
+            title="Calls today"
             icon="users"
-            subtitle="Calls logged since midnight — not affected by the date filter above"
+            subtitle="Since midnight"
             action={
               <Link
                 href="/calling/reports"
                 className="inline-flex items-center gap-1 text-xs font-medium text-brand-700 hover:underline"
               >
-                Full caller report
+                Caller report
                 <Icon name="arrowRight" size={12} />
               </Link>
             }
           />
           {!data?.callers_today.length ? (
-            <EmptyState icon="phone" title="No calls logged today" message="Nothing has been recorded since midnight." />
+            <EmptyState icon="phone" title="No calls today" message="Calls you log show here." />
           ) : (
             <ul className="divide-y divide-line-soft">
               {data.callers_today.map((u) => (
@@ -658,7 +643,7 @@ export default function CallingDashboardPage() {
                   <span className="truncate text-sm text-ink-soft">{u.name}</span>
                   <span className="whitespace-nowrap text-sm tabular-nums text-ink-muted">
                     {number(u.calls)} call{u.calls === 1 ? "" : "s"}
-                    <span className="text-ink-faint"> · {number(u.connected)} got through</span>
+                    <span className="text-ink-faint"> · {number(u.connected)} answered</span>
                   </span>
                 </li>
               ))}
@@ -720,7 +705,7 @@ function OutsideCallDialog({ onClose, onDone }: { onClose: () => void; onDone: (
   if (done) {
     return (
       <Modal
-        title="Recorded"
+        title="Saved"
         onClose={onClose}
         footer={
           <>
@@ -728,13 +713,13 @@ function OutsideCallDialog({ onClose, onDone }: { onClose: () => void; onDone: (
               Close
             </Button>
             <Link href={`/leads/${done.id}`} className={buttonPrimary}>
-              Open them — send a QR
+              Send a QR
             </Link>
           </>
         }
       >
         <p className="text-sm text-ink-soft">
-          The call is on {done.name || "their"} record, against your name.
+          Call saved for {done.name || "this donor"}.
         </p>
       </Modal>
     );
@@ -769,25 +754,22 @@ function OutsideCallDialog({ onClose, onDone }: { onClose: () => void; onDone: (
                 await onDone();
                 setDone({ id: r.lead.id, name: r.lead.name });
               } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not record that call");
+                setError(e instanceof Error ? e.message : "Could not save. Try again.");
               } finally {
                 setBusy(false);
               }
             }}
           >
-            {busy ? "Saving…" : "Record it"}
+            {busy ? "Saving…" : "Save"}
           </Button>
         </>
       }
     >
       {error && <Alert tone="danger">{error}</Alert>}
-      <p className="mb-4 text-sm text-ink-muted">
-        For a call you made from your own phone, or to somebody who was not in a list. DRM finds them by number, or
-        adds them, and records the call against you.
-      </p>
+
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Their number" htmlFor="outside-phone" required>
+        <Field label="Mobile Number" htmlFor="outside-phone" required>
           <Input
             id="outside-phone"
             value={phone}
@@ -797,23 +779,23 @@ function OutsideCallDialog({ onClose, onDone }: { onClose: () => void; onDone: (
             className="tabular-nums"
           />
         </Field>
-        <Field label="Their name" htmlFor="outside-name">
+        <Field label="Donor Name" htmlFor="outside-name">
           <Input
             id="outside-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="If you caught it"
+            placeholder="Optional"
           />
         </Field>
-        <Field label="What came of it" required>
+        <Field label="Call result" required>
           <Select
             value={outcome}
             onChange={setOutcome}
-            ariaLabel="What came of it"
+            ariaLabel="Call result"
             options={dispositions.map((d) => ({ value: d.slug, label: d.label }))}
           />
         </Field>
-        <Field label="If they gave, how much" htmlFor="outside-amount">
+        <Field label="Amount" htmlFor="outside-amount">
           <Input
             id="outside-amount"
             value={amount}
@@ -823,7 +805,7 @@ function OutsideCallDialog({ onClose, onDone }: { onClose: () => void; onDone: (
             className="tabular-nums"
           />
         </Field>
-        <Field label="What was said" htmlFor="outside-note" className="sm:col-span-2">
+        <Field label="Note" htmlFor="outside-note" className="sm:col-span-2">
           <Textarea id="outside-note" value={note} onChange={(e) => setNote(e.target.value)} rows={2} />
         </Field>
       </div>

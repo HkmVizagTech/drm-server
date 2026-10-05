@@ -43,13 +43,13 @@ export interface BulkPreacher {
 }
 
 const ACTIONS: { kind: BulkKind; label: string; hint: string; icon: IconName; danger?: boolean }[] = [
-  { kind: "assign", label: "Give to a caller", hint: "Or take them off whoever has them", icon: "userPlus" },
-  { kind: "status", label: "Move to a stage", hint: "A closed stage also clears their callback", icon: "arrowRight" },
-  { kind: "tag", label: "Add a tag", hint: "For building a list from them later", icon: "tag" },
-  { kind: "untag", label: "Remove a tag", hint: "Takes one tag off every one of them", icon: "tag" },
-  { kind: "follow_up", label: "Set when to call back", hint: "The same callback time for all of them", icon: "clock" },
-  { kind: "preacher", label: "Set the preacher", hint: "Who brought them in", icon: "user" },
-  { kind: "do_not_call", label: "Mark do not call", hint: "They leave every queue for good", icon: "xCircle", danger: true },
+  { kind: "assign", label: "Give to a caller", hint: "Or remove the caller", icon: "userPlus" },
+  { kind: "status", label: "Change stage", hint: "Move to a stage", icon: "arrowRight" },
+  { kind: "tag", label: "Add a tag", hint: "Add one tag to all", icon: "tag" },
+  { kind: "untag", label: "Remove a tag", hint: "Remove one tag from all", icon: "tag" },
+  { kind: "follow_up", label: "Set follow-up", hint: "Same time for all", icon: "clock" },
+  { kind: "preacher", label: "Set preacher", hint: "Who brought them in", icon: "user" },
+  { kind: "do_not_call", label: "Mark do not call", hint: "They will not be called again", icon: "xCircle", danger: true },
 ];
 
 /**
@@ -87,38 +87,38 @@ export function BulkActionDialog({
   function body(): { extra: Record<string, unknown>; said: string } | string {
     switch (kind) {
       case "assign": {
-        if (!value) return "Choose who should have them";
+        if (!value) return "Pick a caller.";
         const name = config?.users.find((u) => u.id === value)?.name;
         return value === "none"
-          ? { extra: { assigned_to: null }, said: "Taken off their callers" }
+          ? { extra: { assigned_to: null }, said: "Caller removed" }
           : { extra: { assigned_to: value }, said: `Given to ${name ?? "that caller"}` };
       }
       case "status": {
-        if (!value) return "Choose a stage";
+        if (!value) return "Pick a stage.";
         const label = config?.statuses.find((s) => s.slug === value)?.label ?? value;
         return { extra: { status: value }, said: `Moved to ${label}` };
       }
       case "tag":
       case "untag": {
         const tag = value.trim();
-        if (!tag) return "Type the tag";
+        if (!tag) return "Enter a tag.";
         return { extra: { tags: [tag] }, said: kind === "tag" ? `Tagged #${tag}` : `Removed #${tag}` };
       }
       case "follow_up":
         return value
-          ? { extra: { at: istInputToISO(value) }, said: "Callback set" }
-          : { extra: { at: null }, said: "Callbacks cleared" };
+          ? { extra: { at: istInputToISO(value) }, said: "Follow-up set" }
+          : { extra: { at: null }, said: "Follow-ups removed" };
       case "preacher": {
-        if (!value) return "Choose a preacher";
+        if (!value) return "Pick a preacher.";
         const p = preachers.find((x) => x.id === value);
         return value === "none"
-          ? { extra: { preacher_id: null }, said: "Preacher cleared" }
+          ? { extra: { preacher_id: null }, said: "Preacher removed" }
           : { extra: { preacher_id: value }, said: `Preacher set to ${p?.name || p?.code || "them"}` };
       }
       case "do_not_call":
         return { extra: {}, said: "Marked do not call" };
       default:
-        return "Choose what to do";
+        return "Pick what to do.";
     }
   }
 
@@ -133,12 +133,12 @@ export function BulkActionDialog({
         action: kind,
         ...b.extra,
       });
-      toast(`${b.said} · updated ${number(r.updated)} lead${r.updated === 1 ? "" : "s"}`);
+      toast(`${b.said} · ${number(r.updated)} lead${r.updated === 1 ? "" : "s"}`);
       onDone();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Could not apply that";
+      const msg = e instanceof Error ? e.message : "Could not save. Try again.";
       setError(msg);
-      toast.error("Could not apply that", msg);
+      toast.error("Could not save. Try again.", msg);
       setBusy(false);
     }
   }
@@ -147,7 +147,7 @@ export function BulkActionDialog({
 
   return (
     <Modal
-      title={current ? `${current.label} — ${people}` : `Change ${people}`}
+      title={current ? `${current.label} · ${people}` : `Change ${people}`}
       tone={kind === "do_not_call" ? "danger" : "default"}
       onClose={onClose}
       footer={
@@ -192,14 +192,14 @@ export function BulkActionDialog({
         <>
           {error && <Alert tone="danger">{error}</Alert>}
           {kind === "assign" && (
-            <Field label="Who should have them">
+            <Field label="Caller">
               <Select
                 value={value}
                 onChange={setValue}
-                ariaLabel="Who should have them"
-                placeholder="Choose a caller…"
+                ariaLabel="Caller"
+                placeholder="Pick a caller"
                 options={[
-                  { value: "none", label: "Nobody — leave them unassigned" },
+                  { value: "none", label: "No caller" },
                   ...(config?.users ?? []).map((u) => ({
                     value: u.id,
                     label: u.name,
@@ -215,13 +215,13 @@ export function BulkActionDialog({
                 value={value}
                 onChange={setValue}
                 ariaLabel="Stage"
-                placeholder="Choose a stage…"
+                placeholder="Pick a stage"
                 options={(config?.statuses ?? []).map((s) => ({ value: s.slug, label: s.label }))}
               />
             </Field>
           )}
           {(kind === "tag" || kind === "untag") && (
-            <Field label="Tag" htmlFor="bulk-tag" hint="Lower-case with dashes reads best, e.g. janmashtami-2026">
+            <Field label="Tag" htmlFor="bulk-tag">
               <Input
                 id="bulk-tag"
                 value={value}
@@ -232,11 +232,7 @@ export function BulkActionDialog({
             </Field>
           )}
           {kind === "follow_up" && (
-            <Field
-              label="Call them back at"
-              htmlFor="bulk-follow-up"
-              hint="Temple time (IST). Leave it empty to clear their callbacks instead."
-            >
+            <Field label="Follow-up on" htmlFor="bulk-follow-up" hint="Leave empty to remove follow-ups">
               <Input
                 id="bulk-follow-up"
                 type="datetime-local"
@@ -251,7 +247,7 @@ export function BulkActionDialog({
                 value={value}
                 onChange={setValue}
                 ariaLabel="Preacher"
-                placeholder="Choose a preacher…"
+                placeholder="Pick a preacher"
                 options={[
                   { value: "none", label: "No preacher" },
                   ...preachers.map((p) => ({ value: p.id, label: p.name ? `${p.name} (${p.code})` : p.code })),
@@ -261,8 +257,7 @@ export function BulkActionDialog({
           )}
           {kind === "do_not_call" && (
             <Alert tone="danger" className="mb-0">
-              {people} will never appear in a calling queue again, and any callbacks booked for them are cleared.
-              This cannot be undone from the leads screen.
+              {people} will not be called again.
             </Alert>
           )}
         </>
@@ -309,7 +304,7 @@ export function AddToListDialog({
         // No lists yet: straight to making one rather than an empty dropdown.
         if (!d.lists.length) setMode("new");
       })
-      .catch((e) => setError(e instanceof Error ? e.message : "Could not load the lists"));
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load lists. Try again."));
   }, []);
 
   async function save() {
@@ -317,7 +312,7 @@ export function AddToListDialog({
     setError(null);
     try {
       if (mode === "existing") {
-        if (!listId) throw new Error("Choose a list");
+        if (!listId) throw new Error("Pick a list.");
         const r = await apiClient.post<{ changed: number }>(`/api/crm/lists/${listId}/members`, {
           lead_ids: ids,
           action: "include",
@@ -325,20 +320,20 @@ export function AddToListDialog({
         const listName = lists?.find((l) => l.id === listId)?.name ?? "the list";
         toast(`Added ${number(r.changed)} to “${listName}”`);
       } else {
-        if (!name.trim()) throw new Error("Give the new list a name");
+        if (!name.trim()) throw new Error("Enter a list name.");
         await apiClient.post("/api/crm/lists", { name: name.trim(), members_only: true, lead_ids: ids });
-        toast(`Made the list “${name.trim()}” with ${people}`);
+        toast(`List “${name.trim()}” made with ${people}`);
       }
       onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
       setBusy(false);
     }
   }
 
   return (
     <Modal
-      title={`Add ${people} to a calling list`}
+      title={`Add ${people} to a list`}
       onClose={onClose}
       footer={
         <>
@@ -350,7 +345,7 @@ export function AddToListDialog({
             disabled={mode === "existing" ? !listId : !name.trim()}
             onClick={() => void save()}
           >
-            {mode === "existing" ? "Add to the list" : "Make the list"}
+            {mode === "existing" ? "Add to list" : "Make list"}
           </Button>
         </>
       }
@@ -358,8 +353,8 @@ export function AddToListDialog({
       {error && <Alert tone="danger">{error}</Alert>}
       <SegmentedControl
         options={[
-          { value: "existing", label: "An existing list" },
-          { value: "new", label: "A new list" },
+          { value: "existing", label: "Old list" },
+          { value: "new", label: "New list" },
         ]}
         value={mode}
         onChange={setMode}
@@ -369,12 +364,12 @@ export function AddToListDialog({
         lists === null ? (
           <Skeleton className="h-9.5 w-full" />
         ) : (
-          <Field label="Which list" hint="They stay on it whatever its filters say, until removed by hand.">
+          <Field label="List">
             <Select
               value={listId}
               onChange={setListId}
-              ariaLabel="Which list"
-              placeholder="Choose a list…"
+              ariaLabel="List"
+              placeholder="Pick a list"
               options={lists
                 .filter((l) => l.active)
                 .map((l) => ({
@@ -386,16 +381,12 @@ export function AddToListDialog({
           </Field>
         )
       ) : (
-        <Field
-          label="Name the new list"
-          htmlFor="new-list-name"
-          hint="It holds exactly these people - nobody joins it by filter."
-        >
+        <Field label="List name" htmlFor="new-list-name">
           <Input
             id="new-list-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Ekadashi callbacks"
+            placeholder="e.g. Ekadashi follow-ups"
           />
         </Field>
       )}

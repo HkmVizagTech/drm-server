@@ -43,14 +43,14 @@ export default function ReportsPage() {
       <PageHeader
         eyebrow="Insight"
         title="Reports"
-        subtitle="Who gives the most, and how the people on the books are recorded."
+        subtitle="Top donors and people by role."
       />
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
         <Card>
           <CardHeader
             title="Top donors"
-            subtitle="Ranked by everything given to date."
+            subtitle="By total given"
             icon="rupee"
           />
           <TableShell>
@@ -65,8 +65,8 @@ export default function ReportsPage() {
                   <td colSpan={3}>
                     <EmptyState
                       icon="rupee"
-                      title="No donations to rank yet"
-                      message="Once donations are recorded against people, the biggest givers are listed here."
+                      title="No donations yet"
+                      message="Top donors show here."
                     />
                   </td>
                 </tr>
@@ -100,14 +100,14 @@ export default function ReportsPage() {
         <Card>
           <CardHeader
             title="People by role"
-            subtitle="Everyone on the books, counted by the role they carry."
+            subtitle="Count of people in each role"
             icon="users"
           />
           {roles.length === 0 ? (
             <EmptyState
               icon="users"
-              title="Nobody on the books yet"
-              message="Roles are set on a person's record — donor, volunteer, devotee — and each one is counted here."
+              title="No people yet"
+              message="Donors, volunteers and devotees show here."
             />
           ) : (
             <ul className="divide-y divide-line-soft">

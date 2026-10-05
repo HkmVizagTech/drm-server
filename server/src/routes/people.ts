@@ -223,7 +223,7 @@ async function exportPeopleFile(
     });
   } catch (err) {
     console.error('people.export error:', err);
-    res.status(500).json({ error: 'Could not build that export' });
+    res.status(500).json({ error: 'Could not download. Try again.' });
   }
 }
 
@@ -306,7 +306,7 @@ router.get('/:id/notes', async (req, res) => {
 router.post('/:id/notes', async (req, res) => {
   const { id } = req.params;
   const { note } = req.body;
-  if (!note || !String(note).trim()) return res.status(400).json({ error: 'Note text is required' });
+  if (!note || !String(note).trim()) return res.status(400).json({ error: 'Write a note first.' });
 
   const result = await pool.query(
     `INSERT INTO person_notes (person_id, author_user_id, note) VALUES ($1, $2, $3) RETURNING *`,
@@ -375,28 +375,28 @@ interface PersonBody {
  */
 function readPersonBody(b: Record<string, unknown>, partial: boolean): PersonBody {
   const name = text(b.name, 255);
-  if (!partial && !name) return { values: [], error: 'A name is needed' };
+  if (!partial && !name) return { values: [], error: 'Enter a name.' };
 
   const phoneRaw = text(b.phone, 20);
   const phone = phoneRaw ? phoneRaw.replace(/\D/g, '').slice(-10) : null;
   if (!partial && (!phone || phone.length !== 10)) {
-    return { values: [], error: 'A ten-digit phone number is needed' };
+    return { values: [], error: 'Enter a 10-digit mobile number.' };
   }
 
   const email = text(b.email, 255);
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return { values: [], error: 'That does not look like an email address' };
+    return { values: [], error: 'Enter a valid E-mail ID.' };
   }
 
   const pan = text(b.pan, 10)?.toUpperCase() ?? null;
   if (pan && !PAN_RE.test(pan)) {
-    return { values: [], error: 'A PAN looks like ABCDE1234F' };
+    return { values: [], error: 'Enter PAN like ABCDE1234F.' };
   }
 
   const dob = formDate(b.date_of_birth);
-  if (dob === undefined) return { values: [], error: "That date of birth isn't a date" };
+  if (dob === undefined) return { values: [], error: 'Enter a valid date of birth.' };
   const anniversary = formDate(b.anniversary_date);
-  if (anniversary === undefined) return { values: [], error: "That anniversary isn't a date" };
+  if (anniversary === undefined) return { values: [], error: 'Enter a valid anniversary date.' };
 
   const roles = Array.isArray(b.roles)
     ? [...new Set(b.roles.map(String).filter((r) => ROLES.includes(r)))]
@@ -447,7 +447,7 @@ router.post('/', async (req, res) => {
     res.status(201).json(result.rows[0]);
   } catch (err) {
     if ((err as { code?: string }).code === '23505') {
-      return res.status(409).json({ error: 'Somebody with that phone number is already here' });
+      return res.status(409).json({ error: 'This mobile number is already added.' });
     }
     console.error('people.create error:', err);
     res.status(500).json({ error: 'Could not save that person' });
@@ -491,7 +491,7 @@ router.put('/:id', async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     if ((err as { code?: string }).code === '23505') {
-      return res.status(409).json({ error: 'Somebody else already has that phone number' });
+      return res.status(409).json({ error: 'This mobile number is already used.' });
     }
     console.error('people.update error:', err);
     res.status(500).json({ error: 'Could not save that person' });
@@ -518,7 +518,7 @@ router.post('/:id/sync-hkmv', async (req, res) => {
 
   const sites = configuredSites();
   if (!sites.length) {
-    return res.status(503).json({ error: 'No donation site is configured to sync from.' });
+    return res.status(503).json({ error: 'No donation site is connected.' });
   }
 
   // The same phone number can exist on BOTH sites, so sync every configured
@@ -544,10 +544,10 @@ router.post('/:id/sync-hkmv', async (req, res) => {
   }
 
   if (!matched && errors.length === sites.length) {
-    return res.status(502).json({ error: `Could not reach any donation site: ${errors[0].error}`, errors });
+    return res.status(502).json({ error: 'Could not reach the donation sites. Try again.', errors });
   }
   if (!matched) {
-    return res.status(404).json({ error: 'No matching donor found on any site for this phone number', errors });
+    return res.status(404).json({ error: 'No donor found with this mobile number.', errors });
   }
 
   res.json({ synced: true, sites: results, errors });
@@ -576,8 +576,8 @@ router.post('/import-hkmv', authorize('admin'), async (req, res) => {
   if (!sites.length) {
     return res.status(503).json({
       error: requested
-        ? `Site "${requested}" is not configured on this server.`
-        : 'No donation site is configured to import from.',
+        ? `The ${requested} site is not connected.`
+        : 'No donation site is connected.',
       configured: SITE_KEYS.filter(isSiteConfigured),
     });
   }

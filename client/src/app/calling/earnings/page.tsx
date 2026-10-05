@@ -120,11 +120,11 @@ const PRESETS = [
 // What each kind actually is, in the words a caller would use. "₹40,000" is
 // not actionable; "₹31,000 through your QR, ₹9,000 you banked yourself" is.
 const KINDS: { key: CreditKind; label: string; hint: string }[] = [
-  { key: "qr", label: "QR payments", hint: "A QR you shared, paid and confirmed by Razorpay" },
-  { key: "link", label: "Donation links", hint: "Given on a site through one of your links" },
-  { key: "lead", label: "After a call", hint: "A donation from somebody you were working" },
-  { key: "offline", label: "Collected by PhonePe", hint: "Taken on a PhonePe or UPI number — your own report" },
-  { key: "manual", label: "Credited by hand", hint: "Attributed by an admin, with the reason on the row" },
+  { key: "qr", label: "QR payments", hint: "Paid through your QR" },
+  { key: "link", label: "Donation links", hint: "Paid through your link" },
+  { key: "lead", label: "After a call", hint: "Your lead gave" },
+  { key: "offline", label: "Collected by PhonePe", hint: "Paid to a PhonePe or UPI number" },
+  { key: "manual", label: "Added by hand", hint: "Added by an admin" },
 ];
 
 const KIND_LABEL: Record<CreditKind, string> = {
@@ -132,7 +132,7 @@ const KIND_LABEL: Record<CreditKind, string> = {
   link: "Donation link",
   lead: "After a call",
   offline: "Collected by PhonePe",
-  manual: "Credited by hand",
+  manual: "Added by hand",
 };
 
 // Only the roles that can hold a credit. The config endpoint returns every
@@ -182,7 +182,7 @@ export default function CallerEarningsPage() {
       setData(await apiClient.get<CreditsResponse>(`/api/crm/reports/credits?${filterParams()}`));
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the credits");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     } finally {
       setLoading(false);
     }
@@ -231,22 +231,18 @@ export default function CallerEarningsPage() {
         eyebrow="Calling"
         title={
           mine
-            ? "What you have raised"
+            ? "Money raised"
             : chosen
-              ? `What came in under ${chosen.name}`
-              : "What came in under each caller"
+              ? `Money raised by ${chosen.name}`
+              : "Money raised"
         }
-        subtitle={
-          mine
-            ? "Every rupee credited to you, when it arrived and what it came from"
-            : "The credit ledger — one row per amount, with the evidence that earned it"
-        }
+        subtitle={mine ? "Your total, payment by payment." : "By caller, payment by payment."}
         actions={
           <ExportButton
             path="/api/crm/reports/credits/export"
             params={filterParams()}
             filename="caller-credits"
-            hint={t ? `${number(t.credits)} credits in this period` : undefined}
+            hint={t ? `${number(t.credits)} entries` : undefined}
           />
         }
       />
@@ -272,11 +268,11 @@ export default function CallerEarningsPage() {
             onChange={(v) => refilter(() => setPreset(v))}
           />
         </Field>
-        <Field label="How it was raised" className="w-48">
+        <Field label="Type" className="w-48">
           <Select
             value={kind}
             onChange={(v) => refilter(() => setKind(v))}
-            ariaLabel="How it was raised"
+            ariaLabel="Type"
             placeholder="Any"
             options={[
               { value: "", label: "Any" },
@@ -292,8 +288,8 @@ export default function CallerEarningsPage() {
             placeholder="Any"
             options={[
               { value: "", label: "Any" },
-              { value: "yes", label: "Confirmed" },
-              { value: "no", label: "Awaiting a check" },
+              { value: "yes", label: "Checked" },
+              { value: "no", label: "Not checked yet" },
             ]}
           />
         </Field>
@@ -322,34 +318,32 @@ export default function CallerEarningsPage() {
           loading={loading}
           accent="brand"
           icon="rupee"
-          sub={t ? `${number(t.credits)} credit${t.credits === 1 ? "" : "s"} in ${data?.range.label.toLowerCase()}` : undefined}
+          sub={t ? `${number(t.credits)} entr${t.credits === 1 ? "y" : "ies"} · ${data?.range.label.toLowerCase()}` : undefined}
         />
         <StatTile
-          label="Confirmed"
+          label="Checked"
           value={currency(t?.verified ?? 0)}
           loading={loading}
           accent="good"
           icon="checkCircle"
-          sub="watched by a system, or ticked off against the bank"
         />
         {/* Its own figure, never folded into the total. Somebody reading one
             "raised" number cannot tell that part of it is a caller's own word
             and part of it is a Razorpay webhook, and the first time a figure
             is questioned that is exactly what they need to know. */}
         <StatTile
-          label="Awaiting a check"
+          label="Not checked yet"
           value={currency(t?.awaiting_verification ?? 0)}
           loading={loading}
           accent={t && t.awaiting_verification > 0 ? "warn" : "default"}
           icon="clock"
-          sub="offline money nobody has reconciled yet"
+          sub="PhonePe or UPI"
         />
         <StatTile
           label="Collected by PhonePe"
           value={currency(t?.by_kind.offline ?? 0)}
           loading={loading}
           icon="rupee"
-          sub="taken on a PhonePe or UPI number"
         />
       </div>
 
@@ -357,13 +351,10 @@ export default function CallerEarningsPage() {
           looks like an accusation to the person whose money it is, and it is
           not one - it means nobody has opened the bank statement yet. */}
       {t && t.awaiting_verification > 0 && (
-        <Alert tone="info" title="About the money awaiting a check">
-          {currency(t.awaiting_verification)} of this is money {mine ? "you" : "a caller"} collected directly on a
-          PhonePe or UPI number. Nothing watched it arrive, so it counts here on {mine ? "your" : "their"} word
-          until an admin finds it on the bank statement and ticks it off. It is counted either way — the screen
-          only says which part has been checked.{" "}
+        <Alert tone="info">
+          {currency(t.awaiting_verification)} paid by PhonePe or UPI is not checked yet.{" "}
           <Link href="/calling/collected" className="font-medium text-brand-700 hover:underline">
-            {mine ? "Your collections" : "The verification queue"}
+            Collected by PhonePe
           </Link>
         </Alert>
       )}
@@ -373,7 +364,7 @@ export default function CallerEarningsPage() {
           scrolled sideways to read the receipt number - which is the column
           somebody opened this page to find. */}
       <Card className="mb-5">
-        <CardHeader title="How it was raised" icon="chart" subtitle={data?.range.label} />
+        <CardHeader title="By type" icon="chart" subtitle={data?.range.label} />
         <ul className="grid gap-x-5 gap-y-3 sm:grid-cols-2 lg:grid-cols-5">
           {KINDS.map((k) => {
             const value = t?.by_kind[k.key] ?? 0;
@@ -394,19 +385,17 @@ export default function CallerEarningsPage() {
             );
           })}
         </ul>
-        <p className="mt-3 border-t border-line-soft pt-3 text-xs text-ink-muted">
-          Collected-by-hand money is drawn in amber because it is the one kind nothing observed.
-        </p>
+
       </Card>
 
       <TableShell>
         <Thead>
-          <Th>When</Th>
+          <Th>Date</Th>
           {canChooseCaller && <Th>Caller</Th>}
           <Th align="right">Amount</Th>
-          <Th>How</Th>
-          <Th>What it was</Th>
-          <Th>Receipt</Th>
+          <Th>Type</Th>
+          <Th>Donor</Th>
+          <Th>Receipt No.</Th>
           <Th>Checked</Th>
         </Thead>
 
@@ -419,13 +408,13 @@ export default function CallerEarningsPage() {
                 <td colSpan={cols}>
                   <EmptyState
                     icon="rupee"
-                    title="Nothing credited in this period"
+                    title="Nothing in this period"
                     message={
                       activeFilters
-                        ? "No credit matches these filters. Clear them, or try a wider period."
+                        ? "Clear filters or try a longer period."
                         : mine
-                          ? "When a QR you shared is paid, a link of yours is used, or you record money you collected, it lands here on the day it arrived."
-                          : "No money has been attributed to anybody in this period. Try a wider one."
+                          ? "Money counted for you shows here."
+                          : "Try a longer period."
                     }
                   />
                 </td>
@@ -478,7 +467,7 @@ export default function CallerEarningsPage() {
                   total={data.total}
                   totalPages={Math.max(1, Math.ceil(data.total / data.limit))}
                   onPage={setPage}
-                  unit="credits"
+                  unit="entries"
                 />
               </td>
             </tr>
@@ -487,14 +476,11 @@ export default function CallerEarningsPage() {
       </TableShell>
 
       <p className="mt-3 text-xs text-ink-muted">
-        A credit is written once, on the day the money arrived, and never recalculated — so reassigning a lead
-        afterwards cannot change what anybody raised last month. Reversing one leaves the row in place with the
-        reason on it.{" "}
         <Link
           href="/calling/collected"
           className="inline-flex items-center gap-1 font-medium text-brand-700 hover:underline"
         >
-          Money collected by PhonePe
+          Collected by PhonePe
           <Icon name="arrowRight" size={12} />
         </Link>
       </p>
@@ -515,13 +501,13 @@ export default function CallerEarningsPage() {
  */
 function checkedCell(c: Credit) {
   if (c.kind !== "offline") {
-    return <span className="text-xs text-ink-muted">nothing to check</span>;
+    return <span className="text-xs text-ink-muted">No check needed</span>;
   }
   if (c.verified) {
     return (
       <span>
         <Badge tone="good" dot>
-          checked off
+          Checked
         </Badge>
         {c.verified_at && <div className="mt-0.5 text-2xs text-ink-muted">{dateTime(c.verified_at)}</div>}
       </span>
@@ -529,7 +515,7 @@ function checkedCell(c: Credit) {
   }
   return (
     <Badge tone="warn" dot>
-      awaiting a check
+      Not checked yet
     </Badge>
   );
 }

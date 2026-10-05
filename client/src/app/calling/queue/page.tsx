@@ -194,10 +194,10 @@ const errText = (e: unknown, fallback: string) => (e instanceof Error ? e.messag
 function announcePassed(passed: RunState["passed"]) {
   if (!passed?.length) return;
   if (passed.length <= 2) {
-    for (const p of passed) toast.info(`Stepped past ${p.name || "someone"} — ${p.reason}`);
+    for (const p of passed) toast.info(`Skipped ${p.name || "someone"}: ${p.reason}`);
   } else {
     toast.info(
-      `Stepped past ${passed.length} people a colleague has`,
+      `Skipped ${passed.length} people`,
       passed
         .slice(0, 3)
         .map((p) => `${p.name || "someone"}: ${p.reason}`)
@@ -398,7 +398,7 @@ function CallScreen({
       : leadId
       ? apiClient.get<Parameters<typeof toCallLead>[0]>(`/api/crm/leads/${leadId}`).then((d) => setSingle(toCallLead(d)))
       : Promise.resolve();
-    first.catch((e) => setLoadError(errText(e, inRun ? "Could not open that run" : "Could not open that person")));
+    first.catch((e) => setLoadError(errText(e, inRun ? "Could not open this list" : "Could not open this lead")));
     // applyRun is stable for the life of this screen; re-running on it would
     // re-fetch for nothing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -414,7 +414,7 @@ function CallScreen({
         const fromSettings = cfg.settings?.reminder_lead_times;
         if (Array.isArray(fromSettings) && fromSettings.length) setDefaultAlerts(cleanAlerts(fromSettings.map(Number)));
       })
-      .catch((e) => toast.error("Could not load the outcomes", errText(e, "Refresh to try again")));
+      .catch((e) => toast.error("Could not load call results", errText(e, "Refresh to try again.")));
   }, [setDefaultAlerts]);
 
   // The Up next list: refreshed when the place in the run or its tally moves,
@@ -519,14 +519,14 @@ function CallScreen({
         const s = await moveRun(sessionId, action, position);
         applyRun(s);
         if (opts.quiet) {
-          if (!s.finished) toast.info("On to the next person");
+          if (!s.finished) toast.info("Next person");
         } else if (action === "skip" || (action === "next" && wasPending)) {
-          toast.info(`Skipped ${leaving?.name || formatPhone(leaving?.phone) || "them"}`, "They come back when you revisit the skipped.");
+          toast.info(`Skipped ${leaving?.name || formatPhone(leaving?.phone) || "them"}`);
         }
-        if (action === "revisit" && !s.message) toast("Back to the people you skipped");
+        if (action === "revisit" && !s.message) toast("Back to skipped people");
         if (action === "jump") setSheetOpen(false);
       } catch (e) {
-        toast.error(action === "jump" ? "Can't go to them right now" : "Could not move on", errText(e, ""));
+        toast.error(action === "jump" ? "Could not open them. Try again." : "Could not move on. Try again.", errText(e, ""));
       } finally {
         setMoving(null);
         setJumping(null);
@@ -552,7 +552,7 @@ function CallScreen({
         await apiClient.delete(`/api/crm/activities/${lc.activityId}`);
         setLastCall((cur) => (cur?.activityId === lc.activityId ? null : cur));
         setSingleLogged(null);
-        toast(`Undone — ${lc.label} for ${lc.name} is gone`);
+        toast(`Undone: ${lc.label} for ${lc.name}`);
         if (sessionId) {
           const cur = runRef.current;
           if (lc.position !== null && cur?.item?.position !== lc.position) {
@@ -566,7 +566,7 @@ function CallScreen({
           await reloadSingle();
         }
       } catch (e) {
-        toast.error("Could not undo that", errText(e, ""));
+        toast.error("Could not undo. Try again.", errText(e, ""));
       }
     },
     [sessionId, applyRun, reloadRun, reloadSingle]
@@ -598,8 +598,8 @@ function CallScreen({
           position: runRef.current?.item?.position ?? null,
         };
         setLastCall(lc);
-        toast(`Logged — ${d.label}`, {
-          body: inbound ? `${lc.name} · they rang you` : lc.name,
+        toast(`Saved: ${d.label}`, {
+          body: inbound ? `${lc.name} · they called you` : lc.name,
           action: { label: "Undo", onClick: () => void undo(lc) },
         });
         resetForm();
@@ -612,7 +612,7 @@ function CallScreen({
         const qrNext = d.slug === "will_pay_qr";
         if (!sessionId) setSingleLogged(d.label);
         if (qrNext) {
-          toast.info("Now send them the QR", "It is just below. Then move on.");
+          toast.info("Now send the QR", "It is just below.");
           sendRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
         }
         // The call is saved by now. A failure past this point is about
@@ -625,10 +625,10 @@ function CallScreen({
             await reloadSingle();
           }
         } catch (e) {
-          toast.warn("Logged, but the screen could not catch up", errText(e, "Tap Next person to carry on."));
+          toast.warn("Saved. Screen did not refresh.", errText(e, "Tap Next person."));
         }
       } catch (e) {
-        toast.error("Could not log that call", errText(e, ""));
+        toast.error("Could not save. Try again.", errText(e, ""));
       } finally {
         setSaving(null);
       }
@@ -747,9 +747,9 @@ function CallScreen({
       }
       setPauseOpen(false);
       setPauseNote("");
-      toast.success("Paused — your place is kept", "Colleagues can ring the person on screen meanwhile.");
+      toast.success("Paused. Your place is kept.");
     } catch (e) {
-      toast.error("Could not pause", errText(e, ""));
+      toast.error("Could not pause. Try again.", errText(e, ""));
     } finally {
       setMoving(null);
     }
@@ -760,9 +760,9 @@ function CallScreen({
     setMoving("resume");
     try {
       applyRun(await resumeRun(sessionId));
-      toast("Back on — carrying on where you were");
+      toast("Resumed");
     } catch (e) {
-      toast.error("Could not resume", errText(e, ""));
+      toast.error("Could not resume. Try again.", errText(e, ""));
     } finally {
       setMoving(null);
     }
@@ -774,12 +774,12 @@ function CallScreen({
     try {
       const r = await endRun(sessionId);
       toast.success(
-        "Run finished",
-        `${r.summary.calls} call${r.summary.calls === 1 ? "" : "s"} logged · ${r.summary.connected} got through`
+        "Finished",
+        `${r.summary.calls} call${r.summary.calls === 1 ? "" : "s"} · ${r.summary.connected} answered`
       );
       router.push("/calling/start");
     } catch (e) {
-      toast.error("Could not finish the run", errText(e, ""));
+      toast.error("Could not finish. Try again.", errText(e, ""));
       setMoving(null);
     }
   }
@@ -789,7 +789,7 @@ function CallScreen({
     try {
       await navigator.clipboard.writeText(lead.phone);
       markDialled("copy");
-      toast.info(`Copied ${formatPhone(lead.phone)}`, "Dial it on your handset.");
+      toast.info(`Copied ${formatPhone(lead.phone)}`, "Dial it on your phone.");
     } catch {
       /* not in a secure context; the number is on screen */
     }
@@ -880,11 +880,11 @@ function CallScreen({
         <Card padded={false}>
           <EmptyState
             icon="alert"
-            title={inRun ? "That run can't be opened" : "That person can't be opened"}
+            title={inRun ? "Could not open this list" : "Could not open this lead"}
             message={loadError}
             action={
               <Link href="/calling/start" className={buttonClass("primary", "lg")}>
-                Choose who to call
+                Pick who to call
               </Link>
             }
           />
@@ -901,7 +901,7 @@ function CallScreen({
   const nextPersonButton =
     inRun && itemDone ? (
       <Button size="lg" block iconRight="arrowRight" loading={moving === "next"} disabled={!!moving} onClick={() => void move("next")}>
-        {ahead > 0 ? "Next person" : "Finish this run"}
+        {ahead > 0 ? "Next person" : "Finish"}
       </Button>
     ) : !inRun && singleLogged ? (
       <Button
@@ -910,7 +910,7 @@ function CallScreen({
         icon="arrowLeft"
         onClick={leave}
       >
-        Done — go back
+        Done
       </Button>
     ) : null;
 
@@ -944,7 +944,7 @@ function CallScreen({
             {!finished && !ended && (
               <Button variant="secondary" icon="list" className="lg:hidden" onClick={() => setSheetOpen(true)}>
                 <span className="tabular-nums">{ahead}</span>
-                <span className="sr-only"> still ahead — see the run</span>
+                <span className="sr-only"> left. See list</span>
               </Button>
             )}
             {helpButton}
@@ -952,17 +952,17 @@ function CallScreen({
               <DropdownMenu
                 items={[
                   ...(!paused && !finished
-                    ? [{ label: "Pause", icon: "clock" as const, hint: "Keep your place, let go of this person", onSelect: () => setPauseOpen(true) }]
+                    ? [{ label: "Pause", icon: "clock" as const, hint: "Keep your place", onSelect: () => setPauseOpen(true) }]
                     : []),
-                  { label: "End this run", icon: "check" as const, hint: "Done with it — start fresh next time", onSelect: () => void finish() },
-                  { label: "Choose another list", icon: "list" as const, onSelect: () => router.push("/calling/start") },
-                  { label: "Promises due", icon: "bell" as const, onSelect: () => router.push("/calling/reminders") },
+                  { label: "Finish", icon: "check" as const, hint: "Stop calling this list", onSelect: () => void finish() },
+                  { label: "Pick another list", icon: "list" as const, onSelect: () => router.push("/calling/start") },
+                  { label: "Reminders", icon: "bell" as const, onSelect: () => router.push("/calling/reminders") },
                 ]}
                 trigger={({ open, toggle }) => (
                   <IconButton
                     name="more"
                     variant="secondary"
-                    label="Pause, end or switch run"
+                    label="More"
                     onClick={toggle}
                     aria-expanded={open}
                     aria-haspopup="menu"
@@ -980,7 +980,7 @@ function CallScreen({
           <IconButton name="arrowLeft" variant="secondary" label="Back" onClick={() => go("back")} />
           <div className="min-w-0">
             <p className="flex flex-wrap items-center gap-2 text-2xs font-semibold uppercase tracking-[0.08em] text-brand-600">
-              {inbound ? "They rang you" : "Calling one person"}
+              {inbound ? "They called you" : "Call"}
               {inbound && (
                 <Badge tone="info" icon="phone">
                   Incoming call
@@ -995,7 +995,7 @@ function CallScreen({
         <div className="flex flex-none items-center gap-1.5">
           {helpButton}
           <Link href="/calling/start" className={buttonClass("secondary", "md")}>
-            Start a run
+            Start calling
           </Link>
         </div>
       </div>
@@ -1014,7 +1014,7 @@ function CallScreen({
         form={form}
         inbound={inbound}
         canAdvance={inRun && autoAdvance && pickedHere.slug !== "will_pay_qr"}
-        advanceLabel={ahead > 0 ? "Log & next person" : "Log & finish"}
+        advanceLabel={ahead > 0 ? "Save & next" : "Save & finish"}
         saving={saving === pickedHere.slug}
         layout={isDesktop ? "inline" : "sheet"}
         expectedAmount={lead.expected_amount}
@@ -1029,11 +1029,11 @@ function CallScreen({
       <Card padded={false}>
         <EmptyState
           icon="checkCircle"
-          title="This run is finished"
-          message="It was ended, here or on another device. Pick up a list from the start screen."
+          title="This list is finished"
+          message="Pick another list to call."
           action={
             <Link href="/calling/start" className={buttonClass("primary", "lg")}>
-              Choose who to call
+              Pick who to call
             </Link>
           }
         />
@@ -1043,16 +1043,13 @@ function CallScreen({
     body = (
       <Card tone="warn" padded={false} className="p-4 sm:p-6">
         <p className="text-lg font-semibold text-ink">Paused</p>
-        <p className="mt-1 text-sm text-ink-soft">
-          Your place is kept. While you were away, colleagues could ring the person you were on — if one did, you
-          move straight past them when you carry on.
-        </p>
+        <p className="mt-1 text-sm text-ink-soft">Your place is kept.</p>
         <div className="mt-4 flex flex-col gap-2 sm:flex-row">
           <Button size="lg" icon="phoneOutgoing" loading={moving === "resume"} onClick={() => void resume()}>
             Resume
           </Button>
           <Link href="/calling/start" className={buttonClass("secondary", "lg")}>
-            Back to the start screen
+            Back to start
           </Link>
         </div>
       </Card>
@@ -1060,7 +1057,7 @@ function CallScreen({
   } else if (finished && sessionId) {
     body = (
       <RunSummaryCard
-        label={run?.session?.label ?? "this run"}
+        label={run?.session?.label ?? "this list"}
         summary={summary}
         skipped={run?.counts.skipped ?? 0}
         busy={moving === "revisit" ? "revisit" : moving === "finish" ? "finish" : null}
@@ -1075,8 +1072,7 @@ function CallScreen({
         {/* Just linked a donation from another number: they are done with,
             unless the caller spoke to them and wants the call on record. */}
         {linkedFor === lead.id && lead.converted_at && (
-          <Alert tone="good" title={`Linked — ${leadName} is marked as donated`} onDismiss={() => setLinkedFor(null)} className="mb-0">
-            <p>If you spoke to them, log how the call went below. Otherwise move on.</p>
+          <Alert tone="good" title={`Linked. ${leadName} has donated.`} onDismiss={() => setLinkedFor(null)} className="mb-0">
             <div className="mt-2 flex flex-wrap gap-2">
               {inRun ? (
                 <Button
@@ -1089,15 +1085,15 @@ function CallScreen({
                     void move("next", undefined, { quiet: true });
                   }}
                 >
-                  {ahead > 0 ? "Next person" : "To the summary"}
+                  {ahead > 0 ? "Next person" : "See summary"}
                 </Button>
               ) : (
                 <Button icon="arrowLeft" onClick={leave}>
-                  Done — go back
+                  Done
                 </Button>
               )}
               <Button variant="secondary" onClick={toOutcomes}>
-                Log the call
+                Save the call
               </Button>
             </div>
           </Alert>
@@ -1151,7 +1147,7 @@ function CallScreen({
               leadName={lead.name}
               expectedAmount={lead.expected_amount}
               compact
-              onSent={() => toast.success("WhatsApp opened with the link", "Press send there.")}
+              onSent={() => toast.success("WhatsApp opened", "Press send there.")}
             />
             <div className="mt-3 border-t border-line-soft pt-3">
               <SendQr
@@ -1159,7 +1155,7 @@ function CallScreen({
                 leadName={lead.name}
                 expectedAmount={lead.expected_amount}
                 sessionId={sessionId}
-                onShared={() => toast.success("QR shared", "Press send in WhatsApp. A payment to it is matched to them.")}
+                onShared={() => toast.success("QR shared", "Press send in WhatsApp.")}
               />
             </div>
           </Card>
@@ -1168,36 +1164,28 @@ function CallScreen({
         {/* This device's own habits. */}
         <div className="divide-y divide-line-soft rounded-card border border-line-soft bg-surface">
           <label className="flex min-h-12 items-center justify-between gap-3 px-4 py-2 text-sm text-ink-soft">
-            <span>
-              Ask before logging
-              <span className="block text-xs text-ink-muted">
-                A tap picks the outcome; you confirm before it is saved.
-              </span>
-            </span>
+            <span>Ask before saving</span>
             <Toggle
               on={askFirst}
-              label="Ask before logging"
+              label="Ask before saving"
               onChange={(on) => {
                 setAskFirst(on);
                 writePref(ASK_FIRST_KEY, on);
                 if (!on) setPicked(null);
-                toast.info(on ? "Will ask before logging each call" : "One tap will log the call", "Undo stays either way.");
+                toast.info(on ? "Will ask before saving" : "One tap saves the call");
               }}
             />
           </label>
           {inRun && (
             <label className="flex min-h-12 items-center justify-between gap-3 px-4 py-2 text-sm text-ink-soft">
-              <span>
-                Move on by itself after I log a call
-                <span className="block text-xs text-ink-muted">Except &ldquo;Will pay by QR&rdquo; — the QR comes first.</span>
-              </span>
+              <span>Go to next person after saving</span>
               <Toggle
                 on={autoAdvance}
-                label="Move on by itself after logging"
+                label="Go to next person after saving"
                 onChange={(on) => {
                   setAutoAdvance(on);
                   writePref(AUTO_ADVANCE_KEY, on);
-                  toast.info(on ? "Will move on after each call" : "Will stay on the person after logging");
+                  toast.info(on ? "Will go to next person" : "Will stay on this person");
                 }}
               />
             </label>
@@ -1208,7 +1196,7 @@ function CallScreen({
   } else {
     body = (
       <Card padded={false}>
-        <EmptyState icon="inbox" title="Nobody on screen" message="Move on, or pick a list from the start screen." />
+        <EmptyState icon="inbox" title="No one here" message="Pick a list to call." />
       </Card>
     );
   }
@@ -1239,7 +1227,7 @@ function CallScreen({
         loading={moving === "next"}
         onClick={() => void move("next")}
       >
-        {ahead > 0 ? "Next person" : "To the summary"}
+        {ahead > 0 ? "Next person" : "See summary"}
       </NavButton>
     ) : (
       <NavButton
@@ -1249,12 +1237,12 @@ function CallScreen({
         loading={moving === "skip"}
         onClick={() => go("skip")}
       >
-        Skip for now
+        Skip
       </NavButton>
     )
   ) : lead ? (
     <Link href={`/leads/${lead.id}`} className={buttonClass("secondary", "lg", "flex-1 sm:flex-none")}>
-      Full record
+      Open lead
     </Link>
   ) : null;
 
@@ -1277,7 +1265,7 @@ function CallScreen({
             </Button>
           }
         >
-          Logged <span className="font-medium">{lastCall.label}</span> for {lastCall.name}
+          Saved <span className="font-medium">{lastCall.label}</span> for {lastCall.name}
         </Alert>
       )}
 
@@ -1288,8 +1276,8 @@ function CallScreen({
           <aside className="min-w-0">
             <Card padded={false} className="sticky top-20 p-4">
               <div className="mb-2 flex items-baseline justify-between gap-2">
-                <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">This run</p>
-                <span className="text-xs tabular-nums text-ink-muted">{ahead} ahead</span>
+                <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">Up next</p>
+                <span className="text-xs tabular-nums text-ink-muted">{ahead} left</span>
               </div>
               <div className="scroll-slim max-h-[calc(100vh-12rem)] overflow-y-auto">
                 <UpNextList
@@ -1315,7 +1303,7 @@ function CallScreen({
 
       {/* ------------------------------------------------------- dialogs */}
       {sheetOpen && inRun && (
-        <Modal title={`${run?.session?.label ?? "This run"} · ${ahead} ahead`} onClose={() => setSheetOpen(false)}>
+        <Modal title={`${run?.session?.label ?? "This list"} · ${ahead} left`} onClose={() => setSheetOpen(false)}>
           <UpNextList
             items={items}
             position={run?.session?.position ?? 0}
@@ -1328,7 +1316,7 @@ function CallScreen({
 
       {pauseOpen && (
         <Modal
-          title="Pause this run"
+          title="Pause calling?"
           onClose={() => setPauseOpen(false)}
           footer={
             <>
@@ -1341,11 +1329,7 @@ function CallScreen({
             </>
           }
         >
-          <p className="mb-3 text-sm text-ink-soft">
-            Your place is kept for today or tomorrow. The person on screen is let go, so a colleague can ring them
-            meanwhile.
-          </p>
-          <Field label="A note for yourself" htmlFor="pause-note" hint="Optional — “lunch”, “back after aarti”">
+          <Field label="Note (optional)" htmlFor="pause-note">
             <Input
               id="pause-note"
               value={pauseNote}
@@ -1361,23 +1345,21 @@ function CallScreen({
         <Modal
           title={
             pickedHere
-              ? `You picked “${pickedHere.label}” but didn't log it`
+              ? `“${pickedHere.label}” is not saved`
               : dialledHere?.via === "whatsapp"
-              ? `You messaged ${leadName} but didn't log what happened`
-              : `You rang ${leadName} but didn't log what happened`
+              ? `Save your message to ${leadName}?`
+              : `Save your call to ${leadName}?`
           }
           onClose={() => setGuard(null)}
         >
           <p className="text-sm text-ink-soft">
-            {pickedHere
-              ? "It is not saved until you confirm it."
-              : "Log how it went — even “No answer” — so they come back round at the right time and nobody rings them twice."}
+            {pickedHere ? "Confirm to save it." : "Pick a call result, even “No answer”."}
           </p>
           {/* In the body, Log first: the dialog focuses its first control, and
               Enter should keep the call, not throw it away. */}
           <div className="mt-4 flex flex-col gap-2 sm:flex-row">
             <Button size="lg" icon="check" onClick={toOutcomes}>
-              Log an outcome
+              Pick result
             </Button>
             <Button size="lg" variant="secondary" onClick={leaveAnyway}>
               {guard.action === "skip" || guard.action === "next" ? "Skip anyway" : "Leave anyway"}

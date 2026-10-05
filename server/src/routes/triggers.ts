@@ -33,7 +33,7 @@ router.post('/:id/sent', async (req, res) => {
     "UPDATE triggers SET status = 'sent' WHERE id = $1 AND status = 'pending' RETURNING *",
     [id]
   );
-  if (!result.rows.length) return res.status(404).json({ error: 'Trigger not found or already processed' });
+  if (!result.rows.length) return res.status(404).json({ error: 'Not found or already done.' });
   res.json(result.rows[0]);
 });
 
@@ -44,7 +44,7 @@ router.post('/:id/failed', async (req, res) => {
     "UPDATE triggers SET status = 'failed' WHERE id = $1 AND status = 'pending' RETURNING *",
     [id]
   );
-  if (!result.rows.length) return res.status(404).json({ error: 'Trigger not found or already processed' });
+  if (!result.rows.length) return res.status(404).json({ error: 'Not found or already done.' });
   res.json(result.rows[0]);
 });
 

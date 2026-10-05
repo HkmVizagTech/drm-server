@@ -60,22 +60,22 @@ const ROLES: { value: string; label: string; blurb: string }[] = [
   {
     value: "caller",
     label: "Caller",
-    blurb: "The Calling section — their queue, follow-ups, reminders and links. They can look up a donor's record but not change it.",
+    blurb: "Calling, follow-ups and reminders. Can view donors.",
   },
   {
     value: "accountant",
     label: "Accountant",
-    blurb: "Donations, receipts, recurring giving and reports. No access to the calling lists.",
+    blurb: "Donations, receipts and reports.",
   },
   {
     value: "volunteer_coordinator",
     label: "Volunteer coordinator",
-    blurb: "Seva bookings, events and the people behind them.",
+    blurb: "Seva, events and people.",
   },
   {
     value: "admin",
     label: "Administrator",
-    blurb: "Everything, including creating accounts and changing settings.",
+    blurb: "Everything, including accounts and settings.",
   },
 ];
 
@@ -99,7 +99,7 @@ export default function TeamPage() {
       setUsers(d.users);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the team");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     } finally {
       setLoading(false);
     }
@@ -115,7 +115,7 @@ export default function TeamPage() {
       await apiClient.put(`/api/auth/users/${id}`, body);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
       // Reload anyway: the row on screen is now showing a change that was
       // refused, and leaving it there would be a lie.
       await load();
@@ -125,12 +125,12 @@ export default function TeamPage() {
   if (user && user.role !== "admin") {
     return (
       <div>
-        <PageHeader eyebrow="Setup" title="Team" subtitle="Accounts and what each of them can reach" />
+        <PageHeader eyebrow="Setup" title="Team" subtitle="Who can sign in" />
         <Card>
           <EmptyState
             icon="shield"
             title="Administrators only"
-            message="Only an administrator can see and change accounts. Ask one if you need access to something."
+            message="Ask an admin for access."
           />
         </Card>
       </div>
@@ -142,10 +142,10 @@ export default function TeamPage() {
       <PageHeader
         eyebrow="Setup"
         title="Team"
-        subtitle="Who can sign in to DRM, and what each of them can reach"
+        subtitle="Who can sign in"
         actions={
           <Button icon="userPlus" onClick={() => setShowNew(true)}>
-            Add someone
+            Add member
           </Button>
         }
       />
@@ -163,13 +163,13 @@ export default function TeamPage() {
       <CardHeader
         icon="users"
         title={`${users.filter((u) => u.active).length} active`}
-        subtitle="Switching someone off stops them signing in and keeps every call they logged."
+        subtitle="Turn off to stop sign-in. Their calls stay."
       />
 
       <TableShell>
         <Thead>
           <Th>Name</Th>
-          <Th>Can reach</Th>
+          <Th>Role</Th>
           <Th align="right">Leads</Th>
           <Th align="right">Calls, 7 days</Th>
           <Th>Last signed in</Th>
@@ -195,7 +195,7 @@ export default function TeamPage() {
                     value={u.role}
                     onChange={(v) => void save(u.id, { role: v })}
                     className="min-w-[12rem]"
-                    ariaLabel={`What ${u.name} can reach`}
+                    ariaLabel={`Role for ${u.name}`}
                     options={ROLE_OPTIONS}
                   />
                 </Td>
@@ -234,7 +234,7 @@ export default function TeamPage() {
       </TableShell>
 
       <Card className="mt-5">
-        <CardHeader icon="help" title="What the roles mean" />
+        <CardHeader icon="help" title="Roles" />
         <dl className="space-y-3">
           {ROLES.map((r) => (
             <div key={r.value}>
@@ -250,7 +250,7 @@ export default function TeamPage() {
           onClose={() => setShowNew(false)}
           onDone={async (name) => {
             setShowNew(false);
-            setNotice(`${name} can now sign in. Give them the password you just set — DRM cannot email it.`);
+            setNotice(`${name} can now sign in. Share the password with them.`);
             await load();
           }}
         />
@@ -261,7 +261,7 @@ export default function TeamPage() {
           user={resetting}
           onClose={() => setResetting(null)}
           onDone={() => {
-            setNotice(`${resetting.name}'s password is set. Tell them what it is — DRM cannot email it.`);
+            setNotice(`Password set. Share it with ${resetting.name}.`);
             setResetting(null);
           }}
         />
@@ -289,7 +289,7 @@ function NewUserDialog({ onClose, onDone }: { onClose: () => void; onDone: (name
 
   return (
     <Modal
-      title="Add someone to the team"
+      title="Add member"
       onClose={onClose}
       footer={
         <>
@@ -311,12 +311,12 @@ function NewUserDialog({ onClose, onDone }: { onClose: () => void; onDone: (name
                 });
                 onDone(name.trim());
               } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not create that account");
+                setError(e instanceof Error ? e.message : "Could not add. Try again.");
                 setBusy(false);
               }
             }}
           >
-            Create the account
+            Add
           </Button>
         </>
       }
@@ -324,10 +324,10 @@ function NewUserDialog({ onClose, onDone }: { onClose: () => void; onDone: (name
       {error && <Alert tone="danger">{error}</Alert>}
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Their name" htmlFor="new-user-name" required>
+        <Field label="Name" htmlFor="new-user-name" required>
           <Input id="new-user-name" value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <Field label="Email they sign in with" htmlFor="new-user-email" required>
+        <Field label="E-mail ID" htmlFor="new-user-email" required>
           <Input
             id="new-user-email"
             value={email}
@@ -339,18 +339,18 @@ function NewUserDialog({ onClose, onDone }: { onClose: () => void; onDone: (name
       </div>
 
       <Field
-        label="What they do"
+        label="Role"
         className="mt-3"
         hint={ROLES.find((r) => r.value === role)?.blurb}
       >
-        <Select value={role} onChange={setRole} ariaLabel="What they do" options={ROLE_OPTIONS} />
+        <Select value={role} onChange={setRole} ariaLabel="Role" options={ROLE_OPTIONS} />
       </Field>
 
       <Field
-        label="A password to start with"
+        label="Password"
         htmlFor="new-user-password"
         className="mt-3"
-        hint="They can change it after signing in, under their own name in the sidebar."
+        hint="They can change it later."
         required
       >
         <div className="flex gap-2">
@@ -364,7 +364,7 @@ function NewUserDialog({ onClose, onDone }: { onClose: () => void; onDone: (name
             />
           </div>
           <Button variant="secondary" icon="sparkle" onClick={suggest}>
-            Suggest one
+            Suggest
           </Button>
         </div>
       </Field>
@@ -387,7 +387,7 @@ function PasswordDialog({
 
   return (
     <Modal
-      title={`Set a password for ${user.name}`}
+      title={`New password for ${user.name}`}
       onClose={onClose}
       tone="danger"
       footer={
@@ -410,21 +410,17 @@ function PasswordDialog({
                 await apiClient.post(`/api/auth/users/${user.id}/password`, { new_password: password });
                 onDone();
               } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not set that password");
+                setError(e instanceof Error ? e.message : "Could not set password. Try again.");
                 setBusy(false);
               }
             }}
           >
-            Set it
+            Set password
           </Button>
         </>
       }
     >
       {error && <Alert tone="danger">{error}</Alert>}
-      <p className="mb-3 text-sm text-ink-soft">
-        They will be signed out of nothing — an existing session keeps working until it expires. Tell them the new
-        password yourself; DRM has no email set up to send it.
-      </p>
       <Field label="New password" htmlFor="reset-password" required>
         <Input
           id="reset-password"

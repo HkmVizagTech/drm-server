@@ -108,7 +108,7 @@ export async function getReceipt(src: ReceiptSource, force = false): Promise<Rec
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     const err = new Error(
-      body.slice(0, 200) || `The site returned ${res.status} for that receipt.`
+      body.slice(0, 200) || `The site could not issue the receipt (${res.status}).`
     ) as Error & { status?: number };
     err.status = res.status;
     throw err;

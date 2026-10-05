@@ -94,8 +94,8 @@ export function MonthlyTrendChart({
   if (!data.length) {
     return (
       <ChartEmpty
-        title="No donations recorded yet"
-        message="Once donations start arriving, the last twelve months appear here."
+        title="No donations yet"
+        message="The last 12 months show here."
       />
     );
   }
@@ -132,7 +132,7 @@ export function MonthlyTrendChart({
         viewBox={`0 0 ${W} ${H}`}
         className="h-auto w-full"
         role="group"
-        aria-label="Donations per month over the last twelve months"
+        aria-label="Donations per month, last 12 months"
       >
         {ticks.map((t) => (
           <g key={t.y}>
@@ -284,7 +284,7 @@ export function CategoryBars({
   valueKey: string;
 }) {
   if (!data.length) {
-    return <ChartEmpty title="Nothing to break down yet" message="Donations grouped by purpose appear here." />;
+    return <ChartEmpty title="No donations yet" message="Donations by purpose show here." />;
   }
 
   const max = Math.max(...data.map((d) => Number(d[valueKey])), 1);

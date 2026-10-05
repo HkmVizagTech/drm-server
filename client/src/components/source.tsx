@@ -45,11 +45,11 @@ export function SourceCell({
           {page}
         </span>
       ) : (
-        <span className="text-xs text-ink-faint">no page recorded</span>
+        <span className="text-xs text-ink-faint">No page</span>
       )}
       {campaign && (
         <span className="max-w-[12rem] truncate text-2xs text-ink-faint" title={campaign}>
-          campaign: {campaign}
+          Campaign: {campaign}
         </span>
       )}
     </div>

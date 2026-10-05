@@ -110,8 +110,8 @@ type Tab = (typeof STATUS_TABS)[number];
 
 const PAGE_GROUPS = [
   { key: "", label: "Any page" },
-  { key: "donations", label: "Donations page (incl. nested)" },
-  { key: "donate", label: "Donate — seva campaigns" },
+  { key: "donations", label: "Donations pages" },
+  { key: "donate", label: "Seva pages" },
   { key: "other", label: "Other pages" },
 ];
 
@@ -141,18 +141,18 @@ function SampleButtons({ onError }: { onError?: (m: string) => void }) {
   return (
     <>
       <Button variant="secondary" icon="fileText" onClick={downloadSampleCsv}>
-        Sample file (CSV)
+        Sample CSV
       </Button>
       <Button
         variant="secondary"
         icon="sheet"
         onClick={() =>
           downloadFromApi("/api/prasadam/import/sample.xlsx", "prasadam-upload-sample.xlsx").catch((e) =>
-            onError?.(e instanceof Error ? e.message : "Could not download the sample")
+            onError?.(e instanceof Error ? e.message : "Could not download. Try again.")
           )
         }
       >
-        Excel
+        Sample Excel
       </Button>
     </>
   );
@@ -273,7 +273,7 @@ export default function PrasadamPage() {
         tone: "good",
         text:
           `${number(r.updated)} marked ${status}` +
-          (r.skipped ? ` — ${number(r.skipped)} could not be updated` : ""),
+          (r.skipped ? `. ${number(r.skipped)} not updated.` : ""),
       });
       setSelected(new Set());
       setTracking("");
@@ -305,7 +305,7 @@ export default function PrasadamPage() {
         title="Prasadam deliveries"
         subtitle={
           data
-            ? `${number(data.total)} matching · ${number(data.byStatus.pending ?? 0)} still pending`
+            ? `${number(data.total)} found · ${number(data.byStatus.pending ?? 0)} pending`
             : undefined
         }
         actions={
@@ -354,7 +354,7 @@ export default function PrasadamPage() {
             id="prasadam-search"
             value={search}
             onChange={setSearch}
-            placeholder="Donor name, phone or tracking number"
+            placeholder="Name, mobile or tracking no."
           />
         </Field>
         <Field label="Site" className="flex-1 min-w-[9rem]">
@@ -382,7 +382,7 @@ export default function PrasadamPage() {
             onChange={(v) => setIncludePurpose(v)}
             ariaLabel="Include seva"
           >
-            <option value="">Include any seva</option>
+            <option value="">Any seva</option>
             {options.purposes.map((p) => (
               <option key={p.purpose} value={p.purpose}>
                 Only {p.purpose} ({p.count})
@@ -404,7 +404,7 @@ export default function PrasadamPage() {
             ))}
           </Select>
         </Field>
-        <Field label="Queued from" htmlFor="prasadam-from" className="w-40">
+        <Field label="From" htmlFor="prasadam-from" className="w-40">
           <Input
             id="prasadam-from"
             type="date"
@@ -412,7 +412,7 @@ export default function PrasadamPage() {
             onChange={(e) => setFromDate(e.target.value)}
           />
         </Field>
-        <Field label="Queued to" htmlFor="prasadam-to" className="w-40">
+        <Field label="To" htmlFor="prasadam-to" className="w-40">
           <Input
             id="prasadam-to"
             type="date"
@@ -441,7 +441,7 @@ export default function PrasadamPage() {
                 placeholder="Optional"
               />
             </Field>
-            <Field label="Tracking no" htmlFor="bulk-tracking" className="w-44">
+            <Field label="Tracking No." htmlFor="bulk-tracking" className="w-44">
               <Input
                 id="bulk-tracking"
                 value={tracking}
@@ -473,8 +473,7 @@ export default function PrasadamPage() {
             return d && hasMultiple(d);
           }) && (
             <p className="mt-2 text-xs text-brand-800">
-              Some of these donors have more than one open delivery. Check you have ticked the right
-              donation — the row expands to show which donation it belongs to.
+              Some donors have more than one delivery. Check you ticked the right one.
             </p>
           )}
         </Card>
@@ -489,7 +488,7 @@ export default function PrasadamPage() {
               onChange={() =>
                 setSelected(allSelected ? new Set() : new Set(deliveries.map((d) => d.id)))
               }
-              label={<span className="sr-only">Select all on this page</span>}
+              label={<span className="sr-only">Select all</span>}
             />
           </Th>
           <Th>Donor</Th>
@@ -506,8 +505,8 @@ export default function PrasadamPage() {
               <td colSpan={6}>
                 <EmptyState
                   icon="box"
-                  title="Nothing here"
-                  message="No deliveries match these filters. Try a different status or widen the dates."
+                  title="No deliveries"
+                  message="Try another tab or change the dates."
                 />
               </td>
             </tr>
@@ -528,7 +527,7 @@ export default function PrasadamPage() {
                   <span className="block text-xs tabular-nums text-ink-muted">{d.donor_phone}</span>
                   {hasMultiple(d) && (
                     <span className="mt-1 inline-block">
-                      <Badge tone="warn">several open</Badge>
+                      <Badge tone="warn">More than one</Badge>
                     </span>
                   )}
                 </Td>
@@ -548,7 +547,7 @@ export default function PrasadamPage() {
                       </span>
                     </>
                   ) : (
-                    <span className="text-xs text-ink-faint">No donation linked</span>
+                    <span className="text-xs text-ink-faint">No donation</span>
                   )}
                 </Td>
                 <Td>
@@ -601,7 +600,7 @@ export default function PrasadamPage() {
                   {expanded === d.id && (
                     <div className="mt-2 space-y-1 rounded-card bg-sunken p-3 text-left text-xs text-ink-soft">
                       <p>
-                        <span className="text-ink-faint">Queued</span> {shortDate(d.created_at)}
+                        <span className="text-ink-faint">Added</span> {shortDate(d.created_at)}
                       </p>
                       {d.dispatched_at && (
                         <p>
@@ -720,7 +719,7 @@ function ImportDialog({
       mapColumns(parsed[0].headers);
     } catch (e) {
       setSheets([]);
-      setError(e instanceof Error ? e.message : "That file could not be read.");
+      setError(e instanceof Error ? e.message : "Could not read the file. Try again.");
     } finally {
       setBusy(false);
     }
@@ -728,7 +727,7 @@ function ImportDialog({
 
   const runPreview = async () => {
     if (cols.phone < 0) {
-      setError("Pick which column holds the phone number.");
+      setError("Pick the mobile number column.");
       return;
     }
     setBusy(true);
@@ -764,7 +763,7 @@ function ImportDialog({
           .map((a) => ({ id: choices[a.row.rowNumber], delivered_at: a.row.deliveredAt || undefined })),
       ];
       if (!entries.length) {
-        setError("Nothing to apply — no rows matched and none were chosen.");
+        setError("Nothing to update. No rows found.");
         setBusy(false);
         return;
       }
@@ -773,8 +772,8 @@ function ImportDialog({
         { deliveries: entries, courier_name: courier || undefined }
       );
       onDone(
-        `${number(r.updated)} deliveries marked delivered from the file` +
-          (r.skipped ? ` — ${number(r.skipped)} could not be applied` : "")
+        `${number(r.updated)} marked delivered` +
+          (r.skipped ? `. ${number(r.skipped)} not updated.` : "")
       );
     } catch (e) {
       setError((e as Error).message);
@@ -798,7 +797,7 @@ function ImportDialog({
         <>
           {preview && unresolved > 0 && (
             <span className="mr-auto text-xs text-ink-muted">
-              {number(unresolved)} still unchosen and will be skipped
+              {number(unresolved)} not picked. These will be skipped.
             </span>
           )}
           <Button variant="secondary" onClick={onClose}>
@@ -806,22 +805,19 @@ function ImportDialog({
           </Button>
           {preview ? (
             <Button loading={busy} onClick={commit}>
-              {`Apply ${number(preview.summary.matched + Object.keys(choices).length)} deliveries`}
+              {`Update ${number(preview.summary.matched + Object.keys(choices).length)} deliveries`}
             </Button>
           ) : (
             headers.length > 0 && (
               <Button loading={busy} onClick={runPreview}>
-                Check the file
+                Check file
               </Button>
             )
           )}
         </>
       }
     >
-      <p className="mb-4 text-xs text-ink-muted">
-        Nothing is changed until you press Apply. Rows matching more than one open delivery wait for
-        you to choose.
-      </p>
+      <p className="mb-4 text-xs text-ink-muted">Nothing changes until you press Update.</p>
 
       {error && <Alert tone="danger">{error}</Alert>}
 
@@ -876,14 +872,14 @@ function ImportDialog({
               <>
                 <p className="mt-3 text-sm font-medium text-ink">{fileName}</p>
                 <p className="mt-1 text-xs text-ink-muted">
-                  {number(rows.length)} rows read · click to choose a different file
+                  {number(rows.length)} rows · click to change file
                 </p>
               </>
             ) : (
               <>
-                <p className="mt-3 text-sm font-medium text-ink">Drop the courier&apos;s file here</p>
+                <p className="mt-3 text-sm font-medium text-ink">Drop the courier file here</p>
                 <p className="mt-1 text-xs text-ink-muted">
-                  or click to choose one — Excel or CSV, and only a phone column is required
+                  or click to choose. Excel or CSV.
                 </p>
               </>
             )}
@@ -894,8 +890,7 @@ function ImportDialog({
               <SampleButtons onError={setError} />
             </div>
             <span className="max-w-md text-xs text-ink-muted">
-              Not sure of the format? The sample shows the columns. The file from “Download” also
-              works as-is — it already has Phone and Tracking number columns.
+              Only a mobile number column is needed.
             </span>
           </div>
         </div>
@@ -908,7 +903,7 @@ function ImportDialog({
               about it. */}
           {sheets.length > 1 && (
             <Field
-              label={`This workbook has ${sheets.length} sheets — which one is the courier's?`}
+              label="Which sheet?"
               className="mb-3"
             >
               <Select
@@ -925,14 +920,14 @@ function ImportDialog({
             </Field>
           )}
           <p className="mb-2 text-xs text-ink-muted">
-            {number(rows.length)} rows read. Check the columns were picked up correctly:
+            {number(rows.length)} rows. Check the columns:
           </p>
           <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
             {(
               [
-                ["phone", "Phone (required)"],
+                ["phone", "Mobile Number"],
                 ["name", "Name"],
-                ["tracking", "Tracking no"],
+                ["tracking", "Tracking No."],
                 ["delivered", "Delivered date"],
               ] as const
             ).map(([key, label]) => (
@@ -946,7 +941,7 @@ function ImportDialog({
                   onChange={(v) => setCols({ ...cols, [key]: Number(v) })}
                   ariaLabel={label}
                 >
-                  <option value={-1}>— none —</option>
+                  <option value={-1}>None</option>
                   {headers.map((h, i) => (
                     <option key={i} value={i}>
                       {h || `Column ${i + 1}`}
@@ -965,7 +960,7 @@ function ImportDialog({
             {[
               ["Rows", preview.summary.rows],
               ["Ready", preview.summary.matched],
-              ["Need a choice", preview.summary.ambiguous],
+              ["Pick one", preview.summary.ambiguous],
               ["No match", preview.summary.unmatched],
             ].map(([label, value]) => (
               <div key={label as string} className="rounded-card border border-line-soft p-3">
@@ -980,7 +975,7 @@ function ImportDialog({
           {preview.ambiguous.length > 0 && (
             <div className="mb-4">
               <p className="mb-2 text-xs font-medium text-ink-soft">
-                These donors have more than one open delivery. Pick which donation arrived:
+                These donors have more than one delivery. Pick the right one:
               </p>
               <div className="max-h-80 space-y-3 overflow-y-auto pr-1">
                 {preview.ambiguous.map((a) => (
@@ -1004,7 +999,7 @@ function ImportDialog({
                           <span className="tabular-nums">
                             {currency(Number(c.donation_amount ?? 0))}
                           </span>
-                          <span>{c.donation_purpose ?? "no seva recorded"}</span>
+                          <span>{c.donation_purpose ?? "No seva"}</span>
                           <span className="text-ink-faint">
                             {c.donation_date ? shortDate(c.donation_date) : ""} · {c.status}
                           </span>
@@ -1034,19 +1029,19 @@ function ImportDialog({
           {preview.unmatched.length > 0 && (
             <details className="mb-4">
               <summary className="cursor-pointer text-xs text-ink-muted">
-                {number(preview.unmatched.length)} rows matched nothing — see why
+                {number(preview.unmatched.length)} rows not found. See why
               </summary>
               <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto">
                 {preview.unmatched.map((u) => (
                   <li key={u.row.rowNumber} className="text-2xs text-ink-muted">
-                    Row {u.row.rowNumber} ({u.row.phone || "no phone"}): {u.reason}
+                    Row {u.row.rowNumber} ({u.row.phone || "no number"}): {u.reason}
                   </li>
                 ))}
               </ul>
             </details>
           )}
 
-          <Field label="Courier name" hint="Optional — recorded against every row this file marks" className="w-60">
+          <Field label="Courier name" hint="Optional" className="w-60">
             <Input value={courier} onChange={(e) => setCourier(e.target.value)} />
           </Field>
         </>

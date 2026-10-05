@@ -113,7 +113,7 @@ interface Config {
 
 const SOURCES = [
   { key: "donor", label: "Existing donors" },
-  { key: "csv", label: "Uploaded list" },
+  { key: "csv", label: "Uploaded sheet" },
   { key: "website", label: "Website enquiry" },
   { key: "walk_in", label: "Walk-in" },
   { key: "referral", label: "Referral" },
@@ -126,11 +126,11 @@ const DUE_FILTERS = [
   { key: "overdue", label: "Overdue" },
   { key: "today_only", label: "Due today" },
   { key: "upcoming", label: "Upcoming" },
-  { key: "none", label: "Nothing scheduled" },
+  { key: "none", label: "No follow-up" },
 ];
 
 const SORTS = [
-  { value: "due", label: "What's due" },
+  { value: "due", label: "Due first" },
   { value: "untouched", label: "Never called" },
   { value: "value", label: "Biggest first" },
   { value: "newest", label: "Newest" },
@@ -311,7 +311,7 @@ function Leads() {
     (k: string) =>
       apiClient.get<{ leads: Lead[]; total: number }>(`/api/crm/leads?${k}`).then(
         (d) => settle(k, d, null),
-        (e) => settle(k, null, e instanceof Error ? e.message : "Could not load leads")
+        (e) => settle(k, null, e instanceof Error ? e.message : "Could not load leads. Try again.")
       ),
     [settle]
   );
@@ -397,7 +397,7 @@ function Leads() {
       const r = await apiClient.get<{ ids: string[]; truncated: boolean }>(`/api/crm/leads/ids?${filterQuery()}`);
       setAll({ key: forKey, ids: r.ids, truncated: r.truncated });
     } catch (e) {
-      toast.error("Could not select them all", e instanceof Error ? e.message : undefined);
+      toast.error("Could not select all. Try again.", e instanceof Error ? e.message : undefined);
     } finally {
       setSelectingAll(false);
     }
@@ -422,12 +422,12 @@ function Leads() {
         label: `${number(ids.length)} picked lead${ids.length === 1 ? "" : "s"}`,
       });
       if (run.empty || !run.session) {
-        toast.info("Nobody among those can be rung", "Do-not-call and closed leads are left out of a run.");
+        toast.info("No one to call", "Do-not-call and closed leads are skipped.");
         return;
       }
       router.push(runHref(run.session.id));
     } catch (e) {
-      toast.error("Could not start calling", e instanceof Error ? e.message : undefined);
+      toast.error("Could not start calling. Try again.", e instanceof Error ? e.message : undefined);
     } finally {
       setCalling(false);
     }
@@ -458,7 +458,7 @@ function Leads() {
     { value: "none", label: "Not from a sheet" },
     ...(config?.batches ?? []).map((b) => ({
       value: b.id,
-      label: b.label || (b.sheet_name ? `${b.filename} — ${b.sheet_name}` : b.filename),
+      label: b.label || (b.sheet_name ? `${b.filename} · ${b.sheet_name}` : b.filename),
     })),
   ];
 
@@ -467,7 +467,7 @@ function Leads() {
       <PageHeader
         eyebrow="Calling"
         title="Leads"
-        subtitle={`${number(total)} ${total === 1 ? "person" : "people"} in the calling list`}
+        subtitle={`${number(total)} ${total === 1 ? "lead" : "leads"}`}
         actions={
           <>
             {elevated && (
@@ -478,22 +478,22 @@ function Leads() {
                 path="/api/crm/leads/sample"
                 filename="lead-upload-sample"
                 label="Sample file"
-                hint="The columns a calling list can have"
+                hint="Columns you can use"
               />
             )}
             <ExportButton
               path="/api/crm/leads/export"
               params={query()}
               filename="leads"
-              hint={`${number(total)} lead${total === 1 ? "" : "s"} match these filters`}
+              hint={`${number(total)} lead${total === 1 ? "" : "s"}`}
             />
             {elevated && (
               <>
                 <Button variant="secondary" icon="rupee" onClick={() => setShowAbandoned(true)}>
-                  Unfinished donations
+                  Nearly gave
                 </Button>
                 <Button variant="secondary" icon="users" onClick={() => setShowPull(true)}>
-                  Pull from donors
+                  Add from donors
                 </Button>
                 {/* Two ways in, for two genuinely different files.
                       Quick list   - the thirty numbers someone sent on WhatsApp.
@@ -505,7 +505,7 @@ function Leads() {
                   Quick list
                 </Button>
                 <LinkButton href="/calling/uploads" variant="primary" icon="sheet">
-                  Upload an office sheet
+                  Upload sheet
                 </LinkButton>
               </>
             )}
@@ -525,7 +525,7 @@ function Leads() {
               id="leads-search"
               value={search}
               onChange={setSearch}
-              placeholder="Name, phone, email…"
+              placeholder="Name, mobile, e-mail…"
               className="flex-1"
             />
             <Button
@@ -639,7 +639,7 @@ function Leads() {
               onRemove={() => setParams({ list: null, callable: null })}
             />
           )}
-          {callable && <FilterChip label="Due to call now" onRemove={() => setParams({ callable: null })} />}
+          {callable && <FilterChip label="Ready to call" onRemove={() => setParams({ callable: null })} />}
           {tag && <FilterChip label={`Tag: #${tag}`} onRemove={() => setParams({ tag: null })} />}
         </div>
       )}
@@ -699,7 +699,7 @@ function Leads() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-2">
                       <Link href={`/leads/${l.id}`} className="min-w-0 truncate font-medium text-ink">
-                        {l.name || "Name not known"}
+                        {l.name || "No name"}
                       </Link>
                       <Badge tone={l.converted_amount ? "good" : l.do_not_call ? "danger" : "neutral"}>
                         {l.do_not_call ? "Do not call" : l.status_label ?? l.status}
@@ -746,16 +746,16 @@ function Leads() {
                 checked={allOnPage}
                 indeterminate={someOnPage}
                 onChange={togglePage}
-                label={<span className="sr-only">Select every lead on this page</span>}
+                label={<span className="sr-only">Select all</span>}
               />
             </Th>
-            <Th>Who</Th>
+            <Th>Lead</Th>
             <Th>Stage</Th>
             <Th>Preacher</Th>
             <Th>Assigned</Th>
             <Th align="right">Attempts</Th>
             <Th>Due</Th>
-            <Th align="right">Given before</Th>
+            <Th align="right">Donated</Th>
             <Th align="right"> </Th>
           </Thead>
 
@@ -794,7 +794,7 @@ function Leads() {
                     </Td>
                     <Td>
                       <Link href={`/leads/${l.id}`} className="font-medium text-ink hover:text-brand-700">
-                        {l.name || "Name not known"}
+                        {l.name || "No name"}
                       </Link>
                       <div className="text-xs tabular-nums text-ink-muted">
                         {formatPhone(l.phone)}
@@ -807,7 +807,7 @@ function Leads() {
                             <button
                               key={t}
                               type="button"
-                              title={`Show everyone tagged #${t}`}
+                              title={`Show #${t}`}
                               onClick={() => setParams({ tag: t })}
                             >
                               <Badge>{t}</Badge>
@@ -858,7 +858,7 @@ function Leads() {
                           <div className="text-xs text-ink-faint">in temple accounts</div>
                         </>
                       ) : (
-                        <span className="text-ink-faint">never given</span>
+                        <span className="text-ink-faint">None</span>
                       )}
                     </Td>
                     <Td align="right">
@@ -897,15 +897,15 @@ function Leads() {
         onClear={clearSelection}
       >
         <Button icon="phoneOutgoing" loading={calling} onClick={() => void callThese()}>
-          Call these now
+          Call these
         </Button>
         {elevated && (
           <>
             <Button variant="secondary" icon="list" onClick={() => setShowAddToList(true)}>
-              Add to a list
+              Add to list
             </Button>
             <Button variant="secondary" icon="settings" onClick={() => setShowBulk(true)}>
-              Change them…
+              Edit selected
             </Button>
           </>
         )}
@@ -971,17 +971,17 @@ function NoLeads({
         filtered
           ? "Try clearing a filter."
           : elevated
-            ? "Build a list from your existing donors, or upload one."
-            : "Nobody has been given to you yet."
+            ? "Add from donors or upload a sheet."
+            : "No leads given to you yet."
       }
       action={
         filtered ? (
           <Button variant="secondary" icon="x" onClick={onClear}>
-            Clear the filters
+            Clear filters
           </Button>
         ) : elevated ? (
           <Button icon="users" onClick={onPull}>
-            Pull from donors
+            Add from donors
           </Button>
         ) : undefined
       }
@@ -1056,7 +1056,7 @@ function UploadDialog({
       if (parsed.length > 1) setSheets(parsed);
       else await previewSheet(parsed[0]);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not read that file");
+      setError(e instanceof Error ? e.message : "Could not read the file. Try again.");
       setPreview(null);
     } finally {
       setBusy(false);
@@ -1070,7 +1070,7 @@ function UploadDialog({
       await previewSheet(sheet);
       setSheets(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not read that sheet");
+      setError(e instanceof Error ? e.message : "Could not read the sheet. Try again.");
     } finally {
       setBusy(false);
     }
@@ -1091,9 +1091,9 @@ function UploadDialog({
         }
       );
       setResult(r);
-      toast(`Imported ${number(r.added)} lead${r.added === 1 ? "" : "s"}`);
+      toast(`${number(r.added)} lead${r.added === 1 ? "" : "s"} added`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not import that list");
+      setError(e instanceof Error ? e.message : "Could not import. Try again.");
     } finally {
       setBusy(false);
     }
@@ -1101,19 +1101,19 @@ function UploadDialog({
 
   return (
     <Modal
-      title="Upload a calling list"
+      title="Upload a list"
       onClose={onClose}
       wide
       footer={
         result ? (
-          <Button onClick={onDone}>See the list</Button>
+          <Button onClick={onDone}>Done</Button>
         ) : preview ? (
           <>
             <Button variant="secondary" onClick={() => { setPreview(null); setFileName(null); }}>
-              Choose a different file
+              Change file
             </Button>
             <Button onClick={() => void commit()} loading={busy} disabled={!preview.counts.new}>
-              {busy ? "Importing…" : `Import ${number(preview.counts.new)} lead${preview.counts.new === 1 ? "" : "s"}`}
+              {busy ? "Adding…" : `Add ${number(preview.counts.new)} lead${preview.counts.new === 1 ? "" : "s"}`}
             </Button>
           </>
         ) : undefined
@@ -1123,13 +1123,13 @@ function UploadDialog({
         <div className="py-6 text-center">
           <p className="text-2xl font-semibold text-ink">{number(result.added)} added</p>
           <p className="mt-1 text-sm text-ink-muted">
-            {number(result.updated)} already existed and were topped up · {number(result.skipped)} skipped
+            {number(result.updated)} updated · {number(result.skipped)} skipped
           </p>
         </div>
       ) : sheets ? (
         <>
           <p className="text-sm text-ink-soft">
-            <strong>{fileName}</strong> has {sheets.length} sheets. Which one holds the list to call?
+            <strong>{fileName}</strong> has {sheets.length} sheets. Which one?
           </p>
           <div className="mt-3 space-y-2">
             {sheets.map((s, i) => (
@@ -1179,10 +1179,10 @@ function UploadDialog({
             }`}
           >
             <p className="text-sm font-medium text-ink">
-              {busy ? "Reading the file…" : "Drop an Excel file or CSV here, or click to choose one"}
+              {busy ? "Reading…" : "Drop an Excel or CSV file here, or click to choose"}
             </p>
             <p className="mt-1 text-xs text-ink-muted">
-              Any column names work — Mobile, Mobile No., Contact Number are all understood
+              Needs a mobile number column
             </p>
           </div>
           {error && <Alert tone="danger" className="mt-3">{error}</Alert>}
@@ -1190,32 +1190,29 @@ function UploadDialog({
       ) : (
         <>
           <p className="text-sm text-ink-soft">
-            Read <strong>{fileName}</strong> — {number(preview.total)} rows. Nothing has been saved yet.
+            <strong>{fileName}</strong>: {number(preview.total)} rows. Not saved yet.
           </p>
 
           <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Tally label="Will be added" value={preview.counts.new} tone="good" />
+            <Tally label="New" value={preview.counts.new} tone="good" />
             <Tally label="Already leads" value={preview.counts.duplicate} />
-            <Tally label="Bad numbers" value={preview.counts.invalid + preview.counts.blank} tone="warn" />
-            <Tally label="New, but known to us" value={preview.counts.already_donors} tone="info" />
+            <Tally label="Wrong numbers" value={preview.counts.invalid + preview.counts.blank} tone="warn" />
+            <Tally label="Already donors" value={preview.counts.already_donors} tone="info" />
           </div>
 
           {preview.counts.already_donors > 0 && (
             <p className="mt-3 text-xs text-ink-muted">
-              {number(preview.counts.already_donors)} of the new rows have given to the temple before — they will be
-              linked to their giving history automatically, so callers see it before they dial.
+              {number(preview.counts.already_donors)} have donated before. Their donations will show.
             </p>
           )}
           {preview.counts.repeated_in_file > 0 && (
             <p className="mt-3 text-xs text-ink-muted">
-              {number(preview.counts.repeated_in_file)} row{preview.counts.repeated_in_file === 1 ? " was" : "s were"} the
-              same number twice in this file — counted once.
+              {number(preview.counts.repeated_in_file)} repeated number{preview.counts.repeated_in_file === 1 ? "" : "s"}. Counted once.
             </p>
           )}
           {preview.counts.do_not_call > 0 && (
             <p className="mt-2 text-xs text-danger">
-              {number(preview.counts.do_not_call)} of these previously asked not to be called. They stay marked
-              do-not-call and will not enter any queue.
+              {number(preview.counts.do_not_call)} asked not to be called. They will be skipped.
             </p>
           )}
           {preview.columns_ignored.length > 0 && (
@@ -1223,18 +1220,18 @@ function UploadDialog({
           )}
 
           <div className="mt-5 grid gap-3 sm:grid-cols-3">
-            <Field label="Call this list" htmlFor="upload-list-name">
+            <Field label="List name" htmlFor="upload-list-name">
               <Input id="upload-list-name" value={listName} onChange={(e) => setListName(e.target.value)} />
             </Field>
             <Field label="Assign to">
               <Select value={assignTo} onChange={(v) => setAssignTo(v)} ariaLabel="Assign to">
-                <option value="">Nobody yet</option>
+                <option value="">No one yet</option>
                 {config?.users.map((u) => (
                   <option key={u.id} value={u.id}>{u.name}</option>
                 ))}
               </Select>
             </Field>
-            <Field label="Tag them (optional)" htmlFor="upload-tag">
+            <Field label="Tag (optional)" htmlFor="upload-tag">
               <Input id="upload-tag" value={tag} onChange={(e) => setTag(e.target.value)} placeholder="e.g. janmashtami-2026" />
             </Field>
           </div>
@@ -1291,10 +1288,10 @@ function PullDialog({
       if (dry) setPreview(r as unknown as { matched: number; already_leads: number; would_add: number });
       else {
         setResult(r as unknown as { added: number; already_leads: number });
-        toast(`${number(r.added ?? 0)} donors added as leads`);
+        toast(`${number(r.added ?? 0)} leads added`);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not build that list");
+      setError(e instanceof Error ? e.message : "Could not add. Try again.");
     } finally {
       setBusy(false);
     }
@@ -1302,18 +1299,18 @@ function PullDialog({
 
   return (
     <Modal
-      title="Build a list from your donors"
+      title="Add leads from donors"
       onClose={onClose}
       footer={
         result ? (
-          <Button onClick={onDone}>See the list</Button>
+          <Button onClick={onDone}>Done</Button>
         ) : (
           <>
             <Button variant="secondary" onClick={() => void run(true)} loading={busy}>
-              {busy ? "Checking…" : "Check how many"}
+              {busy ? "Checking…" : "Check count"}
             </Button>
             <Button onClick={() => void run(false)} disabled={busy || !preview?.would_add}>
-              Add {preview ? number(preview.would_add) : ""} to the list
+              Add {preview ? number(preview.would_add) : ""} leads
             </Button>
           </>
         )
@@ -1322,17 +1319,12 @@ function PullDialog({
       {result ? (
         <div className="py-6 text-center">
           <p className="text-2xl font-semibold text-ink">{number(result.added)} added</p>
-          <p className="mt-1 text-sm text-ink-muted">{number(result.already_leads)} were already in the list</p>
+          <p className="mt-1 text-sm text-ink-muted">{number(result.already_leads)} were already leads</p>
         </div>
       ) : (
         <>
-          <p className="text-sm text-ink-soft">
-            Pulls people DRM already knows into the calling list, with their giving history attached. Nothing is
-            duplicated — anyone already a lead is left as they are.
-          </p>
-
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <Field label="Hasn't given since" htmlFor="pull-not-since">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Not donated since" htmlFor="pull-not-since">
               <Input
                 id="pull-not-since"
                 type="date"
@@ -1340,7 +1332,7 @@ function PullDialog({
                 onChange={(e) => { setNotSince(e.target.value); setPreview(null); }}
               />
             </Field>
-            <Field label="Has given at least (₹)" htmlFor="pull-min-total">
+            <Field label="Donated at least (₹)" htmlFor="pull-min-total">
               <Input
                 id="pull-min-total"
                 type="number"
@@ -1351,7 +1343,7 @@ function PullDialog({
             </Field>
             <Field label="From site">
               <Select value={site} onChange={(v) => { setSite(v); setPreview(null); }} ariaLabel="From site">
-                <option value="">Either site</option>
+                <option value="">Both sites</option>
                 <option value="hkmv">Main site</option>
                 <option value="annadan">Annadan site</option>
               </Select>
@@ -1370,13 +1362,12 @@ function PullDialog({
             <div className="mt-4 rounded-card bg-sunken px-4 py-3 text-sm">
               <p className="text-ink">
                 <strong>{number(preview.matched)}</strong> donors match.{" "}
-                <strong>{number(preview.would_add)}</strong> would be added
-                {preview.already_leads > 0 && <> — {number(preview.already_leads)} are already in the list</>}.
+                <strong>{number(preview.would_add)}</strong> will be added.
+                {preview.already_leads > 0 && <> {number(preview.already_leads)} are already leads.</>}
               </p>
               {preview.would_add > 400 && (
                 <p className="mt-1 text-xs text-warn">
-                  That is a lot of calls. At 20 an hour it is about {Math.round(preview.would_add / 20)} hours of
-                  phone time — consider narrowing it before committing.
+                  That is a lot. About {Math.round(preview.would_add / 20)} hours of calls.
                 </p>
               )}
             </div>
@@ -1384,18 +1375,18 @@ function PullDialog({
 
           {preview && preview.would_add > 0 && (
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
-              <Field label="Call this list" htmlFor="pull-list-name">
+              <Field label="List name" htmlFor="pull-list-name">
                 <Input id="pull-list-name" value={listName} onChange={(e) => setListName(e.target.value)} placeholder="Lapsed donors" />
               </Field>
               <Field label="Assign to">
                 <Select value={assignTo} onChange={(v) => setAssignTo(v)} ariaLabel="Assign to">
-                  <option value="">Nobody yet</option>
+                  <option value="">No one yet</option>
                   {config?.users.map((u) => (
                     <option key={u.id} value={u.id}>{u.name}</option>
                   ))}
                 </Select>
               </Field>
-              <Field label="Tag them" htmlFor="pull-tag">
+              <Field label="Tag" htmlFor="pull-tag">
                 <Input id="pull-tag" value={tag} onChange={(e) => setTag(e.target.value)} placeholder="optional" />
               </Field>
             </div>
@@ -1452,10 +1443,10 @@ function AbandonedDialog({
       else {
         const done = r as unknown as { added: number; already_leads: number; gave_anyway: number };
         setResult(done);
-        toast(`${number(done.added)} unfinished donations added as leads`);
+        toast(`${number(done.added)} leads added`);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not reach the sites");
+      setError(e instanceof Error ? e.message : "Could not reach the sites. Try again.");
     } finally {
       setBusy(false);
     }
@@ -1463,18 +1454,18 @@ function AbandonedDialog({
 
   return (
     <Modal
-      title="Donations nobody finished"
+      title="Nearly gave"
       onClose={onClose}
       footer={
         result ? (
-          <Button onClick={onDone}>See the list</Button>
+          <Button onClick={onDone}>Done</Button>
         ) : (
           <>
             <Button variant="secondary" onClick={() => void run(true)} loading={busy}>
-              {busy ? "Checking…" : "Check how many"}
+              {busy ? "Checking…" : "Check count"}
             </Button>
             <Button onClick={() => void run(false)} disabled={busy || !preview?.would_add}>
-              Add {preview ? number(preview.would_add) : ""} to the list
+              Add {preview ? number(preview.would_add) : ""} leads
             </Button>
           </>
         )
@@ -1484,23 +1475,15 @@ function AbandonedDialog({
         <div className="py-6 text-center">
           <p className="text-2xl font-semibold text-ink">{number(result.added)} added</p>
           <p className="mt-1 text-sm text-ink-muted">
-            {number(result.already_leads)} were already leads · {number(result.gave_anyway)} had given anyway and were
-            left alone
+            {number(result.already_leads)} already leads · {number(result.gave_anyway)} paid later
           </p>
         </div>
       ) : (
         <>
-          <p className="text-sm text-ink-soft">
-            People who filled in the form on annadan or the main site, reached the payment screen and never came back.
-            Most of the time that is a UPI app that failed, not a change of heart.
-          </p>
-          <p className="mt-2 text-xs text-ink-muted">
-            Anyone who gave successfully afterwards — on either site — is left out, so nobody is rung about a donation
-            they already made.
-          </p>
+          <p className="text-sm text-ink-soft">People who started a donation but did not pay.</p>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <Field label="Going back how many days" htmlFor="abandoned-days">
+            <Field label="Last how many days" htmlFor="abandoned-days">
               <Input
                 id="abandoned-days"
                 type="number"
@@ -1512,7 +1495,7 @@ function AbandonedDialog({
             </Field>
             <Field label="Assign to">
               <Select value={assignTo} onChange={(v) => setAssignTo(v)} ariaLabel="Assign to">
-                <option value="">Nobody yet</option>
+                <option value="">No one yet</option>
                 {config?.users.map((u) => (
                   <option key={u.id} value={u.id}>{u.name}</option>
                 ))}
@@ -1524,13 +1507,13 @@ function AbandonedDialog({
             <div className="mt-4 rounded-card bg-sunken px-4 py-3">
               <p className="text-sm text-ink">
                 <strong>{number(preview.found)}</strong> unfinished donations.{" "}
-                <strong>{number(preview.would_add)}</strong> would become leads
-                {preview.gave_anyway > 0 && <> — {number(preview.gave_anyway)} of these people gave anyway</>}
-                {preview.already_leads > 0 && <>, {number(preview.already_leads)} are already in the list</>}.
+                <strong>{number(preview.would_add)}</strong> will be added.
+                {preview.gave_anyway > 0 && <> {number(preview.gave_anyway)} paid later.</>}
+                {preview.already_leads > 0 && <> {number(preview.already_leads)} are already leads.</>}
               </p>
               {preview.value_at_stake > 0 && (
                 <p className="mt-1 text-sm text-ink-soft">
-                  <strong>{currency(preview.value_at_stake)}</strong> was on the payment screen and never arrived.
+                  <strong>{currency(preview.value_at_stake)}</strong> not paid.
                 </p>
               )}
               {preview.sample.length > 0 && (
@@ -1547,8 +1530,7 @@ function AbandonedDialog({
               )}
               {preview.site_errors.length > 0 && (
                 <p className="mt-2 text-xs text-warn">
-                  Could not reach: {preview.site_errors.map((e) => e.site).join(", ")} — the count above is only what
-                  the other site returned.
+                  Could not reach: {preview.site_errors.map((e) => e.site).join(", ")}. Count may be low.
                 </p>
               )}
             </div>

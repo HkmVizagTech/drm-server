@@ -233,7 +233,7 @@ router.get('/lists', async (req, res) => {
 // colleague mid-campaign or retire it outright.
 router.post('/lists', authorize('admin', 'accountant'), async (req, res) => {
   const name = str(req.body?.name, 160);
-  if (!name) return res.status(400).json({ error: 'A list needs a name' });
+  if (!name) return res.status(400).json({ error: 'Enter a list name.' });
 
   const b = req.body ?? {};
   try {
@@ -289,7 +289,7 @@ router.put('/lists/:id', authorize('admin', 'accountant'), async (req, res) => {
   };
   if (has('name')) {
     const n = str(b.name, 160);
-    if (!n) return res.status(400).json({ error: 'A list needs a name' });
+    if (!n) return res.status(400).json({ error: 'Enter a list name.' });
     set('name', n);
   }
   if (has('description')) set('description', str(b.description, 2000));
@@ -312,7 +312,7 @@ router.put('/lists/:id', authorize('admin', 'accountant'), async (req, res) => {
   try {
     if (!sets.length) {
       const r = await pool.query(`SELECT * FROM calling_lists WHERE id = $1`, [req.params.id]);
-      if (!r.rows.length) return res.status(404).json({ error: 'No such list' });
+      if (!r.rows.length) return res.status(404).json({ error: 'List not found.' });
       return res.json(r.rows[0]);
     }
     values.push(req.params.id);
@@ -321,7 +321,7 @@ router.put('/lists/:id', authorize('admin', 'accountant'), async (req, res) => {
         WHERE id = $${values.length} RETURNING *`,
       values
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'No such list' });
+    if (!r.rows.length) return res.status(404).json({ error: 'List not found.' });
     res.json(r.rows[0]);
   } catch (err) {
     console.error('crm.updateList error:', err);
@@ -399,7 +399,7 @@ router.post('/lists/:id/members', authorize('admin', 'accountant'), async (req, 
   if (!ids.length) return res.status(400).json({ error: 'Pick at least one person' });
   try {
     const list = await pool.query(`SELECT id FROM calling_lists WHERE id = $1`, [req.params.id]);
-    if (!list.rows.length) return res.status(404).json({ error: 'No such list' });
+    if (!list.rows.length) return res.status(404).json({ error: 'List not found.' });
     let changed = 0;
     if (action === 'remove') {
       const r = await pool.query(`DELETE FROM calling_list_members WHERE list_id = $1 AND lead_id = ANY($2::uuid[])`, [
@@ -413,7 +413,7 @@ router.post('/lists/:id/members', authorize('admin', 'accountant'), async (req, 
     res.json({ requested: ids.length, changed });
   } catch (err) {
     console.error('crm.listMembers error:', err);
-    res.status(500).json({ error: 'Could not change who is on that list' });
+    res.status(500).json({ error: 'Could not update the list. Try again.' });
   }
 });
 
@@ -451,7 +451,7 @@ router.get('/lists/:id/members', async (req, res) => {
  */
 router.post('/lists/:id/split', authorize('admin', 'accountant'), async (req, res) => {
   const userIds = uuids(req.body?.user_ids);
-  if (!userIds.length) return res.status(400).json({ error: 'Pick who to share it between' });
+  if (!userIds.length) return res.status(400).json({ error: 'Pick the callers.' });
   const includeAssigned = req.body?.include_assigned === true;
 
   const client = await pool.connect();
@@ -464,7 +464,7 @@ router.post('/lists/:id/split', authorize('admin', 'accountant'), async (req, re
     const valid = userIds.filter((u) => people.rows.some((r) => r.id === u));
     if (!valid.length) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'None of those people can take calls' });
+      return res.status(400).json({ error: 'None of them are callers.' });
     }
 
     const leads = await client.query(
@@ -493,7 +493,7 @@ router.post('/lists/:id/split', authorize('admin', 'accountant'), async (req, re
         );
         await client.query(
           `INSERT INTO lead_activities (lead_id, user_id, kind, to_value, note)
-           SELECT id, $2::uuid, 'assignment', $1::text, 'Shared out from a calling list'
+           SELECT id, $2::uuid, 'assignment', $1::text, 'Shared from a list'
              FROM unnest($3::uuid[]) AS id`,
           [uid, req.user?.userId ?? null, ids]
         );
@@ -518,7 +518,7 @@ router.post('/lists/:id/split', authorize('admin', 'accountant'), async (req, re
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.splitList error:', err);
-    res.status(500).json({ error: 'Could not share that list out' });
+    res.status(500).json({ error: 'Could not share the list. Try again.' });
   } finally {
     client.release();
   }
@@ -564,7 +564,7 @@ router.put('/lists/:id/assignees', authorize('admin', 'accountant'), async (req,
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.assignList error:', err);
-    res.status(500).json({ error: 'Could not save who this list is for' });
+    res.status(500).json({ error: 'Could not save. Try again.' });
   } finally {
     client.release();
   }
@@ -581,7 +581,7 @@ router.get('/lists/:id/assignees', async (req, res) => {
     res.json({ assignees: rows.rows });
   } catch (err) {
     console.error('crm.listAssignees error:', err);
-    res.status(500).json({ error: 'Could not load who this list is for' });
+    res.status(500).json({ error: 'Could not load. Try again.' });
   }
 });
 

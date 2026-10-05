@@ -167,9 +167,9 @@ router.post('/import/sheet', async (req, res) => {
     // one the office happened to save.
     sheets = await parseWorkbook(Buffer.from(base64, 'base64'), filename);
   } catch {
-    return res.status(400).json({ error: "That file couldn't be read as a spreadsheet." });
+    return res.status(400).json({ error: 'Could not read this file. Use Excel or CSV.' });
   }
-  if (!sheets.length) return res.status(400).json({ error: 'That file has no rows in it.' });
+  if (!sheets.length) return res.status(400).json({ error: 'The file is empty.' });
 
   const client = await pool.connect();
   try {
@@ -188,7 +188,7 @@ router.post('/import/sheet', async (req, res) => {
       if (mapping.phone === undefined) {
         batches.push({
           sheet_name: ws.name,
-          error: 'No phone column found',
+          error: 'No Mobile Number column found.',
           headers,
           rows_total: rows.length,
         });
@@ -398,7 +398,7 @@ router.post('/import/sheet', async (req, res) => {
     }
 
     await client.query('COMMIT');
-    if (!batches.length) return res.status(400).json({ error: 'That file has no rows in it.' });
+    if (!batches.length) return res.status(400).json({ error: 'The file is empty.' });
     res.json({ filename, batches });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -432,15 +432,15 @@ router.post('/import/batches/:id/apply', async (req, res) => {
     const batchRow = await client.query(`SELECT * FROM lead_import_batches WHERE id = $1 FOR UPDATE`, [req.params.id]);
     if (!batchRow.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'That upload no longer exists' });
+      return res.status(404).json({ error: 'Upload not found.' });
     }
     if (batchRow.rows[0].status === 'applied') {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'That upload has already been applied.' });
+      return res.status(409).json({ error: 'Already added.' });
     }
 
     const batch = batchRow.rows[0];
-    const listName = str(b.list_name, 160) ?? `${batch.filename}${batch.sheet_name ? ` — ${batch.sheet_name}` : ''}`;
+    const listName = str(b.list_name, 160) ?? `${batch.filename}${batch.sheet_name ? ` (${batch.sheet_name})` : ''}`;
 
     // ONE ROW PER PHONE, with the money added up.
     //
@@ -639,7 +639,7 @@ router.post('/import/batches/:id/apply', async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.applyImport error:', err);
-    res.status(500).json({ error: 'Could not apply that upload' });
+    res.status(500).json({ error: 'Could not add leads. Try again.' });
   } finally {
     client.release();
   }
@@ -659,7 +659,7 @@ router.get('/import/batches', async (_req, res) => {
     res.json({ batches: rows.rows });
   } catch (err) {
     console.error('crm.listBatches error:', err);
-    res.status(500).json({ error: 'Could not load the upload history' });
+    res.status(500).json({ error: 'Could not load uploads.' });
   }
 });
 
@@ -681,7 +681,7 @@ router.get('/import/batches/:id', async (req, res) => {
         outcome ? [req.params.id, outcome] : [req.params.id]
       ),
     ]);
-    if (!batch.rows.length) return res.status(404).json({ error: 'That upload no longer exists' });
+    if (!batch.rows.length) return res.status(404).json({ error: 'Upload not found.' });
     res.json({ batch: batch.rows[0], rows: rows.rows });
   } catch (err) {
     console.error('crm.getBatch error:', err);
@@ -705,18 +705,18 @@ router.get('/import/batches/:id/file', authorize('admin', 'accountant'), async (
       `SELECT file_key, filename, file_type FROM lead_import_batches WHERE id = $1`,
       [req.params.id]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'That upload no longer exists' });
+    if (!r.rows.length) return res.status(404).json({ error: 'Upload not found.' });
     const b = r.rows[0];
     if (!b.file_key) {
       return res.status(404).json({
         error: storage.isConfigured()
-          ? 'The original file was not kept for this upload. Its rows are all still here.'
-          : 'File storage is not set up, so original uploads are not kept. The rows are all still here.',
+          ? 'The original file was not saved. The leads are all here.'
+          : 'File storage is off. The leads are all here.',
       });
     }
 
     const buf = await storage.getObject(b.file_key);
-    if (!buf) return res.status(404).json({ error: 'That file is no longer in storage.' });
+    if (!buf) return res.status(404).json({ error: 'File not found.' });
 
     res.setHeader(
       'Content-Type',
@@ -728,7 +728,7 @@ router.get('/import/batches/:id/file', authorize('admin', 'accountant'), async (
     res.send(buf);
   } catch (err) {
     console.error('crm.batchFile error:', err);
-    res.status(500).json({ error: 'Could not fetch that file' });
+    res.status(500).json({ error: 'Could not download file. Try again.' });
   }
 });
 
@@ -742,12 +742,12 @@ router.delete('/import/batches/:id', async (req, res) => {
       [req.params.id]
     );
     if (!result.rows.length) {
-      return res.status(409).json({ error: 'Only an upload that was never applied can be discarded.' });
+      return res.status(409).json({ error: 'This upload is already added. It cannot be removed.' });
     }
     res.json({ discarded: true });
   } catch (err) {
     console.error('crm.discardBatch error:', err);
-    res.status(500).json({ error: 'Could not discard that upload' });
+    res.status(500).json({ error: 'Could not remove upload. Try again.' });
   }
 });
 

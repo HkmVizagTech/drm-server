@@ -114,10 +114,10 @@ export function LinkDonationDialog({
       );
       toast(`Linked ${currency(r.amount)} to ${leadName || "this lead"}`, {
         body: r.credited
-          ? "Counted towards your money raised."
+          ? "Added to your total."
           : r.credited_to_other
-            ? `Already counted for ${r.credited_to_other} — the lead is marked as donated.`
-            : "The lead is marked as donated.",
+            ? `Already counted for ${r.credited_to_other}.`
+            : "Marked as donated.",
         action: {
           label: "Undo",
           onClick: async () => {
@@ -126,7 +126,7 @@ export function LinkDonationDialog({
               toast.info("Link undone");
               onLinked?.();
             } catch (e) {
-              toast.error("Could not undo that", (e as Error).message);
+              toast.error("Could not undo. Try again.", (e as Error).message);
             }
           },
         },
@@ -134,7 +134,7 @@ export function LinkDonationDialog({
       onLinked?.();
       onClose();
     } catch (e) {
-      toast.error("Could not link that", (e as Error).message);
+      toast.error("Could not link. Try again.", (e as Error).message);
     } finally {
       setBusy(null);
     }
@@ -148,26 +148,22 @@ export function LinkDonationDialog({
 
   return (
     <Modal title="They gave from another number" onClose={onClose} wide>
-      <p className="text-sm text-ink-muted">
-        Find the donation {leadName ? <strong className="text-ink">{leadName}</strong> : "they"} made from somebody
-        else&apos;s phone or under another name. The ones matching what they tried to give are first.
-      </p>
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+      <div className="flex flex-col gap-2 sm:flex-row">
         <SearchInput
           value={q}
           onChange={setQ}
-          placeholder="Name, number, UPI id, receipt no. or amount…"
+          placeholder="Name, mobile, UPI ID, Receipt No. or amount"
           className="flex-1"
           autoFocus
         />
         <Button variant="secondary" onClick={() => setDays(days ? null : 90)}>
-          {days ? "Since they tried" : "Look back 90 days"}
+          {days ? "Since they tried" : "Last 90 days"}
         </Button>
       </div>
       {data && (
         <p className="mt-2 text-xs text-ink-faint">
-          Showing money received since {dateTime(data.lead.since)}
-          {data.lead.expected ? ` · they were hoping to give ${currency(data.lead.expected)}` : ""}
+          Since {dateTime(data.lead.since)}
+          {data.lead.expected ? ` · hoped for ${currency(data.lead.expected)}` : ""}
         </p>
       )}
 
@@ -183,7 +179,7 @@ export function LinkDonationDialog({
           <EmptyState
             icon="search"
             title="Nothing matches"
-            message="Try their family name, the UPI id they paid from, or the amount. Money that has not reached DRM yet will not show here."
+            message="Try another name, UPI ID or amount."
           />
         )}
         {all.map((c) => {
@@ -204,17 +200,17 @@ export function LinkDonationDialog({
                 </div>
                 <p className="mt-1 truncate text-sm text-ink">
                   {c.kind === "donation"
-                    ? `${c.donor_name ?? "Unknown"}${c.donor_phone ? ` · ${c.donor_phone}` : ""}${c.sevak_name ? ` · on the name of ${c.sevak_name}` : ""}`
+                    ? `${c.donor_name ?? "Unknown"}${c.donor_phone ? ` · ${c.donor_phone}` : ""}${c.sevak_name ? ` · On the name of ${c.sevak_name}` : ""}`
                     : `${c.payer_name ?? "Unknown payer"}${c.payer_vpa ? ` · ${c.payer_vpa}` : ""}${c.payer_phone ? ` · ${c.payer_phone}` : ""}`}
                 </p>
                 <p className="text-xs text-ink-muted">
                   {dateTime(c.at)} · {relativeDate(c.at)}
                   {c.kind === "donation" && c.purpose ? ` · ${c.purpose}` : ""}
-                  {c.kind === "donation" && c.receipt_number ? ` · receipt ${c.receipt_number}` : ""}
+                  {c.kind === "donation" && c.receipt_number ? ` · Receipt No. ${c.receipt_number}` : ""}
                   {c.kind === "qr" && c.qr_label ? ` · ${c.qr_label}` : ""}
                 </p>
                 {taken && (
-                  <p className="mt-1 text-xs text-warn">Already linked to {c.linked_lead_name ?? "another lead"}</p>
+                  <p className="mt-1 text-xs text-warn">Linked to {c.linked_lead_name ?? "another lead"}</p>
                 )}
               </div>
               <Button
@@ -225,7 +221,7 @@ export function LinkDonationDialog({
                 className="sm:flex-none"
               >
                 <Icon name="link" size={14} />
-                This is theirs
+                Link
               </Button>
             </div>
           );

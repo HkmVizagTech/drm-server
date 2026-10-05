@@ -25,7 +25,7 @@ export function CallBanners({ back }: { back: string }) {
       dismissAlert(id);
       toast(done);
     } catch (e) {
-      toast.error("Could not update that reminder", e instanceof Error ? e.message : undefined);
+      toast.error("Could not update. Try again.", e instanceof Error ? e.message : undefined);
     }
   }
 
@@ -36,8 +36,8 @@ export function CallBanners({ back }: { back: string }) {
           <p>
             <span className="font-semibold">{c.name || formatPhone(c.phone)}</span> donated
             {c.converted_amount ? <> {currency(Number(c.converted_amount))}</> : null}
-            {c.purpose ? <span> — {c.purpose}</span> : null}
-            <span className="opacity-80"> · {c.converted_via === "auto" ? "arrived on the site" : "recorded by hand"}</span>
+            {c.purpose ? <span> · {c.purpose}</span> : null}
+            <span className="opacity-80"> · {c.converted_via === "auto" ? "online" : "added by hand"}</span>
           </p>
           {/* Under the sentence, not beside it: at phone width a row of
               actions next to two lines of text has nowhere to go but off the
@@ -69,7 +69,7 @@ export function CallBanners({ back }: { back: string }) {
             </Link>
             <Button
               variant="secondary"
-              onClick={() => void act(a.id, { action: "snooze", minutes: 60 }, "Reminder moved to an hour from now")}
+              onClick={() => void act(a.id, { action: "snooze", minutes: 60 }, "Moved to 1 hour from now")}
             >
               In an hour
             </Button>
@@ -87,7 +87,7 @@ export function CallBanners({ back }: { back: string }) {
         <Alert tone="info">
           <Link href="/calling/reminders" className="flex min-h-6 items-center justify-between gap-3">
             <span>
-              {dueCount} promise{dueCount === 1 ? "" : "s"} due today or overdue
+              {dueCount} promise{dueCount === 1 ? "" : "s"} due
             </span>
             <span className="inline-flex flex-none items-center gap-1 font-medium">
               See them

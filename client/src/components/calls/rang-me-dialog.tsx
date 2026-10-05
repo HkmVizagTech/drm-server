@@ -96,7 +96,7 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
           setResult({ q: debounced, leads: r.leads ?? [], people: r.people ?? [], owned_by: r.owned_by ?? null });
           setError(null);
         },
-        (e) => live && setError(e instanceof Error ? e.message : "Could not search")
+        (e) => live && setError(e instanceof Error ? e.message : "Could not search. Try again.")
       );
     return () => {
       live = false;
@@ -127,7 +127,7 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
 
   function open(leadId: string, label: string) {
     setOpening(leadId);
-    toast(`Log the call with ${label}`, { body: "Marked as a call they made to you", tone: "info" });
+    toast(`Log the call with ${label}`, { body: "Saved as an incoming call", tone: "info" });
     router.push(inboundHref(leadId, back));
   }
 
@@ -149,16 +149,16 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
       // search. Opening it would answer "not found"; say whose it is instead.
       if (r.duplicate && isCaller && r.lead.assigned_to && r.lead.assigned_to !== user?.id) {
         toast.warn(
-          `${formatPhone(r.lead.phone)} is already another caller's lead`,
-          "Ask an admin to move them to you, or let that caller log it."
+          `${formatPhone(r.lead.phone)} is another caller's lead`,
+          "Ask your admin to move it to you."
         );
         setOpening(null);
         return;
       }
-      toast(r.created ? `${label} added — now log the call` : `${label} was already a lead — opening them`);
+      toast(r.created ? `${label} added. Now log the call.` : `${label} is already a lead. Opening.`);
       router.push(inboundHref(r.lead.id, back));
     } catch (e) {
-      toast.error("Could not add them", e instanceof Error ? e.message : undefined);
+      toast.error("Could not add. Try again.", e instanceof Error ? e.message : undefined);
       setOpening(null);
     } finally {
       setAdding(false);
@@ -166,17 +166,13 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
   }
 
   return (
-    <Modal title="Someone rang me" onClose={onClose}>
-      <p className="mb-4 text-sm text-ink-muted">
-        They rang back? Find them here and log what happened — including a donation taken on the call.
-      </p>
-
-      <Field label="Their number, or name" htmlFor="rang-me-search">
+    <Modal title="Someone called me" onClose={onClose}>
+      <Field label="Mobile Number or Name" htmlFor="rang-me-search">
         <SearchInput
           id="rang-me-search"
           value={q}
           onChange={setQ}
-          placeholder="98765 43210 or a name…"
+          placeholder="98765 43210 or name"
           inputMode="search"
           autoComplete="off"
         />
@@ -190,7 +186,7 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
 
       <div className="mt-3 space-y-2" aria-live="polite">
         {debounced.length < 2 && (
-          <p className="text-xs text-ink-faint">Type at least two characters — the last few digits of the number work.</p>
+          <p className="text-xs text-ink-faint">Type at least 2 letters or digits.</p>
         )}
         {searching && (
           <>
@@ -208,7 +204,7 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
             className="flex min-h-14 w-full items-center gap-3 rounded-control border border-line-soft bg-surface px-3 py-2.5 text-left transition-colors hover:border-brand-400 hover:bg-brand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:opacity-60"
           >
             <span className="min-w-0 flex-1">
-              <span className="block truncate font-medium text-ink">{l.name || "Name not known"}</span>
+              <span className="block truncate font-medium text-ink">{l.name || "No name"}</span>
               <span className="block truncate text-xs tabular-nums text-ink-muted">
                 {formatPhone(l.phone)}
                 {l.alt_phone && ` · also ${formatPhone(l.alt_phone)}`}
@@ -216,7 +212,7 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
               </span>
               <span className="mt-1 flex flex-wrap gap-1">
                 {l.status_label && <Badge>{l.status_label}</Badge>}
-                {l.do_not_call && <Badge tone="danger">Asked not to be called</Badge>}
+                {l.do_not_call && <Badge tone="danger">Do not call</Badge>}
                 {l.assigned_to_name && <Badge tone="info">{l.assigned_to_name}</Badge>}
               </span>
             </span>
@@ -231,7 +227,7 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
         {people.length > 0 && (
           <>
             <p className="pt-1 text-2xs font-semibold uppercase tracking-wider text-ink-faint">
-              Donors in DRM, not yet leads
+              Donors, not leads yet
             </p>
             {people.map((p) => (
               <button
@@ -242,10 +238,10 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
                 className="flex min-h-14 w-full items-center gap-3 rounded-control border border-dashed border-line-strong bg-surface px-3 py-2.5 text-left transition-colors hover:border-brand-400 hover:bg-brand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:opacity-60"
               >
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium text-ink">{p.name || "Name not known"}</span>
+                  <span className="block truncate font-medium text-ink">{p.name || "No name"}</span>
                   <span className="block truncate text-xs tabular-nums text-ink-muted">
                     {formatPhone(p.phone)}
-                    {Number(p.total_donated) > 0 && ` · has given ${currency(p.total_donated)}`}
+                    {Number(p.total_donated) > 0 && ` · gave ${currency(p.total_donated)}`}
                   </span>
                 </span>
                 <span className="flex-none text-xs font-medium text-brand-700">Add &amp; log</span>
@@ -256,20 +252,19 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
 
         {result?.owned_by && (
           <p className="rounded-control bg-warn-wash px-3 py-2 text-sm text-ink-soft">
-            That number is <strong className="text-ink">{result.owned_by}</strong>&apos;s lead. Let them know they rang
-            back, or ask an admin to hand the lead to you.
+            This is <strong className="text-ink">{result.owned_by}</strong>&apos;s lead. Ask your admin to move it to you.
           </p>
         )}
         {nothing && !result?.owned_by && (
           <p className="text-sm text-ink-soft">
-            Nobody in DRM matches <strong className="text-ink">{debounced}</strong>.
+            No match for <strong className="text-ink">{debounced}</strong>.
           </p>
         )}
       </div>
 
       {!addOpen && current && (
         <Button variant="ghost" icon="userPlus" className="mt-3" onClick={() => setShowAdd(true)}>
-          Not them? Add someone new
+          Add new person
         </Button>
       )}
 
@@ -281,11 +276,11 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
             if (validPhone) void addAndOpen({ phone: validPhone, name: name.trim() || null }, "new");
           }}
         >
-          <p className="text-sm font-medium text-ink">Add them and log the call</p>
+          <p className="text-sm font-medium text-ink">Add new person</p>
           <Field
-            label="Number they rang from"
+            label="Mobile Number"
             htmlFor="rang-me-phone"
-            error={touched && phone && !validPhone ? "A 10-digit mobile number" : undefined}
+            error={touched && phone && !validPhone ? "Enter a 10-digit mobile number." : undefined}
           >
             <Input
               id="rang-me-phone"
@@ -299,7 +294,7 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
               }}
             />
           </Field>
-          <Field label="Name" hint="As they gave it — you can correct it on the call screen" htmlFor="rang-me-name">
+          <Field label="Donor Name" htmlFor="rang-me-name">
             <Input
               id="rang-me-name"
               value={name}
@@ -312,7 +307,7 @@ export function RangMeDialog({ onClose, back }: { onClose: () => void; back: str
             />
           </Field>
           <Button type="submit" icon="phone" block size="lg" loading={adding} disabled={!validPhone || opening !== null}>
-            Add and log the call
+            Add &amp; log call
           </Button>
         </form>
       )}

@@ -72,7 +72,7 @@ function CreditBadge({ link, youId }: { link: LinkRow; youId?: string }) {
   const yours = link.credit_user_id === youId;
   return (
     <Badge tone={yours ? "good" : "neutral"} icon="rupee">
-      {yours ? "credits you" : `credits ${link.credit_user_name ?? "another caller"}`}
+      {yours ? "Counts for you" : `Counts for ${link.credit_user_name ?? "another caller"}`}
     </Badge>
   );
 }
@@ -95,7 +95,7 @@ export default function MyLinksPage() {
       setLinks(d.links);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load your links");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     } finally {
       setLoading(false);
     }
@@ -113,7 +113,7 @@ export default function MyLinksPage() {
       await apiClient.put(`/api/crm/links/${id}`, body);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
     }
   }
 
@@ -122,17 +122,17 @@ export default function MyLinksPage() {
       await apiClient.post(`/api/crm/links/${l.id}/copy`, {});
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not copy that link");
+      setError(e instanceof Error ? e.message : "Could not copy. Try again.");
     }
   }
 
   async function remove(l: LinkRow) {
-    if (!confirm(`Delete your preset "${l.label}"?`)) return;
+    if (!confirm(`Delete "${l.label}"?`)) return;
     try {
       await apiClient.delete(`/api/crm/links/${l.id}`);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not delete that");
+      setError(e instanceof Error ? e.message : "Could not delete. Try again.");
     }
   }
 
@@ -152,7 +152,7 @@ export default function MyLinksPage() {
       await apiClient.put("/api/crm/links-order", { ids });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that order");
+      setError(e instanceof Error ? e.message : "Could not save order. Try again.");
       await load();
     }
   }
@@ -162,14 +162,14 @@ export default function MyLinksPage() {
       <PageHeader
         eyebrow="Calling"
         title="My links"
-        subtitle="Set these up before a shift, and they are one tap away on every call"
+        subtitle="Links you send on calls."
         actions={
           <>
             {/* A next/link anchor wearing the button class rather than
                 LinkButton: LinkButton is a plain <a>, which would drop out of
                 the client router. */}
             <Link href="/calling/queue" className={buttonSecondary}>
-              Back to calling
+              Back
             </Link>
             <Button icon={adding ? "x" : "plus"} onClick={() => setAdding((v) => !v)}>
               {adding ? "Cancel" : "Add a link"}
@@ -182,7 +182,7 @@ export default function MyLinksPage() {
 
       {adding && (
         <Card className="mb-5">
-          <CardHeader title="A new preset of your own" subtitle="Only you will see it in the picker" />
+          <CardHeader title="New link" subtitle="Only you see it" />
           <LinkForm
             onSave={async (body) => {
               await apiClient.post("/api/crm/links", { ...body, shared: false });
@@ -198,8 +198,8 @@ export default function MyLinksPage() {
       <Card padded={false} className="mb-5">
         <div className="px-5 pt-5">
           <CardHeader
-            title={`My presets${mine.length ? ` · ${mine.length}` : ""}`}
-            subtitle="Yours alone — nobody else sees or can change these. They appear at the top of the picker on a call."
+            title={`My links${mine.length ? ` · ${mine.length}` : ""}`}
+            subtitle="Only you see these."
           />
         </div>
 
@@ -212,8 +212,8 @@ export default function MyLinksPage() {
         ) : !mine.length ? (
           <EmptyState
             icon="link"
-            title="No presets of your own yet"
-            message="Copy one of the temple's links below and change the wording, or add your own campaign link with its UTM."
+            title="No links yet"
+            message="Copy a temple link below, or add your own."
           />
         ) : (
           <ul className="divide-y divide-line-soft border-t border-line-soft">
@@ -244,14 +244,14 @@ export default function MyLinksPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium text-ink">{l.label}</span>
-                      {i === 0 && <Badge tone="brand">picked by default</Badge>}
+                      {i === 0 && <Badge tone="brand">Default</Badge>}
                       <CreditBadge link={l} youId={user?.id} />
                       {l.use_count > 0 && (
                         <span className="text-xs text-ink-faint">
-                          sent {l.use_count} time{l.use_count === 1 ? "" : "s"}
+                          Sent {l.use_count} time{l.use_count === 1 ? "" : "s"}
                         </span>
                       )}
-                      {!l.active && <Badge tone="neutral">off</Badge>}
+                      {!l.active && <Badge tone="neutral">Off</Badge>}
                     </div>
                     <p className="truncate text-xs text-ink-muted" title={l.url}>
                       {l.url}
@@ -295,8 +295,8 @@ export default function MyLinksPage() {
       <Card padded={false}>
         <div className="px-5 pt-5">
           <CardHeader
-            title={`The temple's links${shared.length ? ` · ${shared.length}` : ""}`}
-            subtitle="Everyone can send these. Copy one to get your own version with your wording, rather than changing it for the whole team."
+            title={`Temple links${shared.length ? ` · ${shared.length}` : ""}`}
+            subtitle="Everyone can send these. Copy one to change the words."
           />
         </div>
         <ul className="divide-y divide-line-soft border-t border-line-soft">
@@ -319,23 +319,13 @@ export default function MyLinksPage() {
             </li>
           ))}
         </ul>
-        <div className="space-y-2 border-t border-line-soft px-5 py-4 text-xs text-ink-muted">
+        <div className="border-t border-line-soft px-5 py-4 text-xs text-ink-muted">
           <p>
-            Shared links are managed in{" "}
+            Temple links are changed in{" "}
             <Link href="/calling/settings" className="text-brand-700 hover:underline">
-              Calling settings
-            </Link>{" "}
-            — changing one there changes it for every caller
-            {user?.name ? `, not just you, ${user.name.split(" ")[0]}` : ""}.
-          </p>
-          <p>
-            A link marked <strong className="font-medium text-ink-soft">credits you</strong> means every donation that
-            comes in through it is counted as yours, whoever sends it. Only an admin can assign that, in Calling
-            settings — it is not the same thing as a link being yours to send.
-          </p>
-          <p>
-            Copying a link gives you your own unassigned copy, so a copy of a link that credits somebody credits
-            nobody until an admin assigns it. Ask for the assignment rather than copying, if the point is the credit.
+              Settings
+            </Link>
+            .
           </p>
         </div>
       </Card>
@@ -367,7 +357,7 @@ function LinkForm({
     try {
       await onSave({ label, url, seva_name: seva || label, message });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save that link");
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
     } finally {
       setBusy(false);
     }
@@ -376,14 +366,14 @@ function LinkForm({
   return (
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="What to call it">
+        <Field label="Name">
           <Input
             value={label}
             onChange={(e) => setLabel(e.target.value)}
             placeholder="Govardhan Puja 2026"
           />
         </Field>
-        <Field label="Seva name, as a donor would say it">
+        <Field label="Seva">
           <Input
             value={seva}
             onChange={(e) => setSeva(e.target.value)}
@@ -392,7 +382,7 @@ function LinkForm({
         </Field>
       </div>
 
-      <Field label="The link, UTM and all">
+      <Field label="Link">
         <Input
           value={url}
           onChange={(e) => setUrl(e.target.value)}
@@ -401,23 +391,22 @@ function LinkForm({
         />
       </Field>
 
-      <Field label="The message that goes with it">
+      <Field label="Message">
         <Textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={5} className="resize-y" />
       </Field>
 
       <p className="text-xs text-ink-faint">
-        In the message: <code className="text-ink-muted">{"{name}"}</code>{" "}
+        Message: <code className="text-ink-muted">{"{name}"}</code>{" "}
         <code className="text-ink-muted">{"{seva}"}</code> <code className="text-ink-muted">{"{link}"}</code>{" "}
-        <code className="text-ink-muted">{"{amount}"}</code>. In the link:{" "}
-        <code className="text-ink-muted">{"{lead}"}</code> <code className="text-ink-muted">{"{caller}"}</code> — so a
-        donation that came from a call can be told apart from one that arrived on its own.
+        <code className="text-ink-muted">{"{amount}"}</code>. Link:{" "}
+        <code className="text-ink-muted">{"{lead}"}</code> <code className="text-ink-muted">{"{caller}"}</code>
       </p>
 
       {error && <Alert tone="danger">{error}</Alert>}
 
       <div className="flex gap-2">
         <Button onClick={() => void submit()} disabled={!label.trim() || !url.trim()} loading={busy}>
-          {initial ? "Save changes" : "Add it"}
+          {initial ? "Save" : "Add"}
         </Button>
         <Button variant="secondary" onClick={onCancel}>
           Cancel

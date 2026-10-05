@@ -70,7 +70,7 @@ function assertConfigured(site: SiteConfig) {
   if (!site.baseUrl || !site.secret) {
     const env = SITE_ENV[site.key];
     throw new Error(
-      `${site.label} is not configured - set ${env.url} and ${env.secret} in this server's environment.`
+      `${site.label} is not connected.`
     );
   }
 }
@@ -172,7 +172,8 @@ export async function fetchDonorSnapshot(siteKey: SiteKey, phone: string): Promi
   const res = await siteFetch(site, `/api/internal/drm/donors/by-mobile/${encodeURIComponent(mobile)}`);
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`${site.label} internal API returned ${res.status}: ${body.slice(0, 200)}`);
+    console.error(`${site.label} internal API returned ${res.status}: ${body.slice(0, 200)}`);
+    throw new Error(`${site.label} did not respond (${res.status}). Try again.`);
   }
   return res.json() as Promise<HkmvDonorSnapshot>;
 }
@@ -185,7 +186,8 @@ export async function fetchDonorPage(siteKey: SiteKey, page: number, limit: numb
   const res = await siteFetch(site, `/api/internal/drm/donors?page=${page}&limit=${limit}`);
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`${site.label} internal API returned ${res.status}: ${body.slice(0, 200)}`);
+    console.error(`${site.label} internal API returned ${res.status}: ${body.slice(0, 200)}`);
+    throw new Error(`${site.label} did not respond (${res.status}). Try again.`);
   }
   return res.json() as Promise<HkmvDonorPage>;
 }
@@ -227,7 +229,8 @@ export async function fetchTransactionPage(
   const res = await siteFetch(site, `/api/internal/drm/transactions?${qs}`);
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`${site.label} internal API returned ${res.status}: ${body.slice(0, 200)}`);
+    console.error(`${site.label} internal API returned ${res.status}: ${body.slice(0, 200)}`);
+    throw new Error(`${site.label} did not respond (${res.status}). Try again.`);
   }
   return res.json() as Promise<HkmvTransactionPage>;
 }
@@ -273,7 +276,7 @@ export async function resendReceipt(siteKey: SiteKey, externalDonationId: string
 
   const body = (await res.json().catch(() => ({}))) as ResendResult;
   if (!res.ok || body.success === false) {
-    const err = new Error(body.message || `${site.label} returned ${res.status} when resending the receipt.`) as Error & {
+    const err = new Error(body.message || `Could not resend receipt (${res.status}). Try again.`) as Error & {
       status?: number;
       alreadySent?: boolean;
     };
@@ -567,7 +570,7 @@ export async function createOfflineDonation(
     const message =
       (typeof body?.message === 'string' && body.message) ||
       (typeof body?.error === 'string' && body.error) ||
-      `${siteLabelFor(site)} refused the entry (${res.status})`;
+      `${siteLabelFor(site)} did not accept this (${res.status}).`;
     const err = new Error(message) as Error & { status?: number };
     err.status = res.status;
     throw err;
@@ -649,7 +652,7 @@ export async function fetchAbandonedPage(
 
   const res = await siteFetch(site, `/api/internal/drm/abandoned?${q.toString()}`);
   if (!res.ok) {
-    throw new Error(`${site.label} returned ${res.status} listing abandoned donations.`);
+    throw new Error(`${site.label} did not respond (${res.status}). Try again.`);
   }
   const body = (await res.json()) as AbandonedPage;
   return { ...body, donations: body.donations ?? [] };
@@ -718,7 +721,7 @@ export async function updatePrasadamStatus(
   if (!res.ok || body?.success === false) {
     const message =
       (typeof body?.message === 'string' && body.message) ||
-      `${siteLabelFor(site)} returned ${res.status} updating the prasadam status.`;
+      `${siteLabelFor(site)} did not update the prasadam status (${res.status}).`;
     const err = new Error(message) as Error & { status?: number };
     err.status = res.status;
     throw err;
@@ -791,7 +794,7 @@ export async function updateDonorProfile(
   if (!res.ok || body?.success === false) {
     const message =
       (typeof body?.message === 'string' && body.message) ||
-      `${siteLabelFor(site)} returned ${res.status} updating the donor profile.`;
+      `${siteLabelFor(site)} did not update the donor details (${res.status}).`;
     const err = new Error(message) as Error & { status?: number };
     err.status = res.status;
     throw err;

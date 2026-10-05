@@ -97,13 +97,13 @@ interface Row {
 }
 
 const FIELD_LABELS: Record<string, string> = {
-  donor_code: "Donor number",
-  phone: "Phone",
-  name: "Name",
+  donor_code: "Donor No.",
+  phone: "Mobile Number",
+  name: "Donor Name",
   preacher_code: "Preacher (Enrolled By)",
   account_type: "Account type",
   last_donation_at: "Last donation date",
-  amount_total: "Lifetime total",
+  amount_total: "Total given",
   amount_recent: "Recent total",
   remarks: "Remarks",
 };
@@ -123,7 +123,7 @@ export default function UploadsPage() {
       const d = await apiClient.get<{ batches: Batch[] }>("/api/crm/import/batches");
       setHistory(d.batches);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the upload history");
+      setError(e instanceof Error ? e.message : "Could not load. Try again.");
     }
   }, []);
 
@@ -155,7 +155,7 @@ export default function UploadsPage() {
       setDrafts(d.batches);
       await loadHistory();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not read that file");
+      setError(e instanceof Error ? e.message : "Could not read the file. Try again.");
     } finally {
       setBusy(false);
     }
@@ -171,7 +171,7 @@ export default function UploadsPage() {
       setDrafts((ds) => ds.filter((d) => d.id !== b.id));
       await loadHistory();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not apply that sheet");
+      setError(e instanceof Error ? e.message : "Could not add. Try again.");
     } finally {
       setBusy(false);
     }
@@ -183,7 +183,7 @@ export default function UploadsPage() {
       setDrafts((ds) => ds.filter((d) => d.id !== b.id));
       await loadHistory();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not discard that");
+      setError(e instanceof Error ? e.message : "Could not discard. Try again.");
     }
   }
 
@@ -192,7 +192,7 @@ export default function UploadsPage() {
       <PageHeader
         eyebrow="Calling"
         title="Uploaded sheets"
-        subtitle="Excel or CSV from the office — every one kept, so a fresh export never costs you the calls already made"
+        subtitle="Excel or CSV files from the office."
         actions={
           // A next/link anchor wearing the button class rather than LinkButton:
           // LinkButton is a plain <a>, which would drop out of the client
@@ -232,12 +232,7 @@ export default function UploadsPage() {
           }`}
         >
           <p className="text-sm font-medium text-ink">
-            {busy ? "Reading the file…" : "Drop an Excel file or CSV here, or click to choose one"}
-          </p>
-          <p className="mt-1 text-xs text-ink-muted">
-            Every tab of a workbook is read separately; a CSV is read as one. Columns are matched by their
-            headings — Donor Number, Mobile Number, Enrolled By, Total Amount Donated and the rest are all
-            recognised as they are written.
+            {busy ? "Reading file…" : "Drop an Excel or CSV file here, or tap to pick one"}
           </p>
         </div>
       </Card>
@@ -247,15 +242,15 @@ export default function UploadsPage() {
         <div className="mb-6 space-y-4">
           <div className="flex flex-wrap items-end justify-between gap-3">
             <p className="text-sm font-semibold text-ink">
-              Read {drafts.length} sheet{drafts.length === 1 ? "" : "s"} — nothing has been saved yet
+              {drafts.length} sheet{drafts.length === 1 ? "" : "s"} read. Not saved yet.
             </p>
-            <Field label="Assign what gets added to" className="w-56">
+            <Field label="Give new leads to" className="w-56">
               <Select
                 value={assignTo}
                 onChange={setAssignTo}
-                ariaLabel="Assign what gets added to"
-                placeholder="Nobody yet"
-                options={[{ value: "", label: "Nobody yet" }, ...users.map((u) => ({ value: u.id, label: u.name }))]}
+                ariaLabel="Give new leads to"
+                placeholder="No caller"
+                options={[{ value: "", label: "No caller" }, ...users.map((u) => ({ value: u.id, label: u.name }))]}
               />
             </Field>
           </div>
@@ -264,21 +259,21 @@ export default function UploadsPage() {
             <Card key={b.id} className={b.error ? "border-red-200" : ""}>
               <CardHeader
                 title={b.sheet_name ?? "Sheet"}
-                subtitle={`${number(b.rows_total)} rows in ${b.filename}`}
+                subtitle={`${number(b.rows_total)} entries in ${b.filename}`}
               />
 
               {b.error ? (
                 <Alert tone="danger" title={b.error}>
-                  Without a phone column there is nobody to ring. Headings found: {(b.headers ?? []).join(", ")}
+                  Columns found: {(b.headers ?? []).join(", ")}
                 </Alert>
               ) : (
                 <>
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    <Tally label="Will be added" value={b.counts?.new ?? 0} tone="good" />
+                    <Tally label="New" value={b.counts?.new ?? 0} tone="good" />
                     <Tally label="Already leads" value={b.counts?.updated ?? 0} />
                     <Tally label="Same number twice" value={b.counts?.duplicate_in_file ?? 0} />
                     <Tally
-                      label="No usable number"
+                      label="No mobile number"
                       value={(b.counts?.invalid_phone ?? 0) + (b.counts?.no_phone ?? 0)}
                       tone="warn"
                     />
@@ -286,38 +281,23 @@ export default function UploadsPage() {
 
                   <div className="mt-3 space-y-1.5 text-xs text-ink-soft">
                     {(b.counts?.already_donors ?? 0) > 0 && (
-                      <p>
-                        {number(b.counts!.already_donors)} of the new rows are people DRM already knows as donors — they
-                        will be linked to their giving history automatically.
-                      </p>
+                      <p>{number(b.counts!.already_donors)} new are already donors. They will be linked.</p>
                     )}
                     {(b.counts?.duplicate_in_file ?? 0) > 0 && (
                       <p>
-                        {number(b.counts!.duplicate_in_file)} rows share a phone with another row in this sheet. One
-                        number is one call, so they become one lead each
-                        {(b.shared_amount ?? 0) > 0 && (
-                          <> — and the {currency(b.shared_amount!)} on those rows is added onto it, not dropped</>
-                        )}
+                        {number(b.counts!.duplicate_in_file)} share a mobile number. They become one lead
+                        {(b.shared_amount ?? 0) > 0 && <> and their {currency(b.shared_amount!)} is added together</>}
                         .
                       </p>
                     )}
                     {(b.unreachable_amount ?? 0) > 0 && (
-                      <p className="text-warn">
-                        {currency(b.unreachable_amount!)} of giving sits on rows with no usable phone number. Worth
-                        fixing in the source sheet — nobody can ring those donors.
-                      </p>
+                      <p className="text-warn">{currency(b.unreachable_amount!)} given by donors with no mobile number.</p>
                     )}
                     {(b.external_total ?? 0) > 0 && (
-                      <p>
-                        {currency(b.external_total!)} of lifetime giving in this sheet. Shown to callers, never added to
-                        DRM&apos;s own totals.
-                      </p>
+                      <p>{currency(b.external_total!)} total given in this sheet. Not added to Money raised.</p>
                     )}
                     {(b.preacher_codes?.length ?? 0) > 0 && (
-                      <p>
-                        {b.preacher_codes!.length} preacher codes — any DRM has not seen before are created
-                        automatically, ready to be given real names.
-                      </p>
+                      <p>{b.preacher_codes!.length} preacher codes. New ones will be added.</p>
                     )}
                   </div>
 
@@ -327,7 +307,7 @@ export default function UploadsPage() {
                   {b.mapping && (
                     <div className="mt-4">
                       <p className="mb-1.5 text-2xs font-semibold uppercase tracking-wider text-ink-muted">
-                        Columns read
+                        Columns
                       </p>
                       <div className="flex flex-wrap gap-1.5">
                         {Object.entries(b.mapping).map(([field, idx]) => (
@@ -348,7 +328,7 @@ export default function UploadsPage() {
                               key={h}
                               className="rounded-md border border-dashed border-line-strong px-2 py-1 text-xs text-ink-faint"
                             >
-                              {h} — kept, not used
+                              {h} (not used)
                             </span>
                           ))}
                       </div>
@@ -392,24 +372,24 @@ export default function UploadsPage() {
 
       {/* ---------------------------------------------------------- history */}
       <CardHeader
-        title="Every sheet ever uploaded"
-        subtitle="Kept row by row. A fresher export adds and updates — it never removes anyone, and never touches a call that has been made."
+        title="All uploads"
+        subtitle="A new upload never removes anyone."
       />
       <TableShell>
         <Thead>
           <Th>Sheet</Th>
-          <Th align="right">Rows</Th>
+          <Th align="right">Entries</Th>
           <Th align="right">Added</Th>
           <Th align="right">Updated</Th>
           <Th>Uploaded</Th>
-          <Th align="center">State</Th>
+          <Th align="center">Status</Th>
           <Th align="right">File</Th>
         </Thead>
         <Tbody>
           {!history.length ? (
             <tr>
               <td colSpan={7}>
-                <EmptyState title="Nothing uploaded yet" message="Drop an Excel file or CSV above to get started." />
+                <EmptyState title="Nothing uploaded yet" message="Drop an Excel or CSV file above." />
               </td>
             </tr>
           ) : (
@@ -430,9 +410,9 @@ export default function UploadsPage() {
                 </Td>
                 <Td align="center">
                   {b.status === "applied" ? (
-                    <Badge tone="good">applied</Badge>
+                    <Badge tone="good">Added</Badge>
                   ) : (
-                    <Badge tone="warn">read, not applied</Badge>
+                    <Badge tone="warn">Not added</Badge>
                   )}
                 </Td>
                 <Td align="right">
@@ -451,13 +431,13 @@ export default function UploadsPage() {
                         void downloadFromApi(
                           `/api/crm/import/batches/${b.id}/file`,
                           b.filename
-                        ).catch((e) => setError(e instanceof Error ? e.message : "Could not fetch that file"))
+                        ).catch((e) => setError(e instanceof Error ? e.message : "Could not download. Try again."))
                       }
                     >
                       Download
                     </Button>
                   ) : (
-                    <span className="text-xs text-ink-faint">not kept</span>
+                    <span className="text-xs text-ink-faint">Not saved</span>
                   )}
                 </Td>
               </tr>

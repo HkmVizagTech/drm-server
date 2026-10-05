@@ -54,7 +54,7 @@ export function SelectionBar({
         </span>
         <p className="min-w-0 flex-1 truncate text-sm font-medium text-ink">
           {unit} selected
-          {allMatching && <span className="text-ink-muted"> · everyone matching</span>}
+          {allMatching && <span className="text-ink-muted"> · all matching</span>}
         </p>
         <Button variant="ghost" size="sm" icon="x" onClick={onClear}>
           Clear
@@ -102,8 +102,8 @@ export function SelectAllBanner({
       {allMatching ? (
         <>
           <span>
-            All <strong className="tabular-nums">{number(truncatedAt ?? total)}</strong> matching {unit} are selected
-            {truncatedAt ? ` (the first ${number(truncatedAt)} of ${number(total)})` : ""}.
+            All <strong className="tabular-nums">{number(truncatedAt ?? total)}</strong> matching {unit} selected
+            {truncatedAt ? ` (first ${number(truncatedAt)} of ${number(total)})` : ""}.
           </span>
           <button
             type="button"
@@ -116,7 +116,7 @@ export function SelectAllBanner({
       ) : (
         <>
           <span>
-            All <strong className="tabular-nums">{number(pageCount)}</strong> on this page are selected.
+            All <strong className="tabular-nums">{number(pageCount)}</strong> on this page selected.
           </span>
           <button
             type="button"

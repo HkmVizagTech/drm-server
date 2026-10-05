@@ -94,7 +94,7 @@ async function exportSubscriptionsFile(
     });
   } catch (err) {
     console.error('subscriptions.export error:', err);
-    res.status(500).json({ error: 'Could not build that export' });
+    res.status(500).json({ error: 'Could not download. Try again.' });
   }
 }
 

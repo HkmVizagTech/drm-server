@@ -254,7 +254,7 @@ router.get('/filters', async (_req, res) => {
 // The UI shows these and the person picks; nothing is guessed.
 router.get('/candidates', async (req, res) => {
   const phone = normalizePhone(String(req.query.phone || ''));
-  if (!phone) return res.status(400).json({ error: 'A phone number is required' });
+  if (!phone) return res.status(400).json({ error: 'Enter a mobile number.' });
 
   const result = await pool.query(
     `SELECT ${SELECT_COLUMNS} ${FROM_JOINS}
@@ -277,7 +277,7 @@ router.post('/', async (req, res) => {
     deliveryAddress = person.rows[0].prasadam_address || person.rows[0].address;
   }
   if (!deliveryAddress) {
-    return res.status(400).json({ error: 'No delivery address on file for this person' });
+    return res.status(400).json({ error: 'No address saved for this person.' });
   }
 
   const result = await pool.query(
@@ -473,7 +473,7 @@ async function pushStatusToSites(
 router.put('/:id', async (req, res) => {
   const { status, courier_name, tracking_number, notes, delivered_at } = req.body;
   if (status !== undefined && !isStatus(status)) {
-    return res.status(400).json({ error: `status must be one of ${STATUSES.join(', ')}` });
+    return res.status(400).json({ error: `Pick a status: ${STATUSES.join(', ')}.` });
   }
 
   if (status === undefined) {
@@ -512,10 +512,10 @@ router.post('/bulk-status', async (req, res) => {
     return res.status(400).json({ error: 'Select at least one delivery' });
   }
   if (ids.length > 1000) {
-    return res.status(400).json({ error: 'Too many at once - filter down and do it in batches of 1000 or fewer' });
+    return res.status(400).json({ error: 'Too many selected. Pick 1000 or fewer.' });
   }
   if (!isStatus(status)) {
-    return res.status(400).json({ error: `status must be one of ${STATUSES.join(', ')}` });
+    return res.status(400).json({ error: `Pick a status: ${STATUSES.join(', ')}.` });
   }
 
   try {
@@ -562,7 +562,7 @@ router.post('/resync', async (req, res) => {
     );
 
     if (!stale.rows.length) {
-      return res.json({ attempted: 0, synced: 0, unsupported: 0, failed: 0, message: 'Everything is already in step.' });
+      return res.json({ attempted: 0, synced: 0, unsupported: 0, failed: 0, message: 'Everything is up to date.' });
     }
 
     // Grouped by status because pushStatusToSites maps one status for the whole
@@ -591,7 +591,7 @@ router.post('/resync', async (req, res) => {
     });
   } catch (err) {
     console.error('prasadam.resync error:', err);
-    res.status(500).json({ error: 'Could not re-sync those deliveries' });
+    res.status(500).json({ error: 'Could not update the sites. Try again.' });
   }
 });
 
@@ -702,17 +702,17 @@ router.get('/import/sample.xlsx', async (_req, res) => {
     res.send(buffer);
   } catch (err) {
     console.error('prasadam.sampleXlsx error:', err);
-    res.status(500).json({ error: 'Could not build the sample file' });
+    res.status(500).json({ error: 'Could not download sample file.' });
   }
 });
 
 router.post('/import/preview', async (req, res) => {
   const rows: unknown = req.body?.rows;
   if (!Array.isArray(rows) || !rows.length) {
-    return res.status(400).json({ error: 'No rows to preview' });
+    return res.status(400).json({ error: 'The file is empty.' });
   }
   if (rows.length > 5000) {
-    return res.status(400).json({ error: 'That file is too large - split it into batches of 5000 rows or fewer' });
+    return res.status(400).json({ error: 'File too big. Upload 5000 or fewer.' });
   }
 
   const parsed: ImportRow[] = rows.map((r: Record<string, unknown>, i) => ({
@@ -748,13 +748,13 @@ router.post('/import/preview', async (req, res) => {
 
   for (const row of parsed) {
     if (!row.phone) {
-      unmatched.push({ row, reason: 'No usable phone number in this row' });
+      unmatched.push({ row, reason: 'No valid mobile number' });
       continue;
     }
     const candidates = byPhone.get(row.phone) ?? [];
 
     if (candidates.length === 0) {
-      unmatched.push({ row, reason: 'No open delivery for this number (already delivered, or never queued)' });
+      unmatched.push({ row, reason: 'No pending delivery for this number' });
       continue;
     }
     if (candidates.length === 1) {
@@ -792,10 +792,10 @@ router.post('/import/preview', async (req, res) => {
 router.post('/import/commit', async (req, res) => {
   const { deliveries, courier_name } = req.body ?? {};
   if (!Array.isArray(deliveries) || !deliveries.length) {
-    return res.status(400).json({ error: 'Nothing to apply' });
+    return res.status(400).json({ error: 'Nothing to update.' });
   }
   if (deliveries.length > 5000) {
-    return res.status(400).json({ error: 'Too many at once - apply in batches of 5000 or fewer' });
+    return res.status(400).json({ error: 'Too many. Upload 5000 or fewer.' });
   }
 
   // Each entry can carry its own delivered_at (the courier's date), so group by
@@ -823,7 +823,7 @@ router.post('/import/commit', async (req, res) => {
     res.json({ requested, updated, skipped: requested - updated });
   } catch (err) {
     console.error('prasadam.importCommit error:', err);
-    res.status(500).json({ error: 'Could not apply that file' });
+    res.status(500).json({ error: 'Could not update from the file. Try again.' });
   }
 });
 
