@@ -3416,10 +3416,15 @@ router.post('/leads/sync-abandoned', authorize('admin', 'accountant'), async (re
           for (const d of result.donations) {
             const phone = normalizePhone(d.mobile);
             // Not the standalone /donations page's - see FROM_DONATIONS_PAGE.
-            const page = String(d.sourcePage ?? '');
+            //
+            // Named sourcePage, not `page`: a const named `page` here would
+            // shadow the loop variable, and shadowing is hoisted - line 3415's
+            // `page` would resolve to this binding, which is still in its TDZ,
+            // so every fetch threw ReferenceError before it was sent.
+            const sourcePage = String(d.sourcePage ?? '');
             if (
               site === 'hkmv' &&
-              (/^(https?:\/\/[^/]+)?\/?donations(\/|\?|#|$)/i.test(page) || d.purpose === 'Donation')
+              (/^(https?:\/\/[^/]+)?\/?donations(\/|\?|#|$)/i.test(sourcePage) || d.purpose === 'Donation')
             ) continue;
             if (isDialable(phone)) {
               found.push({ ...d, phone });
