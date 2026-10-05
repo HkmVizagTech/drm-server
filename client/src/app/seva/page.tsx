@@ -69,7 +69,7 @@ export default function SevaPage() {
           <EmptyState
             icon="calendar"
             title="No bookings yet"
-            message="Seva bookings are coming soon."
+            message="Seva bookings are not set up in DRM yet."
           />
         </Card>
       ) : (

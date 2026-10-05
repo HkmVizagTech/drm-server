@@ -1327,7 +1327,8 @@ router.post('/qr/payments/:id/issue-receipt', authenticate, async (req, res) => 
       `SELECT 1 FROM qr_payments p
          LEFT JOIN qr_shares s ON p.share_id = s.id
          LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
-        WHERE p.id = $1 AND (s.shared_by = $2::uuid OR q.owner_id = $2::uuid)`,
+        WHERE p.id = $1 AND (s.shared_by = $2::uuid OR q.owner_id = $2::uuid
+                             OR (p.share_id IS NULL AND q.owner_id IS NULL))`,
       [req.params.id, req.user?.userId ?? null]
     );
     if (!ok.rows.length) return res.status(404).json({ error: 'Payment not found.' });
@@ -1610,7 +1611,12 @@ router.get('/qr/payments/:id', authenticate, async (req, res) => {
           -- the list does. Without this the detail route would be a way round
           -- the scoping on the screen it is opened from.
           AND ($2::uuid IS NULL OR s.shared_by = $2::uuid
-               OR q_share.owner_id = $2::uuid OR q_direct.owner_id = $2::uuid)`,
+               OR q_share.owner_id = $2::uuid OR q_direct.owner_id = $2::uuid
+               -- Unclaimed money on a QR anybody may use - the same rule as
+               -- QR_PAYMENT_VISIBLE on the list. Without it the list showed
+               -- these payments to every caller and then answered "Payment
+               -- not found." the moment one pressed Send receipt.
+               OR (p.share_id IS NULL AND q_direct.owner_id IS NULL))`,
       [req.params.id, req.user?.role === 'caller' ? req.user?.userId ?? null : null]
     );
     if (!rows.length) return res.status(404).json({ error: 'Payment not found.' });
@@ -1666,7 +1672,12 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
          LEFT JOIN leads l ON s.lead_id = l.id
         WHERE p.id = $1
           AND ($2::uuid IS NULL OR s.shared_by = $2::uuid
-               OR q_share.owner_id = $2::uuid OR q_direct.owner_id = $2::uuid)`,
+               OR q_share.owner_id = $2::uuid OR q_direct.owner_id = $2::uuid
+               -- Unclaimed money on a QR anybody may use - the same rule as
+               -- QR_PAYMENT_VISIBLE on the list. Without it the list showed
+               -- these payments to every caller and then answered "Payment
+               -- not found." the moment one pressed Send receipt.
+               OR (p.share_id IS NULL AND q_direct.owner_id IS NULL))`,
       [req.params.id, me]
     );
     if (!found.rows.length) return res.status(404).json({ error: 'Payment not found.' });

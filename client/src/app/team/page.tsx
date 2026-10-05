@@ -421,6 +421,12 @@ function PasswordDialog({
       }
     >
       {error && <Alert tone="danger">{error}</Alert>}
+      {/* Both facts matter at exactly this moment: a JWT already issued keeps
+          working until it expires, so a reset does not sign anyone out, and
+          nothing sends the new password anywhere. */}
+      <Alert tone="warn">
+        Devices already signed in stay signed in. DRM does not send this password. Tell {user.name} yourself.
+      </Alert>
       <Field label="New password" htmlFor="reset-password" required>
         <Input
           id="reset-password"

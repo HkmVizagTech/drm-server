@@ -1,4 +1,5 @@
-// The call log, and "they gave from another number".
+// The call log, "they gave from another number", and the QR receipt's effect
+// on the payment it is raised against.
 //
 // Every case here is a complaint a caller made, or would have:
 //   - "I want to see the calls I made last week, with what happened after"
@@ -6,6 +7,9 @@
 //   - "she tried to give on the website and it failed, then she gave from her
 //      son's phone and nobody could tell me that"
 //   - "a stranger paid my temple QR and I found out weeks later"
+//   - "the QR screen showed me the payment, then said not found when I pressed
+//      Send receipt"
+//   - "I sent the receipt and the donor's address vanished off the payment"
 //   - "they rang me, and there was nowhere to write that down"
 //   - "the Nearly gave list is full of people who gave on the donations page
 //      and were never mine to chase"
@@ -21,6 +25,7 @@ import crmRoutes from '../src/routes/crm';
 import crmListsRoutes from '../src/routes/crmLists';
 import crmSessionsRoutes from '../src/routes/crmSessions';
 import crmCallsRoutes from '../src/routes/crmCalls';
+import crmQrRoutes from '../src/routes/crmQr';
 import crmRemindersRoutes from '../src/routes/crmReminders';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
@@ -36,6 +41,7 @@ app.use('/api/crm', crmRemindersRoutes);
 app.use('/api/crm', crmListsRoutes);
 app.use('/api/crm', crmSessionsRoutes);
 app.use('/api/crm', crmCallsRoutes);
+app.use('/api/crm', crmQrRoutes);
 
 let base = '';
 const ADMIN = '11111111-1111-1111-1111-111111111111';
@@ -175,6 +181,22 @@ async function main() {
   const qcred = await pool.query(`SELECT user_id FROM caller_credits WHERE qr_payment_id = $1 AND status = 'active'`, [pay]);
   check('Bhavin, who found it, is credited', qcred.rows[0]?.user_id === BHAVIN, qcred.rows);
 
+  console.log('\n3b. a caller can send the receipt for a temple-QR payment they can see');
+  const pay2 = (await pool.query(
+    `INSERT INTO qr_payments (payment_id, qr_id, amount, status, payer_name, received_at)
+     VALUES ('pay_open','qr_1',300,'captured','Somebody',NOW()) RETURNING id`
+  )).rows[0].id;
+  const seen = await req('GET', '/api/crm/qr/payments?scope=needs_receipt', ana);
+  check('it is on her list', seen.body.payments?.some((x: any) => x.id === pay2), seen.body);
+  const open = await req('GET', `/api/crm/qr/payments/${pay2}`, ana);
+  check('and it opens (was "Payment not found.")', open.status === 200, open.body);
+  await pool.query(`INSERT INTO razorpay_qrs (qr_id, label, owner_id) VALUES ('qr_b','Bhavin QR',$1)`, [BHAVIN]);
+  const theirs = (await pool.query(
+    `INSERT INTO qr_payments (payment_id, qr_id, amount, status, received_at) VALUES ('pay_b','qr_b',900,'captured',NOW()) RETURNING id`
+  )).rows[0].id;
+  const blocked = await req('GET', `/api/crm/qr/payments/${theirs}`, ana);
+  check("but not a payment on a colleague's own QR", blocked.status === 404, blocked.status);
+
   console.log('\n4. they rang back');
   const back2 = await req('POST', `/api/crm/leads/${asha}/call`, ana, { disposition: 'donated', direction: 'inbound', donated_amount: 1000 });
   check('an incoming call is logged as one', back2.body.activity?.direction === 'inbound', back2.body.activity);
@@ -199,6 +221,26 @@ async function main() {
   check('and the totals agree', ng.body.open === 3, ng.body.open);
   const src = await req('GET', '/api/crm/sessions/sources', ana);
   check('the start screen counts 3 new', src.body.sources?.find((x: any) => x.kind === 'nearly_gave')?.new_attempts === 3, src.body.sources);
+
+  console.log('\n6. sending a QR receipt never wipes what is already on the payment');
+  const keep = (await pool.query(
+    `INSERT INTO qr_payments (payment_id, qr_id, amount, status, received_at, donor_address, sevak_phone, donor_pan)
+     VALUES ('pay_keep','qr_1',700,'captured',NOW(),'12 Beach Road, Vizag','9811100000','ABCDE1234F') RETURNING id`
+  )).rows[0].id;
+  const sent = await req('POST', `/api/crm/qr/payments/${keep}/receipt`, admin, {
+    donor_name: 'Keep Me', donor_phone: '9811100001', donor_email: '', donor_pan: '', donor_address: '',
+    purpose: '', sevak_name: '', sevak_phone: '', site: 'hkmv', credit_me: false,
+  });
+  check('the receipt request is accepted', sent.status === 200 || sent.status === 201, sent.body);
+  const kept = (await pool.query(`SELECT donor_name, donor_address, sevak_phone, donor_pan FROM qr_payments WHERE id = $1`, [keep])).rows[0];
+  check('a new name is saved', kept.donor_name === 'Keep Me', kept);
+  check('the address is not wiped by an empty field', kept.donor_address === '12 Beach Road, Vizag', kept);
+  check('nor the sevak phone, nor the PAN', kept.sevak_phone === '9811100000' && kept.donor_pan === 'ABCDE1234F', kept);
+  const edit = await req('POST', `/api/crm/qr/payments/${keep}/receipt`, admin, {
+    donor_name: 'Keep Me', donor_phone: '9811100001', donor_address: '5 New Street', site: 'hkmv',
+  });
+  const edited = (await pool.query(`SELECT donor_address FROM qr_payments WHERE id = $1`, [keep])).rows[0];
+  check('a real correction still goes through', edited.donor_address === '5 New Street', [edit.status, edited]);
 
   server.close();
   await pool.end();
