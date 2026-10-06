@@ -253,7 +253,7 @@ function WhoPaid({
         r.replaced_said !== undefined
           ? r.replaced_said !== null && Number(r.replaced_said) !== Number(payment.amount)
             ? ` Counted once: ${currency(Number(payment.amount))} in place of the ${currency(Number(r.replaced_said))} noted on the call.`
-            : " Counted once with the gift noted on the call."
+            : " Counted once with the donation noted on the call."
           : "";
       onLinked(
         `Linked to ${r.name ?? "the donor"}${r.kind === "lead" && body.kind !== "lead" ? " (their lead)" : r.existing ? " (already in DRM)" : ""}.` +

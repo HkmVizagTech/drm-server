@@ -51,6 +51,7 @@ import {
   type IconName,
 } from "@/components/ui";
 import { toast } from "@/components/toast";
+import { SankalpamStrip } from "@/components/sankalpam/today-strip";
 
 /** How each fixed source is described, in the order they matter. */
 const FIXED: Record<
@@ -217,6 +218,8 @@ function StartCalling() {
           </>
         }
       />
+
+      <SankalpamStrip className="mb-5" />
 
       {error && (
         <Alert tone="danger" action={<Button size="sm" variant="secondary" onClick={() => void reload()}>Try again</Button>}>

@@ -37,6 +37,13 @@ export const navGroups: NavGroup[] = [
     ],
   },
   {
+    // The puja on a donor's special day, filmed and sent to them. Near the top
+    // because it is a job with a deadline every single day.
+    heading: "Seva",
+    roles: CALLING_AND_UP,
+    items: [{ href: "/sankalpam", label: "Sankalpam", icon: "sparkle", roles: CALLING_AND_UP }],
+  },
+  {
     heading: "Donors",
     items: [
       { href: "/people", label: "People", icon: "users" },
@@ -158,7 +165,9 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   // Late, due now, or due today. Counting every future reminder would leave a
   // permanent number beside Reminders that means nothing and gets ignored
   // within a week - which is worse than no badge at all.
-  const { dueCount } = useCallingAlerts();
+  const { dueCount, sankalpam } = useCallingAlerts();
+  // Videos due today plus any missed: the day's job, not tomorrow's.
+  const sankalpDue = sankalpam ? sankalpam.today + sankalpam.missed : 0;
 
   // Hide what this person cannot use. The server refuses it regardless, so
   // this is not the security boundary - it is so a caller's nav is the five
@@ -249,6 +258,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
                       className={active ? "text-brand-700" : "text-ink-muted group-hover:text-ink-soft"}
                     />
                     <span className="truncate">{item.label}</span>
+                    {item.href === "/sankalpam" && sankalpDue > 0 && (
+                      <span className="ml-auto grid h-5 min-w-5 flex-none place-items-center rounded-full bg-amber-500 px-1.5 text-2xs font-semibold tabular-nums text-white shadow-flat">
+                        {sankalpDue > 99 ? "99+" : sankalpDue}
+                      </span>
+                    )}
                     {item.href === "/calling/reminders" && dueCount > 0 && (
                       <span className="ml-auto grid h-5 min-w-5 flex-none place-items-center rounded-full bg-danger px-1.5 text-2xs font-semibold tabular-nums text-white shadow-flat">
                         {dueCount > 99 ? "99+" : dueCount}

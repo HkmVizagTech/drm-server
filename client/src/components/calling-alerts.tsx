@@ -23,6 +23,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react";
 import { apiClient } from "@/lib/api";
+import type { SankalpSummary } from "@/lib/sankalpam";
 
 export interface ReminderAlert {
   id: string;
@@ -62,6 +63,8 @@ interface Ctx {
   counts: Counts;
   /** Late, due now, or due today — what the badge shows. */
   dueCount: number;
+  /** Sankalpam videos to send today, missed, and coming tomorrow. Null when this person has no Sankalpam. */
+  sankalpam: SankalpSummary | null;
   dismissAlert: (id: string) => void;
   dismissConversions: (ids?: string[]) => Promise<void>;
   refresh: () => Promise<void>;
@@ -74,6 +77,7 @@ const CallingAlertsContext = createContext<Ctx>({
   conversions: [],
   counts: EMPTY_COUNTS,
   dueCount: 0,
+  sankalpam: null,
   dismissAlert: () => undefined,
   dismissConversions: async () => undefined,
   refresh: async () => undefined,
@@ -90,9 +94,19 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
   const [alerts, setAlerts] = useState<ReminderAlert[]>([]);
   const [conversions, setConversions] = useState<ConversionAlert[]>([]);
   const [counts, setCounts] = useState<Counts>(EMPTY_COUNTS);
+  const [sankalpam, setSankalpam] = useState<SankalpSummary | null>(null);
   const signedIn = useRef(true);
 
   const refresh = useCallback(async () => {
+    // Sankalpam on its own: it is not calling, and a person who cannot see it
+    // (403) must not lose the reminders above to its failure.
+    void apiClient
+      .get<SankalpSummary & { today_date?: string }>("/api/sankalpam/summary")
+      .then((s) => {
+        setSankalpam({ today: s.today, missed: s.missed, tomorrow: s.tomorrow });
+        notifySankalpamOnceADay(s);
+      })
+      .catch(() => setSankalpam(null));
     try {
       const [a, board, conv] = await Promise.all([
         apiClient.get<{ alerts: ReminderAlert[] }>("/api/crm/reminders/alerts"),
@@ -157,9 +171,33 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
 
   return (
     <CallingAlertsContext.Provider
-      value={{ alerts, conversions, counts, dueCount, dismissAlert, dismissConversions, refresh }}
+      value={{ alerts, conversions, counts, dueCount, sankalpam, dismissAlert, dismissConversions, refresh }}
     >
       {children}
     </CallingAlertsContext.Provider>
   );
+}
+
+/**
+ * The morning nudge: once a day, the first time DRM is open, a desktop
+ * notification saying how many Sankalpam videos are due. Remembered per
+ * browser so it does not repeat every minute.
+ */
+function notifySankalpamOnceADay(s: SankalpSummary) {
+  if (typeof window === "undefined" || !("Notification" in window) || Notification.permission !== "granted") return;
+  const due = s.today + s.missed;
+  if (!due && !s.tomorrow) return;
+  const day = new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
+  try {
+    if (localStorage.getItem("sankalpam-notified") === day) return;
+    localStorage.setItem("sankalpam-notified", day);
+  } catch {
+    return;
+  }
+  const parts = [
+    s.today ? `${s.today} to send today` : null,
+    s.missed ? `${s.missed} missed` : null,
+    s.tomorrow ? `${s.tomorrow} tomorrow` : null,
+  ].filter(Boolean);
+  new Notification("Sankalpam", { body: parts.join(" · "), tag: `sankalpam-${day}` });
 }

@@ -42,6 +42,7 @@ import crmListsRoutes from './routes/crmLists';
 import crmSessionsRoutes from './routes/crmSessions';
 import crmCallsRoutes from './routes/crmCalls';
 import crmCollectionsRoutes from './routes/crmCollections';
+import sankalpamRoutes from './routes/sankalpam';
 import crmQrRoutes, { webhookRouter as razorpayWebhook } from './routes/crmQr';
 import profilesRoutes from './routes/profiles';
 import filesRoutes from './routes/files';
@@ -216,6 +217,8 @@ app.use('/api/crm', crmCallsRoutes);
 app.use('/api/crm', crmQrRoutes);
 // Money a caller collected on a UPI number that no system watched arrive.
 app.use('/api/crm', crmCollectionsRoutes);
+// Sankalpam: the puja on a donor's special day, every year, and the video sent to them.
+app.use('/api/sankalpam', sankalpamRoutes);
 
 // Razorpay's QR payment webhook. Mounted here, ahead of the JWT-protected
 // groups and outside /api/crm, because Razorpay has no token and because a

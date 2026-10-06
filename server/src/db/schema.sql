@@ -2097,3 +2097,80 @@ ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS link_kind VARCHAR(10);
 ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS link_undo JSONB;
 CREATE INDEX IF NOT EXISTS idx_qr_payments_lead   ON qr_payments(lead_id)   WHERE lead_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_qr_payments_person ON qr_payments(person_id) WHERE person_id IS NOT NULL;
+
+
+-- ===========================================================================
+-- SANKALPAM - a small puja on a donor's special day, filmed and sent to them
+--
+-- A patron gives the temple their family's days - their birthday, their
+-- wife's, the wedding anniversary, a parent's remembrance day - and on each of
+-- those days, every year, a short puja is done in their name and the video is
+-- sent to them. The office kept this in a sheet ("Special Puja Dates"), which
+-- reminds nobody of anything.
+--
+-- THREE TABLES, BECAUSE THERE ARE THREE THINGS
+--   sankalpam_donors  the patron: who they are and how to reach them
+--   sankalpam_dates   one of their days. Stored as day + month, NOT as a
+--                     date: the day repeats every year, and the year in the
+--                     sheet is often the year it was written down rather
+--                     than the year it happened. The year is kept, as on
+--                     record, and never used to decide anything.
+--   sankalpam_sends   what was done for one day in one year. No row = still
+--                     to do. A row per (day, year), so sending this year's
+--                     video says nothing about next year's.
+--
+-- A 29 February day falls on 28 February in other years.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS sankalpam_donors (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- The office's patron number (VSI/000001). The import's key when present.
+  patron_number VARCHAR(40),
+  donor_name VARCHAR(160) NOT NULL,
+  -- "On the name of" - who the puja is offered for, when not the donor.
+  sevak_name VARCHAR(160),
+  phone VARCHAR(15),
+  alt_phone VARCHAR(15),
+  -- Preacher code as the sheets write it (SYMD, YDRD).
+  preacher VARCHAR(40),
+  address TEXT,
+  notes TEXT,
+  -- The same person in DRM's People, matched on the mobile number.
+  person_id UUID REFERENCES people(id) ON DELETE SET NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- The family's gotram, said in the sankalpam.
+ALTER TABLE sankalpam_donors ADD COLUMN IF NOT EXISTS gotram VARCHAR(80);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sankalpam_patron ON sankalpam_donors(upper(patron_number)) WHERE patron_number IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sankalpam_donors_phone ON sankalpam_donors(phone);
+
+CREATE TABLE IF NOT EXISTS sankalpam_dates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  donor_id UUID NOT NULL REFERENCES sankalpam_donors(id) ON DELETE CASCADE,
+  occasion VARCHAR(160) NOT NULL,
+  month SMALLINT NOT NULL CHECK (month BETWEEN 1 AND 12),
+  day SMALLINT NOT NULL CHECK (day BETWEEN 1 AND 31),
+  -- The year on record, if any. Shown, never relied on.
+  orig_year SMALLINT,
+  notes TEXT,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- One donor does not have the same occasion twice on the same day; this is
+-- what makes uploading the same sheet again add nothing.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sankalpam_date ON sankalpam_dates(donor_id, month, day, upper(occasion));
+CREATE INDEX IF NOT EXISTS idx_sankalpam_dates_md ON sankalpam_dates(month, day) WHERE active;
+
+CREATE TABLE IF NOT EXISTS sankalpam_sends (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  date_id UUID NOT NULL REFERENCES sankalpam_dates(id) ON DELETE CASCADE,
+  year SMALLINT NOT NULL,
+  -- ready: video made, not sent yet. sent: sent to the donor. skipped: not this year.
+  status VARCHAR(10) NOT NULL CHECK (status IN ('ready', 'sent', 'skipped')),
+  note TEXT,
+  done_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  done_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (date_id, year)
+);

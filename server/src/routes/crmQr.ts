@@ -698,7 +698,7 @@ export async function markLeadDonated(
     note =
       said !== null && said !== amount
         ? `${note}. Counted once: ${rupees(amount)} paid, in place of the ${rupees(said)} noted earlier`
-        : `${note}. Counted once: the same gift noted earlier`;
+        : `${note}. Counted once: the same donation noted earlier`;
   }
 
   // Credit the caller who actually did it.

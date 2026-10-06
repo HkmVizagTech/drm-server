@@ -25,6 +25,7 @@ import {
 } from "@/components/ui";
 import { CategoryBars, MonthlyTrendChart } from "@/components/charts";
 import { SiteBadge, siteLabel } from "@/components/source";
+import { SankalpamStrip } from "@/components/sankalpam/today-strip";
 
 interface Dashboard {
   people: { total: number; donors: number; newThisMonth: number };
@@ -191,6 +192,8 @@ export default function DashboardPage() {
         title="Dashboard"
         subtitle={`${number(people.donors)} donors · ${number(giving.lifetimeCount)} donations`}
       />
+
+      <SankalpamStrip className="mb-5" />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <StatTile

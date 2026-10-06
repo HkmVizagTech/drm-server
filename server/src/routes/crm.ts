@@ -3412,7 +3412,7 @@ router.post('/leads/:id/donated', async (req, res) => {
     if (money?.converted && !money.wordOnly && money.near) {
       await client.query('ROLLBACK');
       return res.status(409).json({
-        error: `Already counted: ${rupees(money.saidAmount)} from their payment. Nothing added. A new gift goes under Collected by PhonePe.`,
+        error: `Already counted: ${rupees(money.saidAmount)} from their payment. Nothing added. A new donation goes under Collected by PhonePe.`,
       });
     }
 
