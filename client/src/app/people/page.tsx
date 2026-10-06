@@ -77,6 +77,9 @@ export default function PeoplePage() {
   // pages. Both are server-side filters so the counts and paging stay right.
   const [siteFilter, setSiteFilter] = useState("");
   const [groupFilter, setGroupFilter] = useState("");
+  // Who to leave out: the list is mostly website donors, and finding a
+  // volunteer or a seva donor meant paging past thousands of them.
+  const [hideFilter, setHideFilter] = useState("");
   const [sort, setSort] = useState("recent");
   const [page, setPage] = useState(1);
   const [showModal, setShowModal] = useState(false);
@@ -96,7 +99,7 @@ export default function PeoplePage() {
 
   // Any filter change invalidates the current page number - staying on page 12
   // of a result set that now has 2 pages shows an empty table.
-  useEffect(() => setPage(1), [debouncedSearch, roleFilter, sort, siteFilter, groupFilter]);
+  useEffect(() => setPage(1), [debouncedSearch, roleFilter, sort, siteFilter, groupFilter, hideFilter]);
 
   /**
    * The filters, described once.
@@ -112,8 +115,9 @@ export default function PeoplePage() {
     if (roleFilter) params.set("role", roleFilter);
     if (siteFilter) params.set("site", siteFilter);
     if (groupFilter) params.set("group", groupFilter);
+    if (hideFilter) params.set("hide", hideFilter);
     return params;
-  }, [page, sort, debouncedSearch, roleFilter, siteFilter, groupFilter]);
+  }, [page, sort, debouncedSearch, roleFilter, siteFilter, groupFilter, hideFilter]);
 
   const fetchPeople = useCallback(() => {
     setLoading(true);
@@ -176,10 +180,11 @@ export default function PeoplePage() {
     setRoleFilter("");
     setSiteFilter("");
     setGroupFilter("");
+    setHideFilter("");
   };
 
   const people = data?.people ?? [];
-  const activeFilters = [debouncedSearch, roleFilter, siteFilter, groupFilter].filter(Boolean).length;
+  const activeFilters = [debouncedSearch, roleFilter, siteFilter, groupFilter, hideFilter].filter(Boolean).length;
   const hasFilters = activeFilters > 0;
   // The two roles the server lets through /api/people/export. A caller can read
   // this screen, so the button would be here for them - and it would answer 403
@@ -259,6 +264,13 @@ export default function PeoplePage() {
             <option value="donations">Donations pages</option>
             <option value="donate">Seva pages</option>
             <option value="other">Other pages</option>
+          </Select>
+        </Field>
+        <Field label="Hide" className="flex-1 min-w-[9rem]">
+          <Select value={hideFilter} onChange={(v) => setHideFilter(v)} ariaLabel="Hide">
+            <option value="">Nobody</option>
+            <option value="donations_page">Donations page donors</option>
+            <option value="donors">All donors</option>
           </Select>
         </Field>
         <Field label="Sort by" className="flex-1 min-w-[9rem]">

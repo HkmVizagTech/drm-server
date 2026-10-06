@@ -194,6 +194,16 @@ async function main() {
   // what matters is that the caller was not REFUSED.
   check('raising the receipt is not refused', r.status !== 403, { status: r.status, body: r.body });
 
+  // The Send Receipt form for cash / UPI / cheque / bank. Answered 403 "can
+  // look at donor records but not change them" for every caller. The site is
+  // not connected in a test, so a 400 saying so is the expected answer here.
+  r = await req('POST', '/api/donations/offline', caller, {
+    site: 'hkmv', donor_name: 'Ramesh', donor_mobile: '9848012345', amount: 501, payment_mode: 'cash',
+  });
+  check('raising a cash / UPI receipt is not refused', r.status !== 403, { status: r.status, body: r.body });
+  r = await req('POST', '/api/donations', caller, { amount: 1 });
+  check('but writing a bare donation row still is', r.status === 403, r.status);
+
   console.log("\n6. but not somebody else's share");
   const other = await pool.query(
     `INSERT INTO qr_shares (qr_id, lead_id, shared_by, phone, channel)

@@ -15,9 +15,11 @@
 // provider - and this screen says "self-reported" whenever that is zero. The
 // day a provider is wired in, the caveat disappears on its own.
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import { currency, number } from "@/lib/format";
 import {
   Alert,
@@ -163,8 +165,21 @@ function mins(seconds: number | null): string {
   return m ? `${m}m ${s}s` : `${s}s`;
 }
 
+// The period lives in the URL, so opening a tile and pressing Back returns
+// to the same period. useSearchParams needs a Suspense boundary.
 export default function CallingDashboardPage() {
-  const [preset, setPreset] = useState("month");
+  return (
+    <Suspense fallback={null}>
+      <CallingDashboard />
+    </Suspense>
+  );
+}
+
+function CallingDashboard() {
+  const sp = useSearchParams();
+  const router = useRouter();
+  const preset = PRESETS.some((p) => p.key === sp.get("period")) ? (sp.get("period") as string) : "month";
+  const setPreset = (v: string) => router.replace(v === "month" ? "/calling" : `/calling?period=${v}`, { scroll: false });
   const [outside, setOutside] = useState(false);
   const [data, setData] = useState<Dashboard | null>(null);
   const [loading, setLoading] = useState(true);
@@ -194,6 +209,30 @@ export default function CallingDashboardPage() {
   // across a team swapped for the one thing a caller cannot otherwise see -
   // whether the QRs they sent were ever paid.
   const mine = data?.scope === "mine";
+  const { user } = useAuth();
+
+  /**
+   * WHERE EACH NUMBER OPENS
+   * Every figure here is a question somebody asks next - "which ones?" - so
+   * each tile opens the list it counted: the same people, the same dates,
+   * the same "yours". A number you cannot open is one you have to take on
+   * trust, and this screen is read by the people it measures.
+   */
+  const r = data?.range;
+  const leadsLink = (extra: Record<string, string>) => {
+    const p = new URLSearchParams(extra);
+    if (mine && user?.id) p.set("assigned_to", user.id);
+    return `/leads?${p}`;
+  };
+  const inWindow: Record<string, string> = r && preset !== "all" ? { added_from: r.from, added_to: r.to } : {};
+  const callsLink = (extra: Record<string, string> = {}) => {
+    const p = new URLSearchParams(
+      preset === "today" ? { period: "today" } : preset === "all" ? { period: "all" } : r ? { from: r.from, to: r.to } : {}
+    );
+    for (const [k, v] of Object.entries(extra)) p.set(k, v);
+    return `/calling/calls?${p}`;
+  };
+  const earningsLink = (kind?: string) => `/calling/earnings?preset=${preset}${kind ? `&kind=${kind}` : ""}`;
 
   // Built as one string rather than nested fragments so the warning can be the
   // Alert's own title: the banner reads as one sentence either way, and the
@@ -280,6 +319,7 @@ export default function CallingDashboardPage() {
           loading={loading}
           icon="users"
           sub={mine ? "Given to you" : "Added"}
+          href={leadsLink(inWindow)}
         />
         <StatTile
           label={mine ? "Calls you made" : "Calls made"}
@@ -287,6 +327,7 @@ export default function CallingDashboardPage() {
           loading={loading}
           icon="phone"
           sub={c ? `to ${number(c.leads_touched)} ${c.leads_touched === 1 ? "person" : "people"}` : undefined}
+          href={callsLink()}
         />
         <StatTile
           label="Answered"
@@ -295,6 +336,7 @@ export default function CallingDashboardPage() {
           accent="good"
           icon="checkCircle"
           sub={c ? `${number(c.connected)} of ${number(c.made)} calls` : undefined}
+          href={callsLink({ connected: "true" })}
         />
         {/* Money that ARRIVED in this window. It used to be the money given by
             people who were ADDED in this window, which is a different question
@@ -317,6 +359,7 @@ export default function CallingDashboardPage() {
                 } paid`
               : undefined
           }
+          href={earningsLink()}
         />
       </div>
 
@@ -331,6 +374,7 @@ export default function CallingDashboardPage() {
               ? `${number(data.leads.converted)} of ${number(data.leads.received)} leads`
               : "of leads"
           }
+          href={leadsLink({ ...inWindow, converted_from: "1970-01-01" })}
         />
         <StatTile
           label="Average call"
@@ -342,6 +386,7 @@ export default function CallingDashboardPage() {
               ? `from ${number(c.with_duration)} call${c.with_duration === 1 ? "" : "s"}`
               : "No call times yet"
           }
+          href={callsLink()}
         />
         <StatTile
           label="Hoped for"
@@ -350,6 +395,7 @@ export default function CallingDashboardPage() {
           accent="warn"
           icon="trendUp"
           sub={data ? `from ${number(data.pipeline.open_leads)} open leads` : undefined}
+          href={leadsLink({ open: "true" })}
         />
         <StatTile
           label="Overdue"
@@ -358,6 +404,7 @@ export default function CallingDashboardPage() {
           accent={f && f.overdue > 0 ? "warn" : "default"}
           icon="bell"
           sub={f ? `${number(f.today)} due today, ${number(f.next_7_days)} this week` : undefined}
+          href={leadsLink({ due: "overdue" })}
         />
       </div>
 
@@ -386,11 +433,16 @@ export default function CallingDashboardPage() {
           />
           <ul className="grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
             {CREDIT_KINDS.map((k) => (
-              <li key={k.key} className="rounded-control bg-sunken px-3 py-2.5">
-                <span className="block text-2xs font-medium uppercase tracking-wide text-ink-muted">{k.label}</span>
-                <span className="mt-0.5 block truncate text-base font-semibold tabular-nums text-ink">
-                  {currency(data.money.by_kind[k.key])}
-                </span>
+              <li key={k.key}>
+                <Link
+                  href={earningsLink(k.key)}
+                  className="block rounded-control bg-sunken px-3 py-2.5 transition-colors hover:bg-brand-50 hover:ring-1 hover:ring-brand-200"
+                >
+                  <span className="block text-2xs font-medium uppercase tracking-wide text-ink-muted">{k.label}</span>
+                  <span className="mt-0.5 block truncate text-base font-semibold tabular-nums text-ink">
+                    {currency(data.money.by_kind[k.key])}
+                  </span>
+                </Link>
               </li>
             ))}
           </ul>
@@ -451,19 +503,27 @@ export default function CallingDashboardPage() {
               }
             />
           ) : (
-            <ul className="space-y-2.5">
+            <ul className="space-y-1">
               {data.by_status.map((s) => (
                 <li key={s.status}>
-                  <div className="flex items-baseline justify-between gap-3 text-sm">
-                    <span className="truncate text-ink-soft">{s.label}</span>
-                    <span className="tabular-nums font-medium text-ink">{number(s.n)}</span>
-                  </div>
-                  <div className="mt-1 h-1.5 overflow-hidden rounded-pill bg-sunken">
-                    <div
-                      className="h-full rounded-pill bg-brand-600"
-                      style={{ width: `${(s.n / maxStatus) * 100}%` }}
-                    />
-                  </div>
+                  <Link
+                    href={leadsLink({ status: s.status })}
+                    className="group -mx-2 block rounded-control px-2 py-1 transition-colors hover:bg-brand-50"
+                  >
+                    <div className="flex items-baseline justify-between gap-3 text-sm">
+                      <span className="truncate text-ink-soft group-hover:text-brand-800">{s.label}</span>
+                      <span className="flex items-center gap-1.5 tabular-nums font-medium text-ink">
+                        {number(s.n)}
+                        <Icon name="chevronRight" size={13} className="text-ink-faint" />
+                      </span>
+                    </div>
+                    <div className="mt-1 h-1.5 overflow-hidden rounded-pill bg-sunken">
+                      <div
+                        className="h-full rounded-pill bg-brand-600"
+                        style={{ width: `${(s.n / maxStatus) * 100}%` }}
+                      />
+                    </div>
+                  </Link>
                 </li>
               ))}
             </ul>
@@ -482,12 +542,18 @@ export default function CallingDashboardPage() {
           ) : (
             <ul className="divide-y divide-line-soft">
               {data.by_source.map((s) => (
-                <li key={s.source} className="py-2.5 flex items-center justify-between gap-3">
-                  <span className="text-sm text-ink-soft">{SOURCE_LABELS[s.source] ?? s.source}</span>
-                  <span className="flex items-center gap-2 text-sm">
-                    <span className="tabular-nums text-ink">{number(s.n)}</span>
-                    {s.converted > 0 && <Badge tone="good">{s.converted} gave</Badge>}
-                  </span>
+                <li key={s.source}>
+                  <Link
+                    href={leadsLink({ ...inWindow, source: s.source })}
+                    className="-mx-2 flex items-center justify-between gap-3 rounded-control px-2 py-2.5 transition-colors hover:bg-brand-50"
+                  >
+                    <span className="text-sm text-ink-soft">{SOURCE_LABELS[s.source] ?? s.source}</span>
+                    <span className="flex items-center gap-2 text-sm">
+                      <span className="tabular-nums text-ink">{number(s.n)}</span>
+                      {s.converted > 0 && <Badge tone="good">{s.converted} gave</Badge>}
+                      <Icon name="chevronRight" size={13} className="text-ink-faint" />
+                    </span>
+                  </Link>
                 </li>
               ))}
             </ul>
@@ -592,7 +658,7 @@ export default function CallingDashboardPage() {
             />
           ) : (
             <div className="grid gap-4 sm:grid-cols-3">
-              <StatTile label="Sent" value={number(data.qr.shared)} icon="upload" sub="On calls" />
+              <StatTile label="Sent" value={number(data.qr.shared)} icon="upload" sub="On calls" href="/calling/payments?scope=all" />
               {/* `credited`, not a second sum of its own: this is literally
                   money.by_kind.qr, so the tile and the breakdown above cannot
                   come to different answers about the same QR payments. */}
@@ -602,6 +668,7 @@ export default function CallingDashboardPage() {
                 accent="good"
                 icon="rupee"
                 sub={`${currency(data.qr.credited)} counted`}
+                href="/calling/payments?scope=all"
               />
               <StatTile
                 label="Still waiting"
@@ -609,6 +676,7 @@ export default function CallingDashboardPage() {
                 accent={data.qr.awaiting > 0 ? "warn" : "default"}
                 icon="clock"
                 sub="Last 7 days, not paid"
+                href="/calling/payments"
               />
             </div>
           )}
@@ -639,12 +707,18 @@ export default function CallingDashboardPage() {
           ) : (
             <ul className="divide-y divide-line-soft">
               {data.callers_today.map((u) => (
-                <li key={u.id} className="py-2.5 flex items-center justify-between gap-3">
-                  <span className="truncate text-sm text-ink-soft">{u.name}</span>
-                  <span className="whitespace-nowrap text-sm tabular-nums text-ink-muted">
-                    {number(u.calls)} call{u.calls === 1 ? "" : "s"}
-                    <span className="text-ink-faint"> · {number(u.connected)} answered</span>
-                  </span>
+                <li key={u.id}>
+                  <Link
+                    href={`/calling/calls?period=today&user_id=${u.id}`}
+                    className="-mx-2 flex items-center justify-between gap-3 rounded-control px-2 py-2.5 transition-colors hover:bg-brand-50"
+                  >
+                    <span className="truncate text-sm text-ink-soft">{u.name}</span>
+                    <span className="flex items-center gap-1.5 whitespace-nowrap text-sm tabular-nums text-ink-muted">
+                      {number(u.calls)} call{u.calls === 1 ? "" : "s"}
+                      <span className="text-ink-faint"> · {number(u.connected)} answered</span>
+                      <Icon name="chevronRight" size={13} className="text-ink-faint" />
+                    </span>
+                  </Link>
                 </li>
               ))}
             </ul>

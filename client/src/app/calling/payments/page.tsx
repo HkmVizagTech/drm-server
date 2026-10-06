@@ -19,16 +19,14 @@
 //
 // Both are listed together, because the second is the one that gets forgotten.
 //
-// WHAT CHANGED
-// An unmatched payment used to be a dead end: with no share behind it there was
-// no name, no number and no site, so the receipt function returned without
-// doing anything and the donor simply never got their certificate. Nothing on
-// screen said so. A person can now supply those details by hand - that is the
-// receipt dialog below - and the attribution is a second, separate act, so
-// getting a certificate out for somebody else's donor no longer means taking
-// the credit for their call.
+// HOW IT WORKS NOW
+// One button per payment. A payment nobody has linked opens on "Who paid?" -
+// anybody DRM knows, found by name or number, or a new person - and the
+// receipt form follows, filled in from whoever was picked. It used to be two
+// buttons, and the link could only reach somebody a QR had been sent to.
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { api, apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -42,7 +40,9 @@ import {
   Field,
   Modal,
   PageHeader,
-  Select,
+  SearchInput,
+  SegmentedControl,
+  Skeleton,
   SkeletonRows,
   TableShell,
   Tbody,
@@ -54,30 +54,27 @@ import {
   buttonSecondary,
 } from "@/components/ui";
 import { ExportButton } from "@/components/export-button";
-import { ReceiptDialog, type Credit, type Payment } from "@/components/receipts/qr-receipt-dialog";
+import { ReceiptDialog, isLinked, linkedName, type Credit, type Payment } from "@/components/receipts/qr-receipt-dialog";
 
-interface Share {
-  id: string;
-  qr_label: string;
-  lead_name: string | null;
-  phone: string;
-  expected_amount: string | null;
-  created_at: string;
-  matched_at: string | null;
-  /** They said on the call that they would pay by this QR. */
-  awaiting_payment_at: string | null;
-  awaiting_qr_at: string | null;
+
+// ?scope=all opens on every payment - the overview's QR tiles link here.
+export default function QrPaymentsPage() {
+  return (
+    <Suspense fallback={null}>
+      <QrPayments />
+    </Suspense>
+  );
 }
 
-
-export default function QrPaymentsPage() {
+function QrPayments() {
   const { user } = useAuth();
+  const sp = useSearchParams();
   const [payments, setPayments] = useState<Payment[]>([]);
-  const [scope, setScope] = useState("attention");
+  const [scope, setScope] = useState<"attention" | "all">(() => (sp.get("scope") === "all" ? "all" : "attention"));
+  const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [attaching, setAttaching] = useState<Payment | null>(null);
   const [receipting, setReceipting] = useState<Payment | null>(null);
   const [reversing, setReversing] = useState<{ payment: Payment; credit: Credit } | null>(null);
   const [claiming, setClaiming] = useState<string | null>(null);
@@ -95,8 +92,10 @@ export default function QrPaymentsPage() {
    * "Everything" is a file somebody then works through row by row.
    */
   const filterParams = useCallback(() => {
-    return new URLSearchParams({ scope });
-  }, [scope]);
+    const p = new URLSearchParams({ scope });
+    if (q.trim()) p.set("q", q.trim());
+    return p;
+  }, [scope, q]);
 
   const load = useCallback(async () => {
     try {
@@ -111,8 +110,9 @@ export default function QrPaymentsPage() {
   }, [filterParams]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    const t = window.setTimeout(() => void load(), q ? 250 : 0);
+    return () => window.clearTimeout(t);
+  }, [load, q]);
 
   const rememberCredit = useCallback((paymentId: string, credit: Credit) => {
     setCredits((c) => ({ ...c, [paymentId]: credit }));
@@ -190,18 +190,20 @@ export default function QrPaymentsPage() {
       />
 
       <Toolbar>
-        <Field label="Show" className="w-52">
-          <Select
-            value={scope}
-            onChange={setScope}
-            ariaLabel="Show"
-            options={[
-              { value: "attention", label: "Needs action" },
-              { value: "unmatched", label: "Not linked yet" },
-              { value: "all", label: "All" },
-            ]}
-          />
-        </Field>
+        <SegmentedControl
+          options={[
+            { value: "attention", label: "To do" },
+            { value: "all", label: "All" },
+          ]}
+          value={scope}
+          onChange={setScope}
+        />
+        <SearchInput
+          value={q}
+          onChange={setQ}
+          placeholder="Name, number, amount or UTR"
+          className="min-w-[14rem] flex-1"
+        />
       </Toolbar>
 
       {notice && <Alert tone="good" onDismiss={() => setNotice(null)}>{notice}</Alert>}
@@ -209,37 +211,96 @@ export default function QrPaymentsPage() {
 
       <CardHeader
         title={`${payments.length} payment${payments.length === 1 ? "" : "s"}`}
-        subtitle={
-          scope === "attention"
-            ? "Not linked, or no receipt yet."
-            : undefined
-        }
+        subtitle={scope === "attention" ? "No receipt sent yet." : undefined}
       />
 
+      {/* On a phone: one card per payment, with its button in reach. The
+          table below needs a sideways scroll to reach the button, which is
+          where callers on a phone kept getting lost. */}
+      <div className="space-y-2 sm:hidden">
+        {loading && (
+          <>
+            <Skeleton className="h-24 w-full" />
+            <Skeleton className="h-24 w-full" />
+          </>
+        )}
+        {!loading && !payments.length && (
+          <EmptyState
+            title={q ? "No match" : scope === "attention" ? "All done" : "No QR payments yet"}
+            message={scope === "attention" && !q ? "Every payment has its receipt." : "QR payments show here."}
+          />
+        )}
+        {!loading &&
+          payments.map((p) => {
+            const linked = isLinked(p);
+            const name = linkedName(p) ?? p.donor_name ?? null;
+            const done = p.receipt_status === "issued" || p.receipt_status === "pending";
+            return (
+              <div key={p.id} className="rounded-card border border-line-soft bg-surface p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-lg font-semibold tabular-nums text-ink">{currency(Number(p.amount))}</p>
+                    <p className="text-xs text-ink-muted">
+                      {shortDate(p.received_at)} · {clockTime(p.received_at)}
+                      {p.payer_vpa ? ` · ${p.payer_vpa}` : ""}
+                    </p>
+                    {p.utr && <p className="text-xs text-ink-faint">UTR {p.utr}</p>}
+                  </div>
+                  {receiptBadge(p)}
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <div className="min-w-0 text-sm">
+                    {linked || name ? (
+                      <span className="font-medium text-ink">{name ?? "Linked"}</span>
+                    ) : (
+                      <Badge tone="warn">Not linked</Badge>
+                    )}
+                    {creditOf(p)?.name && (
+                      <span className="block text-xs text-ink-muted">Counted for {creditOf(p)?.name}</span>
+                    )}
+                  </div>
+                  {!done && (
+                    <Button
+                      size="sm"
+                      icon={linked ? "receipt" : "user"}
+                      variant={linked ? "primary" : "secondary"}
+                      onClick={() => setReceipting(p)}
+                    >
+                      {linked ? "Send receipt" : "Who paid?"}
+                    </Button>
+                  )}
+                </div>
+                {p.receipt_error && <p className="mt-1 text-xs text-danger">{p.receipt_error}</p>}
+              </div>
+            );
+          })}
+      </div>
+
+      <div className="hidden sm:block">
       <TableShell>
         <Thead>
-          <Th>Date</Th>
+          <Th>When</Th>
           <Th align="right">Amount</Th>
-          <Th>QR</Th>
-          <Th>Paid by</Th>
+          <Th>Paid from</Th>
           <Th>Donor</Th>
-          <Th>Caller</Th>
           <Th>Receipt</Th>
-          <Th align="right">Actions</Th>
+          <Th align="right">{""}</Th>
         </Thead>
 
         {loading ? (
-          <SkeletonRows rows={6} cols={8} />
+          <SkeletonRows rows={6} cols={6} />
         ) : (
           <Tbody>
             {!payments.length ? (
               <tr>
-                <td colSpan={8}>
+                <td colSpan={6}>
                   <EmptyState
-                    title={scope === "attention" ? "All done" : "No QR payments yet"}
+                    title={q ? "No match" : scope === "attention" ? "All done" : "No QR payments yet"}
                     message={
-                      scope === "attention"
-                        ? "Every payment is linked and has a receipt."
+                      q
+                        ? "Try the amount or the last digits of the number or UTR."
+                        : scope === "attention"
+                        ? "Every payment has its receipt."
                         : "QR payments show here."
                     }
                   />
@@ -248,100 +309,88 @@ export default function QrPaymentsPage() {
             ) : (
               payments.map((p) => {
                 const credit = creditOf(p);
+                const linked = isLinked(p);
+                const name = linkedName(p) ?? p.donor_name ?? null;
+                const phone = p.person_phone ?? p.donor_phone ?? null;
+                const done = p.receipt_status === "issued" || p.receipt_status === "pending";
                 return (
                   <tr key={p.id}>
                     <Td className="text-xs text-ink-muted">
                       {shortDate(p.received_at)}
-                      {/* The hour, not just the day. Somebody reconciling a
-                          shift or matching a bank statement is asking whether
-                          the money came in before or after a particular call,
-                          and a date on its own cannot answer that. */}
+                      {/* The hour as well: matching a payment to a call or a
+                          bank statement turns on before or after. */}
                       <div className="text-ink-faint">
                         {clockTime(p.received_at)} · {relativeDate(p.received_at)}
                       </div>
+                      {p.qr_label && <div className="text-ink-faint">{p.qr_label}</div>}
                     </Td>
                     <Td align="right" className="font-medium tabular-nums text-ink">
                       {currency(Number(p.amount))}
                     </Td>
-                    <Td>
-                      <span className="text-sm text-ink-soft">
-                        {p.qr_label ?? <span className="text-ink-faint">Unknown QR</span>}
-                      </span>
-                      {p.qr_owner && <div className="text-xs text-ink-muted">{p.qr_owner}</div>}
-                    </Td>
                     <Td className="text-xs text-ink-soft">
-                      {p.payer_phone ? <span className="tabular-nums">{p.payer_phone}</span> : null}
-                      {p.payer_vpa && <div className="text-ink-faint">{p.payer_vpa}</div>}
+                      {p.payer_vpa && <div>{p.payer_vpa}</div>}
+                      {p.payer_phone && <div className="tabular-nums">{p.payer_phone}</div>}
                       {!p.payer_phone && !p.payer_vpa && <span className="text-ink-faint">Not given</span>}
+                      {p.utr && <div className="text-ink-faint">UTR {p.utr}</div>}
                     </Td>
                     <Td>
-                      {p.lead_id ? (
-                        <Link href={`/leads/${p.lead_id}`} className="text-sm text-brand-700 hover:underline">
-                          {p.lead_name || "a lead"}
-                        </Link>
-                      ) : (
-                        <>
-                          <Badge tone="warn">Not linked yet</Badge>
-                          {/* The reason, not just the state. Each one asks for a
-                              different fix, and only the matcher knows which. */}
-                          {p.match_note && (
-                            <p className="mt-1 max-w-[16rem] text-xs leading-snug text-ink-muted">
-                              {p.match_note}
-                            </p>
+                      {linked || name ? (
+                        <div className="min-w-0">
+                          {p.lead_id ? (
+                            <Link href={`/leads/${p.lead_id}`} className="text-sm font-medium text-brand-700 hover:underline">
+                              {name || "a lead"}
+                            </Link>
+                          ) : p.person_id ? (
+                            <Link href={`/people/${p.person_id}`} className="text-sm font-medium text-brand-700 hover:underline">
+                              {name || "a donor"}
+                            </Link>
+                          ) : (
+                            <span className="text-sm font-medium text-ink">{name}</span>
                           )}
-                        </>
+                          {phone && <div className="text-xs tabular-nums text-ink-muted">{phone}</div>}
+                        </div>
+                      ) : (
+                        <Badge tone="warn">Not linked</Badge>
                       )}
-                    </Td>
-                    <Td>
-                      {credit ? (
-                        <span className="inline-flex flex-wrap items-center gap-1.5">
-                          <Badge tone="brand" icon="user">
-                            {credit.name ?? "Someone"}
-                          </Badge>
-                          {canReverse && (
+                      <div className="mt-1 text-xs">
+                        {credit ? (
+                          <span className="inline-flex flex-wrap items-center gap-1 text-ink-muted">
+                            Counted for {credit.name ?? "someone"}
+                            {canReverse && (
+                              <Button variant="ghost" size="xs" onClick={() => setReversing({ payment: p, credit })}>
+                                Remove
+                              </Button>
+                            )}
+                          </span>
+                        ) : (
+                          // Only once a donor is known: before that, "Who paid?"
+                          // decides the credit along with the link.
+                          (linked || done) && (
                             <Button
                               variant="ghost"
                               size="xs"
-                              onClick={() => setReversing({ payment: p, credit })}
+                              icon="user"
+                              loading={claiming === p.id}
+                              onClick={() => void claim(p)}
                             >
-                              Remove
+                              Add to my total
                             </Button>
-                          )}
-                        </span>
-                      ) : (
-                        <>
-                          {credit === null && (
-                            <div className="mb-0.5 text-xs text-ink-faint">No caller</div>
-                          )}
-                          <Button
-                            variant="ghost"
-                            size="xs"
-                            icon="user"
-                            loading={claiming === p.id}
-                            onClick={() => void claim(p)}
-                          >
-                            Add to my total
-                          </Button>
-                        </>
-                      )}
+                          )
+                        )}
+                      </div>
                     </Td>
                     <Td>{receiptBadge(p)}</Td>
                     <Td align="right">
-                      <div className="flex justify-end gap-1">
-                        {!p.share_id && (
-                          <Button size="sm" variant="secondary" onClick={() => setAttaching(p)}>
-                            Link donor
-                          </Button>
-                        )}
-                        {/* Offered on every payment now, matched or not. The
-                            dialog asks for whatever is missing, so there is no
-                            longer a payment this screen can only shrug at. */}
-                        {p.receipt_status !== "issued" && p.receipt_status !== "pending" && (
-                          <Button size="sm" icon="receipt" onClick={() => setReceipting(p)}>
-                            Send receipt
-                          </Button>
-                        )}
-                      </div>
+                      {!done && (
+                        <Button
+                          size="sm"
+                          icon={linked ? "receipt" : "user"}
+                          variant={linked ? "primary" : "secondary"}
+                          onClick={() => setReceipting(p)}
+                        >
+                          {linked ? "Send receipt" : "Who paid?"}
+                        </Button>
+                      )}
                       {p.receipt_error && (
                         <p className="mt-0.5 max-w-xs text-right text-xs text-danger">{p.receipt_error}</p>
                       )}
@@ -353,20 +402,7 @@ export default function QrPaymentsPage() {
           </Tbody>
         )}
       </TableShell>
-
-
-
-      {attaching && (
-        <AttachDialog
-          payment={attaching}
-          onClose={() => setAttaching(null)}
-          onDone={async () => {
-            setAttaching(null);
-            setNotice("Linked. Receipt is being sent.");
-            await load();
-          }}
-        />
-      )}
+      </div>
 
       {receipting && (
         <ReceiptDialog
@@ -374,6 +410,7 @@ export default function QrPaymentsPage() {
           currentUserId={user?.id ?? null}
           currentUserName={user?.name ?? null}
           onCreditKnown={rememberCredit}
+          onChanged={() => void load()}
           onClose={() => setReceipting(null)}
           onDone={async (message) => {
             setReceipting(null);
@@ -476,122 +513,6 @@ function ReverseCreditDialog({
           placeholder="e.g. Added by mistake. Ravi's donor."
         />
       </Field>
-    </Modal>
-  );
-}
-
-/** Choosing which shared QR a payment belongs to. */
-function AttachDialog({
-  payment,
-  onClose,
-  onDone,
-}: {
-  payment: Payment;
-  onClose: () => void;
-  onDone: () => void;
-}) {
-  const [shares, setShares] = useState<Share[]>([]);
-  const [chosen, setChosen] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // Start with the people who actually said they would pay. Most shares went
-  // to people who said nothing, and scrolling past forty of those to reach the
-  // three who promised is how the wrong one gets picked.
-  const [promisedOnly, setPromisedOnly] = useState(true);
-
-  useEffect(() => {
-    apiClient
-      .get<{ shares: Share[] }>(
-        `/api/crm/qr/shares?mine=false&unmatched=true${promisedOnly ? "&awaiting=true" : ""}`
-      )
-      .then((d) => setShares(d.shares))
-      .catch((e) => setError(e instanceof Error ? e.message : "Could not load. Try again."));
-  }, [promisedOnly]);
-
-  const promised = (s: Share) => !!(s.awaiting_payment_at || s.awaiting_qr_at);
-
-  return (
-    <Modal
-      title={`Who sent ${currency(Number(payment.amount))}?`}
-      onClose={onClose}
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            disabled={!chosen}
-            loading={busy}
-            onClick={async () => {
-              setBusy(true);
-              setError(null);
-              try {
-                await apiClient.post(`/api/crm/qr/payments/${payment.id}/attach`, { share_id: chosen });
-                onDone();
-              } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not link. Try again.");
-                setBusy(false);
-              }
-            }}
-          >
-            Link
-          </Button>
-        </>
-      }
-    >
-      {error && <Alert tone="danger">{error}</Alert>}
-
-      <p className="mb-3 text-sm text-ink-soft">
-        Paid {relativeDate(payment.received_at).toLowerCase()} through {payment.qr_label ?? "a QR"}
-        {payment.payer_vpa && ` from ${payment.payer_vpa}`}
-        {payment.payer_phone && ` · ${payment.payer_phone}`}. Pick the donor.
-      </p>
-
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <span className="text-xs text-ink-muted">
-          {promisedOnly ? "Said they would pay" : "Everyone sent a QR"}
-        </span>
-        <Button variant="ghost" size="xs" onClick={() => setPromisedOnly((v) => !v)}>
-          {promisedOnly ? "Show everyone" : "Only who promised"}
-        </Button>
-      </div>
-
-      <div className="max-h-72 space-y-1 overflow-y-auto scroll-slim">
-        {!shares.length && (
-          <p className="py-6 text-center text-sm text-ink-faint">
-            {promisedOnly
-              ? "No one promised to pay. Tap Show everyone."
-              : "No QRs waiting to be linked."}
-          </p>
-        )}
-        {shares.map((s) => (
-          <label
-            key={s.id}
-            className={`flex cursor-pointer items-center gap-3 rounded-control border px-3 py-2 ${
-              chosen === s.id ? "border-brand-600 bg-brand-50" : "border-transparent hover:bg-sunken"
-            }`}
-          >
-            <input
-              type="radio"
-              name="share"
-              checked={chosen === s.id}
-              onChange={() => setChosen(s.id)}
-              className="accent-brand-600"
-            />
-            <span className="min-w-0 flex-1">
-              <span className="block text-sm font-medium text-ink">{s.lead_name || s.phone}</span>
-              <span className="block text-xs text-ink-muted">
-                {s.qr_label} · {relativeDate(s.created_at)}
-                {s.expected_amount && ` · promised ${currency(Number(s.expected_amount))}`}
-              </span>
-            </span>
-            {promised(s) && <Badge tone="info">Promised</Badge>}
-            {s.expected_amount && Math.abs(Number(s.expected_amount) - Number(payment.amount)) < 1 && (
-              <Badge tone="good">Same amount</Badge>
-            )}
-          </label>
-        ))}
-      </div>
     </Modal>
   );
 }

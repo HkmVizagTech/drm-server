@@ -42,7 +42,7 @@ interface PeopleFilters {
 // adds the next one, and the person who downloaded the file has no way of
 // knowing that the rows in it are not the rows they were looking at.
 function buildPeopleFilters(q: Record<string, unknown>): PeopleFilters {
-  const { role, search, sort = 'recent', site, group } = q;
+  const { role, search, sort = 'recent', site, group, hide } = q;
   const conditions: string[] = [];
   const values: unknown[] = [];
   let idx = 1;
@@ -75,6 +75,20 @@ function buildPeopleFilters(q: Record<string, unknown>): PeopleFilters {
       `EXISTS (SELECT 1 FROM donations dn WHERE dn.person_id = p.id
                  AND ${groupPredicateSql(group, 'dn.source_page', 'dn.source_site')})`
     );
+  }
+
+  // Who to leave OUT. The list is mostly website donors, and somebody
+  // looking for volunteers, members or a particular seva's donors had to
+  // page past thousands of /donations-page givers to find them.
+  //   donations_page - anyone who has given on the main site's Donations page
+  //   donors         - anyone with a donation at all
+  if (hide === 'donations_page') {
+    conditions.push(
+      `NOT EXISTS (SELECT 1 FROM donations dn WHERE dn.person_id = p.id
+                     AND ${groupPredicateSql('donations', 'dn.source_page', 'dn.source_site')})`
+    );
+  } else if (hide === 'donors') {
+    conditions.push(`NOT EXISTS (SELECT 1 FROM donations dn WHERE dn.person_id = p.id)`);
   }
 
   return {
@@ -204,6 +218,7 @@ async function exportPeopleFile(
         role: 'Role',
         site: 'Site',
         group: 'Page group',
+        hide: 'Hiding',
         sort: 'Sorted by',
       }),
       columns: [

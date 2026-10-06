@@ -39,6 +39,7 @@ import {
   type ExportFormat,
 } from '../utils/export';
 import { recordCredit, reverseCreditFor } from '../services/credits';
+import type { PoolClient } from 'pg';
 
 const router = Router();
 
@@ -58,6 +59,15 @@ const str = (v: unknown, max = 255): string | null => {
   return s ? s.slice(0, max) : null;
 };
 const phone10 = (v: unknown): string => String(v ?? '').replace(/\D/g, '').slice(-10);
+
+/**
+ * Linked to somebody, by any route: a QR share, a lead or a person.
+ *
+ * A share used to be the only way, so "not linked" was written share_id IS
+ * NULL everywhere. Money from a regular donor scanning the temple QR, or a
+ * walk-in, had no share and could never be linked to anyone.
+ */
+const LINKED = (a = 'p') => `(${a}.share_id IS NOT NULL OR ${a}.lead_id IS NOT NULL OR ${a}.person_id IS NOT NULL)`;
 
 /**
  * The image a donor actually receives.
@@ -137,9 +147,9 @@ router.get('/qrs', authenticate, async (req, res) => {
          ) c ON TRUE
          LEFT JOIN LATERAL (
            SELECT COALESCE(SUM(pm.amount), 0)::numeric AS raised,
-                  COALESCE(SUM(pm.amount) FILTER (WHERE pm.share_id IS NOT NULL), 0)::numeric AS attributed,
+                  COALESCE(SUM(pm.amount) FILTER (WHERE ${LINKED('pm')}), 0)::numeric AS attributed,
                   COUNT(*)::int AS payments,
-                  COUNT(*) FILTER (WHERE pm.share_id IS NULL)::int AS unattributed,
+                  COUNT(*) FILTER (WHERE NOT ${LINKED('pm')})::int AS unattributed,
                   MAX(pm.received_at) AS last_payment_at
              FROM qr_payments pm
             WHERE pm.qr_id = q.qr_id
@@ -990,7 +1000,8 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
    * donor_* columns and POST /qr/payments/:id/receipt.
    */
   const r = await pool.query(
-    `SELECT p.*, s.lead_id, s.person_id, s.phone AS share_phone,
+    `SELECT p.*, COALESCE(s.lead_id, p.lead_id) AS lead_id, COALESCE(p.person_id, s.person_id) AS person_id,
+            s.phone AS share_phone, pe.phone AS person_phone,
             -- Aliased away from "receipt_site" on purpose: qr_payments has a
             -- column of that name too (the site a receipt was actually raised
             -- against), and two output columns sharing a name means the later
@@ -1013,7 +1024,7 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
        -- The QR the money was actually paid into, which Razorpay tells us on
        -- qr_code.credited even when no share matches.
        LEFT JOIN razorpay_qrs q_direct ON q_direct.qr_id = p.qr_id
-       LEFT JOIN leads l ON s.lead_id = l.id
+       LEFT JOIN leads l ON l.id = COALESCE(s.lead_id, p.lead_id)
        LEFT JOIN people pe ON COALESCE(p.person_id, s.person_id) = pe.id
        LEFT JOIN preachers pr_lead ON l.preacher_id = pr_lead.id
        LEFT JOIN preachers pr_person ON pe.preacher_id = pr_person.id
@@ -1335,8 +1346,10 @@ router.post('/qr/payments/:id/issue-receipt', authenticate, async (req, res) => 
       `SELECT 1 FROM qr_payments p
          LEFT JOIN qr_shares s ON p.share_id = s.id
          LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
+         LEFT JOIN leads l ON l.id = COALESCE(s.lead_id, p.lead_id)
         WHERE p.id = $1 AND (s.shared_by = $2::uuid OR q.owner_id = $2::uuid
-                             OR (p.share_id IS NULL AND q.owner_id IS NULL))`,
+                             OR p.linked_by = $2::uuid OR l.assigned_to = $2::uuid
+                             OR (NOT ${LINKED()} AND q.owner_id IS NULL))`,
       [req.params.id, req.user?.userId ?? null]
     );
     if (!ok.rows.length) return res.status(404).json({ error: 'Payment not found.' });
@@ -1398,13 +1411,13 @@ function qrPaymentScope(
           scope === 'needs_receipt'
         ? "p.receipt_number IS NULL AND COALESCE(p.status, 'captured') IN ('captured', 'authorized')"
         : scope === 'unmatched'
-        ? 'p.share_id IS NULL'
+        ? `NOT ${LINKED()}`
         : // 'needs_donor' belongs here, and leaving it out hid the exact rows
           // this screen exists to surface: a payment that reached the receipt
           // step and stopped because nobody had typed the donor's name in.
           // Those sat under "Everything" only, which is the one view nobody
           // opens when they are working through what needs doing.
-          "p.share_id IS NULL OR p.receipt_status IS NULL OR p.receipt_status IN ('failed','skipped','pending','needs_donor')",
+          "p.receipt_status IS NULL OR p.receipt_status IN ('failed','skipped','pending','needs_donor')",
     me: user?.role === 'caller' ? user?.userId ?? null : null,
   };
 }
@@ -1413,7 +1426,9 @@ const QR_PAYMENT_FROM = `FROM qr_payments p
          LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
          LEFT JOIN users u ON q.owner_id = u.id
          LEFT JOIN qr_shares s ON p.share_id = s.id
-         LEFT JOIN leads l ON s.lead_id = l.id
+         LEFT JOIN leads l ON l.id = COALESCE(s.lead_id, p.lead_id)
+         LEFT JOIN people pe ON pe.id = COALESCE(p.person_id, s.person_id)
+         LEFT JOIN users lu ON lu.id = p.linked_by
          -- Who the money is already counted for. On the list, not just the
          -- detail view: without it the screen cannot tell "nobody has this"
          -- from "nobody has looked", and the difference decides whether it is
@@ -1425,8 +1440,10 @@ const QR_PAYMENT_FROM = `FROM qr_payments p
 const QR_PAYMENT_VISIBLE = `($1::uuid IS NULL
                OR q.owner_id = $1::uuid
                OR s.shared_by = $1::uuid
+               OR p.linked_by = $1::uuid
+               OR l.assigned_to = $1::uuid
                -- Unclaimed money on a QR anybody may use. Theirs to recognise.
-               OR (p.share_id IS NULL AND q.owner_id IS NULL))`;
+               OR (NOT ${LINKED()} AND q.owner_id IS NULL))`;
 
 /**
  * The UTR - the 12-digit UPI transaction number the donor sees on their own
@@ -1450,6 +1467,8 @@ router.get('/qr/payments', authenticate, async (req, res) => {
               p.match_basis, p.match_score, p.match_note, p.last_event,
               q.label AS qr_label, q.receipt_site AS qr_receipt_site,
               u.name AS qr_owner, l.name AS lead_name, l.id AS lead_id,
+              pe.name AS person_name, pe.phone AS person_phone,
+              p.donor_name, p.donor_phone, p.link_kind, p.linked_by, lu.name AS linked_by_name,
               cc.user_id AS credit_user_id, cu.name AS credit_user_name
          ${QR_PAYMENT_FROM}
         WHERE (${where})
@@ -1461,6 +1480,10 @@ router.get('/qr/payments', authenticate, async (req, res) => {
                OR p.payment_id ILIKE '%' || $2 || '%'
                OR ${QR_UTR} LIKE '%' || $2 || '%'
                OR l.name ILIKE '%' || $2 || '%'
+               OR pe.name ILIKE '%' || $2 || '%'
+               OR pe.phone LIKE '%' || $2 || '%'
+               OR p.donor_name ILIKE '%' || $2 || '%'
+               OR p.donor_phone LIKE '%' || $2 || '%'
                OR p.amount::text = $2
                OR p.amount::text = $2 || '.00')
         ORDER BY p.received_at DESC LIMIT 200`,
@@ -1560,7 +1583,7 @@ router.get('/qr/unmatched', authenticate, async (req, res) => {
          FROM qr_payments p
          LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
          LEFT JOIN users u ON q.owner_id = u.id
-        WHERE p.share_id IS NULL
+        WHERE NOT ${LINKED()}
           AND ($1::uuid IS NULL OR q.owner_id = $1::uuid OR q.owner_id IS NULL)
         ORDER BY p.received_at DESC LIMIT 200`,
       [me]
@@ -1596,7 +1619,9 @@ router.get('/qr/payments/:id', authenticate, async (req, res) => {
               COALESCE(q_share.label, q_direct.label)               AS qr_label,
               COALESCE(q_share.purpose, q_direct.purpose)           AS qr_purpose,
               COALESCE(p.receipt_site, q_share.receipt_site, q_direct.receipt_site) AS site_for_receipt,
-              s.shared_by, s.phone AS share_phone, s.lead_id,
+              s.shared_by, s.phone AS share_phone, COALESCE(s.lead_id, p.lead_id) AS lead_id,
+              COALESCE(p.person_id, s.person_id) AS person_id, pe.phone AS person_phone,
+              lu.name AS linked_by_name,
               su.name AS shared_by_name,
               l.name AS lead_name, l.email AS lead_email, l.assigned_to AS lead_assigned_to,
               pe.name AS person_name, pe.email AS person_email, pe.pan AS person_pan,
@@ -1610,8 +1635,9 @@ router.get('/qr/payments/:id', authenticate, async (req, res) => {
          LEFT JOIN users su ON s.shared_by = su.id
          LEFT JOIN razorpay_qrs q_share ON s.qr_id = q_share.id
          LEFT JOIN razorpay_qrs q_direct ON q_direct.qr_id = p.qr_id
-         LEFT JOIN leads l ON s.lead_id = l.id
+         LEFT JOIN leads l ON l.id = COALESCE(s.lead_id, p.lead_id)
          LEFT JOIN people pe ON COALESCE(p.person_id, s.person_id) = pe.id
+         LEFT JOIN users lu ON lu.id = p.linked_by
          LEFT JOIN caller_credits cc ON cc.qr_payment_id = p.id AND cc.status = 'active'
          LEFT JOIN users cu ON cc.user_id = cu.id
         WHERE p.id = $1
@@ -1624,7 +1650,8 @@ router.get('/qr/payments/:id', authenticate, async (req, res) => {
                -- QR_PAYMENT_VISIBLE on the list. Without it the list showed
                -- these payments to every caller and then answered "Payment
                -- not found." the moment one pressed Send receipt.
-               OR (p.share_id IS NULL AND q_direct.owner_id IS NULL))`,
+               OR p.linked_by = $2::uuid OR l.assigned_to = $2::uuid
+               OR (NOT ${LINKED()} AND q_direct.owner_id IS NULL))`,
       [req.params.id, req.user?.role === 'caller' ? req.user?.userId ?? null : null]
     );
     if (!rows.length) return res.status(404).json({ error: 'Payment not found.' });
@@ -1671,13 +1698,14 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
     // QRs and shares, nobody else's.
     const me = req.user?.role === 'caller' ? req.user?.userId ?? null : null;
     const found = await pool.query(
-      `SELECT p.id, p.amount, p.received_at, p.receipt_status, s.shared_by, s.lead_id,
+      `SELECT p.id, p.amount, p.received_at, p.receipt_status, s.shared_by,
+              COALESCE(s.lead_id, p.lead_id) AS lead_id,
               l.assigned_to AS lead_assigned_to
          FROM qr_payments p
          LEFT JOIN qr_shares s ON p.share_id = s.id
          LEFT JOIN razorpay_qrs q_share ON s.qr_id = q_share.id
          LEFT JOIN razorpay_qrs q_direct ON q_direct.qr_id = p.qr_id
-         LEFT JOIN leads l ON s.lead_id = l.id
+         LEFT JOIN leads l ON l.id = COALESCE(s.lead_id, p.lead_id)
         WHERE p.id = $1
           AND ($2::uuid IS NULL OR s.shared_by = $2::uuid
                OR q_share.owner_id = $2::uuid OR q_direct.owner_id = $2::uuid
@@ -1685,7 +1713,8 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
                -- QR_PAYMENT_VISIBLE on the list. Without it the list showed
                -- these payments to every caller and then answered "Payment
                -- not found." the moment one pressed Send receipt.
-               OR (p.share_id IS NULL AND q_direct.owner_id IS NULL))`,
+               OR p.linked_by = $2::uuid OR l.assigned_to = $2::uuid
+               OR (NOT ${LINKED()} AND q_direct.owner_id IS NULL))`,
       [req.params.id, me]
     );
     if (!found.rows.length) return res.status(404).json({ error: 'Payment not found.' });
@@ -1741,6 +1770,14 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
         typeof b.want_prasadam === 'boolean' ? b.want_prasadam : null,
         typeof b.want_certificate === 'boolean' ? b.want_certificate : null,
       ]
+    );
+
+    // Every receipted payment belongs to somebody in DRM. A payment nobody
+    // linked is linked here to the donor on the receipt - found by mobile
+    // number, or added - so the donation shows on their record and the
+    // payment stops showing as "Not linked".
+    await autoLinkForReceipt(String(req.params.id), donorName, donorPhone, req.user).catch((e) =>
+      console.error('crm.qrReceipt auto-link failed (non-fatal):', (e as Error).message)
     );
 
     await issueReceiptForPayment(String(req.params.id));
@@ -1935,6 +1972,505 @@ router.get('/qr/shares', authenticate, async (req, res) => {
   }
 });
 
+/* =========================================================================
+   LINKING A PAYMENT TO WHOEVER PAID IT
+   ========================================================================= */
+
+type Who = { userId?: string; role?: string } | undefined;
+
+/**
+ * The payment, if this user may act on it - the same rule as the list.
+ * Locked when a client is passed, because linking reads then writes.
+ */
+async function paymentFor(id: string, user: Who, client?: PoolClient) {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  const db = client ?? pool;
+  const me = user?.role === 'caller' ? user?.userId ?? null : null;
+  const r = await db.query(
+    `SELECT p.*,
+            COALESCE(pe.name, l.name, sl.name, p.donor_name) AS linked_name,
+            COALESCE(pe.phone, l.phone, s.phone, p.donor_phone) AS linked_phone
+       FROM qr_payments p
+       LEFT JOIN qr_shares s ON p.share_id = s.id
+       LEFT JOIN razorpay_qrs qs ON s.qr_id = qs.id
+       LEFT JOIN razorpay_qrs qd ON qd.qr_id = p.qr_id
+       LEFT JOIN leads l ON l.id = p.lead_id
+       LEFT JOIN leads sl ON sl.id = s.lead_id
+       LEFT JOIN people pe ON pe.id = COALESCE(p.person_id, s.person_id)
+      WHERE p.id = $1
+        AND ($2::uuid IS NULL OR s.shared_by = $2::uuid OR qs.owner_id = $2::uuid
+             OR qd.owner_id = $2::uuid OR p.linked_by = $2::uuid
+             OR l.assigned_to = $2::uuid OR sl.assigned_to = $2::uuid
+             OR (NOT ${LINKED()} AND qd.owner_id IS NULL))
+      ${client ? 'FOR UPDATE OF p' : ''}`,
+    [id, me]
+  );
+  return r.rows[0] ?? null;
+}
+
+/** What a lead looked like before a link marked it Donated, for unlinking. */
+async function leadBefore(client: PoolClient, leadId: string) {
+  const b = await client.query(
+    `SELECT status, converted_at, converted_amount, converted_via, converted_note, converted_donation_id,
+            conversion_seen_at, next_follow_up_at, follow_up_note, awaiting_qr_at, alt_phone,
+            assigned_to, assigned_at
+       FROM leads WHERE id = $1 FOR UPDATE`,
+    [leadId]
+  );
+  const open = await client.query(`SELECT id FROM lead_reminders WHERE lead_id = $1 AND status = 'open'`, [leadId]);
+  return { lead_id: leadId, before: b.rows[0] ?? null, open_reminders: open.rows.map((r) => r.id as string) };
+}
+
+export type LinkTarget =
+  | { kind: 'share'; id: string }
+  | { kind: 'lead'; id: string }
+  | { kind: 'person'; id: string }
+  | { kind: 'new'; name: string; phone: string };
+
+type LinkResult =
+  | { ok: true; kind: string; name: string | null; phone: string | null; personId: string | null; existing?: boolean }
+  | { ok: false; status: number; error: string };
+
+/**
+ * Link a payment (already locked by the caller's transaction) to a person.
+ *
+ * WHO IS CREDITED
+ *   share  - whoever sent that QR, exactly as an automatic match does.
+ *   lead   - the lead's caller. A lead nobody owns goes to the caller linking
+ *            it, and becomes theirs, as markLeadDonated already does.
+ *   person / new - the caller who linked it. An admin or accountant linking
+ *            is reconciling, not earning, so nobody is credited; "Add to my
+ *            total" on the row still works for whoever it really was.
+ * Money already counted for somebody stays with them - recordCredit refuses a
+ * second credit for the same payment.
+ */
+async function linkPayment(client: PoolClient, pay: any, target: LinkTarget, user: Who): Promise<LinkResult> {
+  const me = user?.userId ?? null;
+  const isCaller = user?.role === 'caller';
+  if (pay.share_id || pay.lead_id || pay.person_id) {
+    return { ok: false, status: 409, error: `Already linked to ${pay.linked_name ?? 'someone'}. Unlink it first.` };
+  }
+  const amount = Number(pay.amount);
+  const evidence = { qrPaymentId: pay.id as string, occurredAt: pay.received_at as string };
+  const note = 'Paid by QR, linked by hand';
+  let undo: Record<string, unknown> = { donor_was: { name: pay.donor_name, phone: pay.donor_phone } };
+  let name: string | null = null;
+  let phone: string | null = null;
+  let personId: string | null = null;
+  let leadId: string | null = null;
+  let shareId: string | null = null;
+  let kind: string = target.kind;
+  let existing = false;
+
+  if (target.kind === 'share') {
+    const sh = await client.query(
+      `SELECT s.*, l.name AS lead_name FROM qr_shares s LEFT JOIN leads l ON l.id = s.lead_id
+        WHERE s.id = $1 AND s.matched_at IS NULL AND ($2::uuid IS NULL OR s.shared_by = $2::uuid)`,
+      [target.id, isCaller ? me : null]
+    );
+    if (!sh.rows.length) return { ok: false, status: 404, error: 'That QR send was not found, or is already linked.' };
+    const share = sh.rows[0];
+    shareId = share.id;
+    personId = share.person_id ?? null;
+    name = share.lead_name ?? null;
+    phone = share.phone ?? null;
+    await client.query(
+      `UPDATE qr_shares SET matched_payment_id = $2, matched_amount = $3::numeric,
+         matched_at = NOW(), matched_via = 'manual', matched_by = $4::uuid WHERE id = $1`,
+      [share.id, pay.payment_id, amount, me]
+    );
+    if (share.lead_id) {
+      undo = { ...undo, lead: await leadBefore(client, share.lead_id) };
+      await markLeadDonated(share.lead_id, amount, note, client, share.shared_by ?? null, {
+        ...evidence, shareId: share.id, personId: share.person_id ?? undefined,
+      });
+    } else if (share.shared_by) {
+      await recordCredit(
+        { userId: share.shared_by, amount, kind: 'qr', ...evidence, shareId: share.id, personId: share.person_id ?? undefined, note },
+        client
+      );
+    }
+  } else if (target.kind === 'lead') {
+    const ld = await client.query(
+      `SELECT * FROM leads WHERE id = $1 AND ($2::uuid IS NULL OR assigned_to = $2::uuid OR assigned_to IS NULL OR assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))`,
+      [target.id, isCaller ? me : null]
+    );
+    if (!ld.rows.length) return { ok: false, status: 404, error: 'Lead not found.' };
+    const lead = ld.rows[0];
+    leadId = lead.id;
+    personId = lead.person_id ?? null;
+    name = lead.name ?? null;
+    phone = lead.phone ?? null;
+    undo = { ...undo, lead: await leadBefore(client, lead.id) };
+    // The lead's caller is credited. A lead parked with somebody who does not
+    // make calls (an admin) is taken over by the caller linking it, as calling
+    // it would.
+    const ownerCalls = lead.assigned_to
+      ? (await client.query(`SELECT role = 'caller' AS calls FROM users WHERE id = $1`, [lead.assigned_to])).rows[0]?.calls === true
+      : false;
+    if (lead.assigned_to && !ownerCalls && isCaller && me) {
+      await client.query(`UPDATE leads SET assigned_to = $2::uuid, assigned_at = NOW() WHERE id = $1`, [lead.id, me]);
+      (undo.lead as Record<string, unknown>).taken_from = lead.assigned_to;
+      lead.assigned_to = me;
+    }
+    const creditTo = lead.assigned_to ?? (isCaller ? me : null);
+    await markLeadDonated(lead.id, amount, note, client, creditTo, { ...evidence, personId: lead.person_id ?? undefined });
+    // The number they paid from, so their next payment from it is recognised.
+    const payer = phone10(pay.payer_phone);
+    if (/^[6-9]\d{9}$/.test(payer) && payer !== lead.phone && !lead.alt_phone) {
+      await client.query(`UPDATE leads SET alt_phone = $2 WHERE id = $1`, [lead.id, payer]);
+      (undo.lead as Record<string, unknown>).set_alt_phone = true;
+    }
+  } else {
+    let person;
+    if (target.kind === 'person') {
+      person = (await client.query(`SELECT id, name, phone FROM people WHERE id = $1`, [target.id])).rows[0];
+      if (!person) return { ok: false, status: 404, error: 'Person not found.' };
+    } else {
+      const nm = String(target.name ?? '').trim().replace(/\s+/g, ' ').slice(0, 160);
+      const ph = phone10(target.phone);
+      if (nm.length < 2) return { ok: false, status: 400, error: 'Enter the Donor Name.' };
+      if (!/^[6-9]\d{9}$/.test(ph)) return { ok: false, status: 400, error: 'Enter a 10-digit mobile number.' };
+      person = (await client.query(`SELECT id, name, phone FROM people WHERE phone = $1`, [ph])).rows[0];
+      if (person) {
+        // Already in DRM under this number - linked to that record rather
+        // than a second one, which the unique phone would refuse anyway.
+        existing = true;
+        kind = 'person';
+      } else {
+        person = (
+          await client.query(
+            `INSERT INTO people (name, phone, roles) VALUES ($1, $2, ARRAY['donor']::TEXT[]) RETURNING id, name, phone`,
+            [nm, ph]
+          )
+        ).rows[0];
+        undo = { ...undo, created_person: person.id };
+      }
+    }
+    personId = person.id;
+    name = person.name;
+    phone = person.phone;
+    if (isCaller && me) {
+      await recordCredit({ userId: me, amount, kind: 'qr', ...evidence, personId: person.id, note, createdBy: me }, client);
+    }
+  }
+
+  await client.query(
+    `UPDATE qr_payments SET share_id = $2, lead_id = $3, person_id = $4,
+       linked_by = $5, linked_at = NOW(), link_kind = $6, link_undo = $7::jsonb,
+       donor_name  = COALESCE(NULLIF(donor_name, ''), $8),
+       donor_phone = COALESCE(NULLIF(donor_phone, ''), $9)
+     WHERE id = $1`,
+    [pay.id, shareId, leadId, personId, me, kind, JSON.stringify(undo), name, phone10(phone) || null]
+  );
+  return { ok: true, kind, name, phone, personId, existing };
+}
+
+/** Used by the receipt route: link to the donor on the receipt when nobody linked it. */
+async function autoLinkForReceipt(id: string, donorName: string, donorPhone: string, user: Who) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const pay = await paymentFor(id, user, client);
+    if (!pay || pay.share_id || pay.lead_id || pay.person_id) {
+      await client.query('ROLLBACK');
+      return;
+    }
+    const r = await linkPayment(client, pay, { kind: 'new', name: donorName, phone: donorPhone }, user);
+    await client.query(r.ok ? 'COMMIT' : 'ROLLBACK');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * GET /qr/payments/:id/who?q= - who could have paid this.
+ *
+ * With no search: the likely ones - a QR sent to somebody who promised, or
+ * for the same amount, and anybody DRM knows on the number the money came
+ * from. With a search: name or mobile across QR sends, leads and donors.
+ * One row per mobile number, the most specific kind first.
+ */
+router.get('/qr/payments/:id/who', authenticate, async (req, res) => {
+  try {
+    const pay = await paymentFor(String(req.params.id), req.user);
+    if (!pay) return res.status(404).json({ error: 'Payment not found.' });
+    const isCaller = req.user?.role === 'caller';
+    const me = isCaller ? req.user?.userId ?? null : null;
+    const term = String(req.query.q ?? '').trim().slice(0, 80);
+    const digits = term.replace(/\D/g, '');
+    const byDigits = digits.length >= 4 ? digits.slice(-10) : '';
+    const byText = byDigits ? '' : term;
+    const payer = phone10(pay.payer_phone);
+    const firstWord = String(pay.payer_name ?? '').includes('@') ? '' : String(pay.payer_name ?? '').trim().split(/\s+/)[0] ?? '';
+    const suggest = !term;
+
+    const [shares, leads, people] = await Promise.all([
+      pool.query(
+        `SELECT s.id, s.phone, s.lead_id, l.name, s.expected_amount, s.created_at, q.label AS qr_label,
+                u.name AS owner_name,
+                (s.awaiting_payment_at IS NOT NULL OR l.awaiting_qr_at IS NOT NULL) AS promised
+           FROM qr_shares s
+           JOIN razorpay_qrs q ON q.id = s.qr_id
+           LEFT JOIN leads l ON l.id = s.lead_id
+           LEFT JOIN users u ON u.id = s.shared_by
+          WHERE s.matched_at IS NULL
+            AND s.created_at > NOW() - INTERVAL '60 days'
+            AND ($1::uuid IS NULL OR s.shared_by = $1::uuid)
+            AND (CASE WHEN $2::boolean THEN
+                   (s.awaiting_payment_at IS NOT NULL OR l.awaiting_qr_at IS NOT NULL
+                    OR s.expected_amount = $3::numeric OR s.phone = $4
+                    OR (q.qr_id = $5 AND s.created_at > $6::timestamptz - INTERVAL '7 days'))
+                 ELSE (($7::text <> '' AND (l.name ILIKE '%' || $7 || '%'))
+                       OR ($8::text <> '' AND s.phone LIKE '%' || $8 || '%')) END)
+          ORDER BY (s.phone = $4) DESC, (s.expected_amount = $3::numeric) DESC,
+                   (s.awaiting_payment_at IS NOT NULL OR l.awaiting_qr_at IS NOT NULL) DESC, s.created_at DESC
+          LIMIT 10`,
+        [me, suggest, pay.amount, payer, pay.qr_id, pay.received_at, byText, byDigits]
+      ),
+      pool.query(
+        `SELECT l.id, l.name, l.phone, l.alt_phone, l.status, l.person_id, l.expected_amount, u.name AS owner_name,
+                l.assigned_to
+           FROM leads l
+           LEFT JOIN users u ON u.id = l.assigned_to
+          WHERE ($1::uuid IS NULL OR l.assigned_to = $1::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))
+            AND (CASE WHEN $2::boolean THEN
+                   ($3::text <> '' AND (l.phone = $3 OR l.alt_phone = $3))
+                   OR ($6::text <> '' AND length($6) >= 3 AND l.name ILIKE $6 || '%'
+                       AND l.expected_amount = $7::numeric)
+                 ELSE (($4::text <> '' AND l.name ILIKE '%' || $4 || '%')
+                       OR ($5::text <> '' AND (l.phone LIKE '%' || $5 || '%' OR COALESCE(l.alt_phone,'') LIKE '%' || $5 || '%'))) END)
+          ORDER BY (l.phone = $3) DESC, l.updated_at DESC NULLS LAST
+          LIMIT 10`,
+        [me, suggest, payer, byText, byDigits, firstWord, pay.amount]
+      ),
+      pool.query(
+        `SELECT p.id, p.name, p.phone, p.email,
+                (SELECT COUNT(*)::int FROM donations d WHERE d.person_id = p.id) AS donations
+           FROM people p
+          WHERE (CASE WHEN $1::boolean THEN $2::text <> '' AND p.phone = $2
+                 ELSE (($3::text <> '' AND p.name ILIKE '%' || $3 || '%')
+                       OR ($4::text <> '' AND p.phone LIKE '%' || $4 || '%')
+                       OR ($3::text <> '' AND p.email ILIKE '%' || $3 || '%')) END)
+          ORDER BY (p.phone = $2) DESC, p.updated_at DESC
+          LIMIT 10`,
+        [suggest, payer, byText, byDigits]
+      ),
+    ]);
+
+    const seen = new Set<string>();
+    const out: Record<string, unknown>[] = [];
+    const add = (row: Record<string, unknown>) => {
+      const key = String(row.phone ?? '') || String(row.id);
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(row);
+    };
+    const amt = Number(pay.amount);
+    for (const s of shares.rows) {
+      add({
+        kind: 'share', id: s.id, name: s.name, phone: s.phone,
+        hint: `QR sent ${s.qr_label ? `(${s.qr_label}) ` : ''}${new Date(s.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })}${s.owner_name ? ` by ${s.owner_name}` : ''}`,
+        promised: !!s.promised,
+        same_amount: s.expected_amount != null && Math.abs(Number(s.expected_amount) - amt) < 1,
+        same_number: !!payer && s.phone === payer,
+      });
+    }
+    for (const l of leads.rows) {
+      add({
+        kind: 'lead', id: l.id, name: l.name, phone: l.phone,
+        hint: `Lead${l.owner_name ? ` · ${l.owner_name}` : ' · nobody yet'}${l.status === 'converted' ? ' · already donated' : ''}`,
+        same_amount: l.expected_amount != null && Math.abs(Number(l.expected_amount) - amt) < 1,
+        same_number: !!payer && (l.phone === payer || l.alt_phone === payer),
+      });
+    }
+    for (const p of people.rows) {
+      add({
+        kind: 'person', id: p.id, name: p.name, phone: p.phone,
+        hint: p.donations ? `Donor · ${p.donations} donation${p.donations === 1 ? '' : 's'}` : 'In DRM',
+        same_number: !!payer && p.phone === payer,
+      });
+    }
+    res.json({ results: out.slice(0, 20), payer: { phone: payer || null, name: firstWord ? pay.payer_name : null } });
+  } catch (err) {
+    console.error('crm.qrWho error:', err);
+    res.status(500).json({ error: 'Could not search. Try again.' });
+  }
+});
+
+/**
+ * POST /qr/payments/:id/link
+ *   { kind: 'share' | 'lead' | 'person', id }  or  { kind: 'new', name, phone }
+ *
+ * Says who paid. Does not raise the receipt - the screen shows the receipt
+ * form next, filled in from whoever was picked, so what goes on the 80G
+ * certificate is seen before it is sent.
+ */
+router.post('/qr/payments/:id/link', authenticate, async (req, res) => {
+  const b = req.body ?? {};
+  const kind = String(b.kind ?? '');
+  let target: LinkTarget;
+  if (kind === 'share' || kind === 'lead' || kind === 'person') {
+    const id = str(b.id, 36);
+    if (!id || !/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: 'Pick who paid.' });
+    target = { kind, id };
+  } else if (kind === 'new') {
+    target = { kind, name: String(b.name ?? ''), phone: String(b.phone ?? '') };
+  } else {
+    return res.status(400).json({ error: 'Pick who paid.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const pay = await paymentFor(String(req.params.id), req.user, client);
+    if (!pay) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Payment not found.' });
+    }
+    const r = await linkPayment(client, pay, target, req.user);
+    if (!r.ok) {
+      await client.query('ROLLBACK');
+      return res.status(r.status).json({ error: r.error });
+    }
+    await client.query('COMMIT');
+    const credit = await pool.query(
+      `SELECT u.name FROM caller_credits c JOIN users u ON u.id = c.user_id
+        WHERE c.qr_payment_id = $1 AND c.status = 'active' LIMIT 1`,
+      [pay.id]
+    );
+    res.json({
+      linked: true,
+      kind: r.kind,
+      name: r.name,
+      phone: r.phone,
+      person_id: r.personId,
+      existing: !!r.existing,
+      counted_for: credit.rows[0]?.name ?? null,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    console.error('crm.qrLink error:', err);
+    res.status(500).json({ error: 'Could not link. Try again.' });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * POST /qr/payments/:id/unlink { reason? } - "that was the wrong person".
+ *
+ * Only before the receipt is sent: once an 80G receipt is out in somebody's
+ * name, the payment is theirs. Whoever linked it may unlink it; an admin or
+ * accountant may unlink any, including an automatic match.
+ *
+ * Undoes what linking did: the credit is reversed, the QR send is free to
+ * match again, and a lead that this link marked Donated goes back to how it
+ * was - promises reopened, status restored. A person added only for this
+ * link is left in DRM: they may have been right about the person and wrong
+ * about the payment.
+ */
+router.post('/qr/payments/:id/unlink', authenticate, async (req, res) => {
+  const me = req.user?.userId ?? '';
+  const elevated = req.user?.role === 'admin' || req.user?.role === 'accountant';
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const pay = await paymentFor(String(req.params.id), req.user, client);
+    if (!pay || !(pay.share_id || pay.lead_id || pay.person_id)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'This payment is not linked.' });
+    }
+    if (pay.receipt_status === 'issued' || pay.receipt_status === 'pending') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'The receipt is already sent, so this link stays.' });
+    }
+    if (!elevated && pay.linked_by !== me) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Only the person who linked it, or an admin, can unlink it.' });
+    }
+
+    await reverseCreditFor({ qrPaymentId: pay.id }, me, str(req.body?.reason, 300) ?? 'Unlinked: wrong person', client);
+
+    // The lead this money converted, if any - for saying so when there is
+    // nothing recorded to put it back to.
+    let leadOfLink: string | null = pay.lead_id ?? null;
+    if (pay.share_id) {
+      const sl = await client.query(`SELECT lead_id FROM qr_shares WHERE id = $1`, [pay.share_id]);
+      leadOfLink = leadOfLink ?? sl.rows[0]?.lead_id ?? null;
+      await client.query(
+        `UPDATE qr_shares SET matched_payment_id = NULL, matched_amount = NULL, matched_at = NULL,
+           matched_via = NULL, matched_by = NULL WHERE id = $1`,
+        [pay.share_id]
+      );
+    }
+
+    const undo = (pay.link_undo ?? {}) as {
+      lead?: { lead_id: string; before: Record<string, any> | null; open_reminders: string[]; set_alt_phone?: boolean };
+      donor_was?: { name: string | null; phone: string | null };
+    };
+    let leadRestored = false;
+    if (undo.lead?.before) {
+      const bf = undo.lead.before;
+      const r = await client.query(
+        `UPDATE leads SET status = $2, converted_at = $3::timestamptz, converted_amount = $4::numeric,
+                converted_via = $5, converted_note = $6, converted_donation_id = $7::uuid,
+                conversion_seen_at = $8::timestamptz, next_follow_up_at = $9::timestamptz,
+                follow_up_note = $10, awaiting_qr_at = $11::timestamptz, assigned_to = $12::uuid,
+                assigned_at = $13::timestamptz,
+                alt_phone = CASE WHEN $14::boolean THEN $15 ELSE alt_phone END,
+                updated_at = NOW()
+          WHERE id = $1 AND status = 'converted'`,
+        [
+          undo.lead.lead_id, bf.status, bf.converted_at, bf.converted_amount, bf.converted_via, bf.converted_note,
+          bf.converted_donation_id, bf.conversion_seen_at, bf.next_follow_up_at, bf.follow_up_note,
+          bf.awaiting_qr_at, bf.assigned_to, bf.assigned_at, !!undo.lead.set_alt_phone, bf.alt_phone ?? null,
+        ]
+      );
+      leadRestored = (r.rowCount ?? 0) > 0;
+      if (leadRestored && undo.lead.open_reminders?.length) {
+        await client.query(
+          `UPDATE lead_reminders SET status = 'open', completed_at = NULL, updated_at = NOW()
+            WHERE id = ANY($1::uuid[]) AND status = 'done'`,
+          [undo.lead.open_reminders]
+        );
+      }
+      if (leadRestored) {
+        await client.query(
+          `INSERT INTO lead_activities (lead_id, user_id, kind, from_value, to_value, note)
+           VALUES ($1::uuid, $2::uuid, 'status_change', 'converted', $3, $4)`,
+          [undo.lead.lead_id, me || null, bf.status, 'QR payment unlinked: it was not theirs']
+        );
+      }
+    }
+
+    await client.query(
+      `UPDATE qr_payments SET share_id = NULL, lead_id = NULL, person_id = NULL,
+         linked_by = NULL, linked_at = NULL, link_kind = NULL, link_undo = NULL,
+         donor_name = $2, donor_phone = $3,
+         receipt_status = CASE WHEN receipt_status = 'needs_donor' THEN NULL ELSE receipt_status END
+       WHERE id = $1`,
+      [pay.id, undo.donor_was ? undo.donor_was.name : pay.donor_name, undo.donor_was ? undo.donor_was.phone : pay.donor_phone]
+    );
+    await client.query('COMMIT');
+    res.json({
+      unlinked: true,
+      // A lead converted by an automatic match has nothing recorded to go back
+      // to, so it stays Donated. Said, so somebody can fix it by hand.
+      lead_left_donated: !!leadOfLink && !leadRestored,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    console.error('crm.qrUnlink error:', err);
+    res.status(500).json({ error: 'Could not unlink. Try again.' });
+  } finally {
+    client.release();
+  }
+});
+
 /**
  * POST /qr/payments/:id/attach - a human links a payment to a share.
  *
@@ -1950,75 +2486,29 @@ router.post('/qr/payments/:id/attach', authenticate, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const pay = await client.query(`SELECT * FROM qr_payments WHERE id = $1 FOR UPDATE`, [req.params.id]);
-    if (!pay.rows.length) {
+    const pay = await paymentFor(String(req.params.id), req.user, client);
+    if (!pay) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Payment not found.' });
     }
-    // A caller may only attribute a payment to a QR they themselves shared.
-    // Without this, attributing was a one-click way to move a colleague's
-    // donation onto your own conversion figures - and to raise a real 80G
-    // receipt in the wrong donor's name while doing it.
-    const share = await client.query(
-      `SELECT * FROM qr_shares
-        WHERE id = $1 AND ($2::uuid IS NULL OR shared_by = $2::uuid)`,
-      [shareId, req.user?.role === 'caller' ? req.user?.userId ?? null : null]
-    );
-    if (!share.rows.length) {
+    // A caller may only attribute a payment to a QR they themselves shared -
+    // linkPayment enforces it. Without that, attributing was a one-click way
+    // to move a colleague's donation onto your own figures.
+    const r = await linkPayment(client, pay, { kind: 'share', id: shareId }, req.user);
+    if (!r.ok) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Not found.' });
+      return res.status(r.status === 409 ? 409 : 404).json({ error: r.status === 409 ? r.error : 'Not found.' });
     }
-
-    await client.query(
-      `UPDATE qr_shares SET matched_payment_id = $2, matched_amount = $3::numeric,
-         matched_at = NOW(), matched_via = 'manual', matched_by = $4::uuid WHERE id = $1`,
-      [shareId, pay.rows[0].payment_id, pay.rows[0].amount, req.user?.userId ?? null]
-    );
-    await client.query(`UPDATE qr_payments SET share_id = $2, person_id = $3 WHERE id = $1`, [
-      pay.rows[0].id,
-      shareId,
-      share.rows[0].person_id,
-    ]);
-
-    if (share.rows[0].lead_id) {
-      await markLeadDonated(
-        share.rows[0].lead_id,
-        Number(pay.rows[0].amount),
-        'Paid by QR, linked by hand',
-        client,
-        share.rows[0].shared_by ?? null,
-        {
-          qrPaymentId: pay.rows[0].id,
-          shareId,
-          personId: share.rows[0].person_id,
-          occurredAt: pay.rows[0].received_at,
-        }
-      );
-    } else if (share.rows[0].shared_by) {
-      // Same reasoning as the automatic path: a share with no lead behind it
-      // still belongs to whoever sent it.
-      await recordCredit(
-        {
-          userId: share.rows[0].shared_by,
-          amount: Number(pay.rows[0].amount),
-          kind: 'qr',
-          occurredAt: pay.rows[0].received_at,
-          qrPaymentId: pay.rows[0].id,
-          shareId,
-          personId: share.rows[0].person_id,
-          note: 'Paid by QR, linked by hand',
-        },
-        client
-      );
-    }
-
     await client.query('COMMIT');
 
-    // Now that it belongs to somebody, the donor is owed a receipt for it -
-    // the same as if the webhook had matched it itself.
-    void issueReceiptForPayment(pay.rows[0].id).catch((e) =>
-      console.error('crm.issueReceipt error:', (e as Error).message)
-    );
+    // Kept for anything still calling this directly: it belongs to somebody
+    // now, so the donor is owed a receipt, the same as an automatic match.
+    // The QR payments screen uses /link instead and shows the form first.
+    if (req.body?.send_receipt !== false) {
+      void issueReceiptForPayment(pay.id).catch((e) =>
+        console.error('crm.issueReceipt error:', (e as Error).message)
+      );
+    }
 
     res.json({ attached: true });
   } catch (err) {

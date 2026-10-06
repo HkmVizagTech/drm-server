@@ -31,18 +31,18 @@
 // hunting for the same twenty people on another screen.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { callHref, formatPhone, runHref, startRun } from "@/lib/calling";
-import { currency, number, relativeDate, shortDate } from "@/lib/format";
+import { currency, number, relativeDate } from "@/lib/format";
 import {
   Alert,
   Badge,
   Button,
   Card,
   Checkbox,
+  DropdownMenu,
   EmptyState,
   Field,
   Input,
@@ -51,15 +51,7 @@ import {
   SegmentedControl,
   Select,
   Skeleton,
-  SkeletonRows,
-  StatTile,
-  TableShell,
-  Tbody,
-  Td,
-  Th,
-  Thead,
   Toolbar,
-  buttonClass,
 } from "@/components/ui";
 import { ExportButton } from "@/components/export-button";
 import { toast } from "@/components/toast";
@@ -91,6 +83,8 @@ interface Row {
   lead_last_outcome?: string | null;
   lead_last_contacted_at?: string | null;
   set_aside_at?: string | null;
+  /** False when the lead is with somebody who does not make calls (an admin). */
+  lead_owner_calls?: boolean | null;
 }
 
 interface Answer {
@@ -302,9 +296,17 @@ export default function PendingPaymentsPage() {
 
   const rows = data?.rows ?? [];
   const isOthers = (r: Row) => !!r.lead_assigned_to && r.lead_assigned_to !== user?.id;
-  // A row that cannot be added is not offered for ticking: a do-not-call, or
-  // a colleague's lead, would only come back as "could not be added".
-  const canPick = (r: Row) => view === "open" && !r.lead_do_not_call && !isOthers(r);
+  /**
+   * Parked: the lead is with somebody who does not make calls - typically an
+   * admin who added the list for themselves. A caller calling it takes it
+   * over. Before, these rows showed no Call button at all, and with one
+   * caller ringing everybody that left them stuck.
+   */
+  const parked = (r: Row) => isOthers(r) && r.lead_owner_calls === false;
+  /** Can this person be rung from here, by whoever is looking? */
+  const canCall = (r: Row) => !r.lead_do_not_call && (!isOthers(r) || parked(r) || elevated);
+  // A row that cannot be called is not offered for ticking either.
+  const canPick = (r: Row) => view === "open" && canCall(r);
   const pickable = rows.filter(canPick);
   const allOnPage = pickable.length > 0 && pickable.every((r) => picked.has(r.id));
   const someOnPage = pickable.some((r) => picked.has(r.id));
@@ -418,7 +420,9 @@ export default function PendingPaymentsPage() {
    * added first, as theirs, so the call is recorded against somebody.
    */
   async function callRow(r: Row) {
-    if (r.lead_id) {
+    // Straight to the call screen when the lead is already reachable; added
+    // (or taken over, when parked with an admin) first otherwise.
+    if (r.lead_id && !(parked(r) && !elevated)) {
       router.push(callHref(r.lead_id, "/calling/pending"));
       return;
     }
@@ -452,7 +456,7 @@ export default function PendingPaymentsPage() {
    * first, as with Call, so the donation has somebody to be linked to.
    */
   async function gaveAnotherWay(r: Row) {
-    if (r.lead_id) {
+    if (r.lead_id && !(parked(r) && !elevated)) {
       setLinking({ leadId: r.lead_id, name: r.name });
       return;
     }
@@ -479,40 +483,17 @@ export default function PendingPaymentsPage() {
     }
   }
 
+  /** "Add to my leads" without calling now. Takes over a parked lead too. */
   async function adopt(r: Row) {
     setBusy(r.id);
     try {
-      const res = await apiClient.post<{ lead: { id: string }; created: boolean }>(
-        "/api/crm/leads/abandoned/adopt",
-        {
-          phone: r.phone,
-          name: r.name,
-          email: r.email,
-          amount: r.amount ? Number(r.amount) : null,
-          purpose: r.purpose,
-          source_page: r.source_page,
-          source_site: r.source_site,
-          attempted_at: r.attempted_at,
-          attempts: r.attempts,
-        }
-      );
-      setData((d) =>
-        d
-          ? {
-              ...d,
-              rows: d.rows.map((x) =>
-                x.phone === r.phone
-                  ? { ...x, lead_id: res.lead.id, lead_status: "new", lead_assigned_to: user?.id ?? null }
-                  : x
-              ),
-            }
-          : d
-      );
-      toast(
-        res.created
-          ? `${who(r)} is now your lead`
-          : `${who(r)} is already a lead`
-      );
+      const res = await apiClient.post<AdoptResult>("/api/crm/leads/abandoned/adopt-bulk", {
+        ids: [r.id],
+        filters: Object.fromEntries(filterParams()),
+        assign: "me",
+      });
+      toast(res.lead_ids.length ? `${who(r)} is in your leads` : summarise(res, { mine: true, owners: [] }));
+      void reload();
     } catch (e) {
       toast.error(`Could not add ${who(r)}. Try again.`, e instanceof Error ? e.message : undefined);
     } finally {
@@ -570,105 +551,83 @@ export default function PendingPaymentsPage() {
 
   /* ------------------------------------------------------ row pieces */
 
-  function chips(r: Row) {
-    const word = STATUS_WORDS[r.status] ?? { label: r.status, tone: "info" as const };
-    return (
-      <>
-        <Badge tone={word.tone}>{word.label}</Badge>
-        {r.lead_do_not_call ? (
-          <Badge tone="danger" icon="xCircle">Do not call</Badge>
-        ) : r.lead_id && isOthers(r) ? (
-          <Badge tone="info" icon="user">{r.assigned_to_name ? `${r.assigned_to_name}'s lead` : "Someone else's lead"}</Badge>
-        ) : r.lead_id ? (
-          <Badge tone="brand">{r.lead_assigned_to ? "Your lead" : "Lead · no caller"}</Badge>
-        ) : null}
-      </>
-    );
+  /** One line under the name: what happened, in plain words. */
+  function story(r: Row) {
+    const word = STATUS_WORDS[r.status]?.label ?? r.status;
+    const bits = [
+      `${word} ${relativeDate(r.attempted_at).toLowerCase()}`,
+      r.attempts_in_view > 1 ? `tried ${number(r.attempts_in_view)} times` : null,
+      r.purpose || null,
+      SITE_LABELS[r.source_site] ?? r.source_site,
+    ].filter(Boolean);
+    return bits.join(" · ");
   }
 
+  /** Where the conversation is, if anyone has rung them. */
   function lastCall(r: Row) {
+    if (view === "set_aside" && r.set_aside_at) return `Set aside ${relativeDate(r.set_aside_at).toLowerCase()}`;
     if (!r.lead_last_outcome && !r.lead_last_contacted_at) return null;
-    return (
-      <p className="mt-1 text-xs text-ink-muted">
-        Last call: {r.lead_last_outcome ? outcomeLabel(r.lead_last_outcome) : "—"}
-        {r.lead_last_contacted_at && <> · {relativeDate(r.lead_last_contacted_at)}</>}
-      </p>
-    );
+    return `Last call: ${r.lead_last_outcome ? outcomeLabel(r.lead_last_outcome) : "—"}${
+      r.lead_last_contacted_at ? ` · ${relativeDate(r.lead_last_contacted_at).toLowerCase()}` : ""
+    }`;
   }
 
-  /** The buttons on a row, shared by the table and the phone cards. */
-  function actions(r: Row, phone: boolean) {
-    const size = phone ? "md" : "sm";
+  /** Call, and everything else behind "⋯". One button to look for, not five. */
+  function actions(r: Row) {
     if (view === "set_aside") {
       return (
-        <Button variant="secondary" size={size} icon="refresh" onClick={() => void restore(r)} className={phone ? "flex-1" : ""}>
+        <Button variant="secondary" size="sm" icon="refresh" onClick={() => void restore(r)}>
           Bring back
         </Button>
       );
     }
-    const others = !!r.lead_id && isOthers(r);
+    if (r.lead_do_not_call) return <Badge tone="danger" icon="xCircle">Do not call</Badge>;
+    if (!canCall(r)) {
+      // Another caller's lead. Only possible with more than one caller.
+      return <Badge tone="info" icon="user">{r.assigned_to_name ? `${r.assigned_to_name}'s` : "Taken"}</Badge>;
+    }
+    // "Open lead" only for a lead that is already theirs; anything else -
+    // not a lead yet, a lead nobody has, a lead parked with an admin - offers
+    // "Add to my leads". It used to show "Open lead" for any lead at all, so a
+    // caller often could not take somebody on.
+    const mineAlready = !!r.lead_id && (r.lead_assigned_to === user?.id || (elevated && !!r.lead_assigned_to));
     return (
-      <>
-        {/* No Call for a do-not-call, and none for a colleague's lead: ringing
-            somebody another caller is working is how a donor gets two calls
-            in an afternoon. */}
-        {!r.lead_do_not_call && !others && (
-          <Button
-            variant="primary"
-            size={size}
-            icon="phone"
-            loading={busy === r.id}
-            onClick={() => void callRow(r)}
-            className={phone ? "flex-1" : ""}
-          >
-            Call
-          </Button>
-        )}
-        {!r.lead_id && !r.lead_do_not_call && (
-          <Button variant="secondary" size={size} onClick={() => void adopt(r)} disabled={busy === r.id}>
-            {phone ? "Add" : "Add as lead"}
-          </Button>
-        )}
-        {r.lead_id && (!others || elevated) && (
-          // A next/link anchor wearing the button class rather than
-          // LinkButton: LinkButton is a plain <a>, which would drop out of the
-          // client router.
-          <Link href={`/leads/${r.lead_id}`} className={buttonClass("secondary", size)}>
-            {phone ? "Open" : "Open lead"}
-          </Link>
-        )}
-        {!r.lead_do_not_call && !others && (
-          <Button
-            variant="secondary"
-            size={size}
-            icon="rupee"
-            onClick={() => void gaveAnotherWay(r)}
-            disabled={busy === r.id}
-            title="Find their donation and link it"
-          >
-            Gave another way
-          </Button>
-        )}
-        <Button
-          variant="ghost"
-          size={size}
-          onClick={() => void dismiss(r)}
-          disabled={busy === r.id}
-          title="Hide from this list"
-        >
-          Set aside
+      <div className="flex items-center gap-1">
+        <Button size="sm" icon="phone" loading={busy === r.id} onClick={() => void callRow(r)}>
+          Call
         </Button>
-      </>
+        <DropdownMenu
+          trigger={({ toggle, open }) => (
+            <Button
+              variant="secondary"
+              size="sm"
+              icon="more"
+              aria-label={`More for ${who(r)}`}
+              aria-expanded={open}
+              disabled={busy === r.id}
+              onClick={toggle}
+            />
+          )}
+          items={[
+            {
+              label: "Gave another way",
+              icon: "rupee",
+              hint: "Paid from another number or name",
+              onSelect: () => void gaveAnotherWay(r),
+            },
+            ...(mineAlready
+              ? [{ label: "Open lead", icon: "user" as const, onSelect: () => router.push(`/leads/${r.lead_id}`) }]
+              : [{ label: "Add to my leads", icon: "userPlus" as const, hint: "Call later", onSelect: () => void adopt(r) }]),
+            { label: "Set aside", icon: "inbox", hint: "Hide from this list", onSelect: () => void dismiss(r) },
+          ]}
+        />
+      </div>
     );
   }
 
   const emptyState =
     view === "set_aside" ? (
-      <EmptyState
-        icon="inbox"
-        title="No one set aside"
-        message="People you set aside show here."
-      />
+      <EmptyState icon="inbox" title="No one set aside" message="People you set aside show here." />
     ) : (
       <EmptyState
         title="No one to call"
@@ -680,6 +639,13 @@ export default function PendingPaymentsPage() {
       />
     );
 
+  const callable = rows.filter(canCall).length;
+  const siteTrouble = data?.sites.filter((st) => st.error) ?? [];
+  const oldest = data?.sites
+    .map((st) => st.last_synced_at)
+    .filter(Boolean)
+    .sort()[0] as string | undefined;
+
   return (
     <div>
       <PageHeader
@@ -688,31 +654,25 @@ export default function PendingPaymentsPage() {
         subtitle="Started a donation online but did not finish."
         actions={
           <>
-            {/* The one-press way in: every one of them, as a run, with the
-                new attempts turned into leads on the way. */}
+            {/* The one-press way in: everybody, as a run, new ones added on
+                the way. */}
             <Button icon="phoneOutgoing" loading={callingAll} onClick={() => void callEveryone()}>
-              Call all
+              {view === "open" && data && !loading ? `Call all (${number(data.open)})` : "Call all"}
             </Button>
-            <Button variant="secondary" icon="refresh" loading={refreshing} onClick={() => void refreshNow()}>
-              {refreshing ? "Refreshing…" : "Refresh"}
-            </Button>
-            <ExportButton
-              path="/api/crm/leads/abandoned/export"
-              params={filterParams()}
-              filename="nearly-gave"
-              hint={data ? `${number(data.open)} people` : undefined}
-            />
+            {elevated && (
+              <ExportButton
+                path="/api/crm/leads/abandoned/export"
+                params={filterParams()}
+                filename="nearly-gave"
+                hint={data ? `${number(data.open)} people` : undefined}
+              />
+            )}
           </>
         }
       />
 
-      {/* The filters a caller actually sorts by before a shift: the biggest
-          first when there is an hour, the freshest first when there is a
-          morning, and the repeat triers when neither is working.
-
-          On a phone only the search shows until "Filters" is pressed - six
-          stacked dropdowns would push the first person to ring below the
-          fold. `contents` lets the same fields sit in the row on a desktop. */}
+      {/* Search always; the rest behind Filters. Six dropdowns above the list
+          was the first thing a caller had to read past every morning. */}
       <Toolbar
         activeCount={activeFilters}
         onClear={() => {
@@ -725,178 +685,106 @@ export default function PendingPaymentsPage() {
           setSort("recent");
         }}
       >
-        <Field label="Find" htmlFor="pending-search" className="w-full flex-1 md:order-last md:w-auto md:min-w-[16rem]">
-          <div className="flex gap-2">
-            <SearchInput
-              id="pending-search"
-              value={search}
-              onChange={setSearch}
-              placeholder="Name, mobile or e-mail"
-              className="flex-1"
-            />
-            <Button
-              variant="secondary"
-              icon="filter"
-              className="md:hidden"
-              aria-expanded={showFilters}
-              onClick={() => setShowFilters((v) => !v)}
-            >
-              {activeFilters ? `Filters (${activeFilters})` : "Filters"}
-            </Button>
-          </div>
-        </Field>
-        <div className={showFilters ? "contents" : "hidden md:contents"}>
-          <Field label="Period" className="w-full sm:w-36">
-            <Select
-              value={days}
-              onChange={setDays}
-              ariaLabel="Period"
-              options={[
-                { value: "1", label: "Today" },
-                { value: "7", label: "Last 7 days" },
-                { value: "30", label: "Last 30 days" },
-                { value: "90", label: "Last 90 days" },
-                { value: "365", label: "Last year" },
-              ]}
-            />
-          </Field>
-          <Field label="Site" className="w-full sm:w-52">
-            <Select
-              value={site}
-              onChange={setSite}
-              ariaLabel="Site"
-              options={[
-                { value: "", label: "Both sites" },
-                { value: "hkmv", label: SITE_LABELS.hkmv },
-                { value: "annadan", label: SITE_LABELS.annadan },
-              ]}
-            />
-          </Field>
-          <Field label="Status" className="w-full sm:w-44">
-            <Select
-              value={status}
-              onChange={setStatus}
-              ariaLabel="Status"
-              options={[
-                { value: "", label: "Any" },
-                { value: "failed", label: "Payment failed" },
-                { value: "pending,created", label: "Not finished" },
-              ]}
-            />
-          </Field>
-          <Field label="Sort" className="w-full sm:w-48">
-            <Select
-              value={sort}
-              onChange={setSort}
-              ariaLabel="Sort"
-              options={[
-                { value: "recent", label: "Newest first" },
-                { value: "amount", label: "Biggest amount first" },
-                { value: "attempts", label: "Most tries first" },
-                { value: "oldest", label: "Oldest first" },
-              ]}
-            />
-          </Field>
-          <Field label="Amount" className="w-full sm:w-56">
-            <div className="flex items-center gap-1.5">
-              <Input
-                value={minAmount}
-                onChange={(e) => setMinAmount(e.target.value.replace(/\D/g, ""))}
-                placeholder="any"
-                inputMode="numeric"
-                aria-label="Min amount"
-                className="tabular-nums"
-              />
-              <span className="text-xs text-ink-faint">to</span>
-              <Input
-                value={maxAmount}
-                onChange={(e) => setMaxAmount(e.target.value.replace(/\D/g, ""))}
-                placeholder="any"
-                inputMode="numeric"
-                aria-label="Max amount"
-                className="tabular-nums"
-              />
-            </div>
-          </Field>
+        <div className="flex w-full gap-2">
+          <SearchInput
+            id="pending-search"
+            value={search}
+            onChange={setSearch}
+            placeholder="Name, mobile or e-mail"
+            className="flex-1"
+          />
+          <Button
+            variant="secondary"
+            icon="filter"
+            aria-expanded={showFilters}
+            onClick={() => setShowFilters((v) => !v)}
+          >
+            {activeFilters - (search ? 1 : 0) > 0 ? `Filters (${activeFilters - (search ? 1 : 0)})` : "Filters"}
+          </Button>
         </div>
+        {showFilters && (
+          <>
+            <Field label="Period" className="w-full sm:w-36">
+              <Select
+                value={days}
+                onChange={setDays}
+                ariaLabel="Period"
+                options={[
+                  { value: "1", label: "Today" },
+                  { value: "7", label: "Last 7 days" },
+                  { value: "30", label: "Last 30 days" },
+                  { value: "90", label: "Last 90 days" },
+                  { value: "365", label: "Last year" },
+                ]}
+              />
+            </Field>
+            <Field label="Sort" className="w-full sm:w-48">
+              <Select
+                value={sort}
+                onChange={setSort}
+                ariaLabel="Sort"
+                options={[
+                  { value: "recent", label: "Newest first" },
+                  { value: "amount", label: "Biggest amount first" },
+                  { value: "attempts", label: "Most tries first" },
+                  { value: "oldest", label: "Oldest first" },
+                ]}
+              />
+            </Field>
+            <Field label="Status" className="w-full sm:w-44">
+              <Select
+                value={status}
+                onChange={setStatus}
+                ariaLabel="Status"
+                options={[
+                  { value: "", label: "Any" },
+                  { value: "failed", label: "Payment failed" },
+                  { value: "pending,created", label: "Not finished" },
+                ]}
+              />
+            </Field>
+            <Field label="Site" className="w-full sm:w-52">
+              <Select
+                value={site}
+                onChange={setSite}
+                ariaLabel="Site"
+                options={[
+                  { value: "", label: "Both sites" },
+                  { value: "hkmv", label: SITE_LABELS.hkmv },
+                  { value: "annadan", label: SITE_LABELS.annadan },
+                ]}
+              />
+            </Field>
+            <Field label="Amount" className="w-full sm:w-56">
+              <div className="flex items-center gap-1.5">
+                <Input
+                  value={minAmount}
+                  onChange={(e) => setMinAmount(e.target.value.replace(/\D/g, ""))}
+                  placeholder="any"
+                  inputMode="numeric"
+                  aria-label="Min amount"
+                  className="tabular-nums"
+                />
+                <span className="text-xs text-ink-faint">to</span>
+                <Input
+                  value={maxAmount}
+                  onChange={(e) => setMaxAmount(e.target.value.replace(/\D/g, ""))}
+                  placeholder="any"
+                  inputMode="numeric"
+                  aria-label="Max amount"
+                  className="tabular-nums"
+                />
+              </div>
+            </Field>
+          </>
+        )}
       </Toolbar>
 
       {error && <Alert tone="danger">{error}</Alert>}
 
-      {/* A site being unreachable, or never connected, must not look like a
-          quiet week. And the page now reads a stored copy, so when that copy
-          was last refreshed is part of what the number means. */}
-      {/* An error means the last good copy is what you are reading, not that
-          the site's rows are missing — saying "nothing from it is listed
-          below" was simply untrue, since last night's rows are still in the
-          table and still in the totals. */}
-      {data?.sites.map((st) =>
-        st.error ? (
-          <Alert key={st.site} tone="warn" title={`Could not reach ${SITE_LABELS[st.site] ?? st.site}.`}>
-            {st.last_synced_at
-              ? `Showing data from ${relativeDate(st.last_synced_at).toLowerCase()}.`
-              : "No data from this site yet."}
-          </Alert>
-        ) : null
-      )}
-
-      {/* A crawl that stopped at its ceiling, or rows the site returned that
-          DRM could not use. Either makes the total a floor. */}
-      {data?.sites.map((st) =>
-        !st.error && (st.truncated || st.rows_skipped > 0) ? (
-          <Alert key={`${st.site}-partial`} tone="info">
-            {SITE_LABELS[st.site] ?? st.site}:{" "}
-            {st.truncated && "Some are not shown yet. "}
-            {st.rows_skipped > 0 &&
-              `${number(st.rows_skipped)} skipped. No mobile number.`}
-          </Alert>
-        ) : null
-      )}
-
-      {data && (
-        <p className="mb-4 text-xs text-ink-muted">
-          {data.sites
-            .map((st) =>
-              st.last_synced_at
-                ? `${SITE_LABELS[st.site] ?? st.site} updated ${relativeDate(st.last_synced_at).toLowerCase()}${
-                    st.synced_days && st.synced_days < Number(days) ? ` (last ${st.synced_days} days)` : ""
-                  }`
-                : `${SITE_LABELS[st.site] ?? st.site} not updated yet`
-            )
-            .join(" · ")}
-          {data.sites.some((st) => st.refreshing) && " · updating now"}
-        </p>
-      )}
-
-      {/* The headline figures describe who is worth ringing, so they are
-          shown for that view only - over the set-aside people they would
-          read as money still in play. */}
-      {view === "open" && (
-        <div className="mb-5 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
-          <StatTile
-            label="To call"
-            value={loading ? "—" : number(data?.open ?? 0)}
-          />
-          <StatTile
-            label="Amount"
-            value={loading ? "—" : currency(data?.value_at_stake ?? 0)}
-            accent="brand"
-            sub="They tried to give"
-          />
-          <StatTile
-            label="Already leads"
-            value={loading ? "—" : number(data?.already_leads ?? 0)}
-          />
-          <StatTile
-            label="Gave later"
-            value={loading ? "—" : number(data?.gave_anyway ?? 0)}
-            accent="good"
-            sub="Not shown"
-          />
-        </div>
-      )}
-
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      {/* One line for the figures, and one for how fresh the list is - in
+          place of four boxes and a warning per site. */}
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <SegmentedControl<View>
           options={[
             { value: "open", label: "To call", icon: "phone" },
@@ -906,23 +794,53 @@ export default function PendingPaymentsPage() {
           onChange={setView}
           size="sm"
         />
-        {view === "set_aside" && data && !loading && (
-          <p className="text-xs text-ink-muted">
-            {number(data.open)} set aside
+        {data && !loading && (
+          <p className="text-sm text-ink-soft">
+            {view === "open" ? (
+              <>
+                <span className="font-semibold text-ink">{number(data.open)}</span> to call ·{" "}
+                <span className="font-semibold text-ink">{currency(data.value_at_stake)}</span> they tried to give
+                {data.gave_anyway > 0 && (
+                  <span className="text-ink-muted"> · {number(data.gave_anyway)} gave later (hidden)</span>
+                )}
+              </>
+            ) : (
+              `${number(data.open)} set aside`
+            )}
           </p>
         )}
-        {/* The page checkbox lives in the table header on a desktop; phones
-            have no header, so it is offered here. */}
-        {view === "open" && pickable.length > 0 && !loading && (
+      </div>
+
+      {data && (
+        <p className={`mb-3 flex flex-wrap items-center gap-x-2 text-xs ${siteTrouble.length ? "text-warn" : "text-ink-muted"}`}>
+          <span>
+            {siteTrouble.length
+              ? `Could not reach ${siteTrouble.map((st) => SITE_LABELS[st.site] ?? st.site).join(" and ")}. Showing the list from ${
+                  oldest ? relativeDate(oldest).toLowerCase() : "before"
+                }.`
+              : oldest
+              ? `Updated ${relativeDate(oldest).toLowerCase()}${data.sites.some((st) => st.refreshing) ? " · updating now" : ""}`
+              : "Not updated yet"}
+          </span>
+          <Button variant="ghost" size="xs" icon="refresh" loading={refreshing} onClick={() => void refreshNow()}>
+            Refresh
+          </Button>
+        </p>
+      )}
+
+      {view === "open" && pickable.length > 0 && !loading && (
+        <div className="mb-2 flex items-center justify-between px-1">
           <Checkbox
-            className="md:hidden"
             checked={allOnPage}
             indeterminate={someOnPage}
             onChange={togglePage}
-            label={`Select all ${number(pickable.length)} shown`}
+            label={`Select all ${number(pickable.length)}`}
           />
-        )}
-      </div>
+          {callable < rows.length && (
+            <span className="text-xs text-ink-muted">{number(rows.length - callable)} can&apos;t be called</span>
+          )}
+        </div>
+      )}
 
       {view === "open" && allOnPage && (moreThanShown || allMatching) && data && (
         <SelectAllBanner
@@ -934,14 +852,14 @@ export default function PendingPaymentsPage() {
         />
       )}
 
-      {/* ------------------------------------------------------ phone cards */}
-      <div className="space-y-3 md:hidden">
+      {/* One card per person, at every width: name and amount, one line on
+          what happened, Call, and "⋯" for the rest. */}
+      <div className="space-y-2">
         {loading ? (
-          Array.from({ length: 4 }).map((_, i) => (
+          Array.from({ length: 5 }).map((_, i) => (
             <Card key={i} padded={false} className="p-4">
               <Skeleton className="h-4 w-1/2" />
               <Skeleton className="mt-2 h-3 w-1/3" />
-              <Skeleton className="mt-4 h-9 w-full" />
             </Card>
           ))
         ) : !rows.length ? (
@@ -949,128 +867,38 @@ export default function PendingPaymentsPage() {
         ) : (
           rows.map((r) => {
             const on = picked.has(r.id) || (allMatching && canPick(r));
+            const last = lastCall(r);
             return (
-              <Card key={r.id} padded={false} tone={on ? "brand" : "default"} className="p-4">
+              <Card key={r.id} padded={false} tone={on ? "brand" : "default"} className="px-3 py-3 sm:px-4">
                 <div className="flex items-start gap-3">
-                  {canPick(r) && (
-                    <Checkbox
-                      className="mt-0.5"
-                      checked={on}
-                      onChange={() => toggleRow(r)}
-                      label={<span className="sr-only">Select {who(r)}</span>}
-                    />
-                  )}
+                  <span className="mt-0.5 w-5 flex-none">
+                    {canPick(r) && (
+                      <Checkbox
+                        checked={on}
+                        onChange={() => toggleRow(r)}
+                        label={<span className="sr-only">Select {who(r)}</span>}
+                      />
+                    )}
+                  </span>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="truncate font-medium text-ink">{r.name || "No name"}</p>
-                        <p className="text-xs tabular-nums text-ink-muted">{formatPhone(r.phone)}</p>
-                      </div>
-                      <p className="flex-none font-semibold tabular-nums text-ink">
-                        {r.amount ? currency(Number(r.amount)) : <span className="text-ink-faint">—</span>}
-                      </p>
+                    <div className="flex flex-wrap items-baseline gap-x-2">
+                      <span className="truncate font-medium text-ink">{r.name || "No name"}</span>
+                      <span className="text-sm tabular-nums text-ink-muted">{formatPhone(r.phone)}</span>
                     </div>
-                    <p className="mt-1.5 text-sm text-ink-soft">
-                      {r.purpose || "No seva"}
-                      <span className="text-ink-faint"> · {SITE_LABELS[r.source_site] ?? r.source_site}</span>
-                    </p>
-                    <p className="mt-0.5 text-xs text-ink-muted">
-                      {view === "set_aside" && r.set_aside_at
-                        ? `Set aside ${relativeDate(r.set_aside_at).toLowerCase()} · tried ${relativeDate(r.attempted_at).toLowerCase()}`
-                        : `Tried ${relativeDate(r.attempted_at).toLowerCase()}`}
-                      {r.attempts_in_view > 1 && ` · ${number(r.attempts_in_view)} times`}
-                    </p>
-                    <div className="mt-2 flex flex-wrap gap-1">{chips(r)}</div>
-                    {lastCall(r)}
+                    <p className="mt-0.5 text-sm text-ink-soft">{story(r)}</p>
+                    {last && <p className="mt-0.5 text-xs text-ink-muted">{last}</p>}
+                  </div>
+                  <div className="flex flex-none flex-col items-end gap-2 sm:flex-row sm:items-center sm:gap-4">
+                    <span className="font-semibold tabular-nums text-ink">
+                      {r.amount ? currency(Number(r.amount)) : <span className="text-ink-faint">—</span>}
+                    </span>
+                    {actions(r)}
                   </div>
                 </div>
-                <div className="mt-3 flex flex-wrap gap-2">{actions(r, true)}</div>
               </Card>
             );
           })
         )}
-      </div>
-
-      {/* ------------------------------------------------------ desktop table */}
-      <div className="hidden md:block">
-        <TableShell>
-          <Thead>
-            <Th className="w-10">
-              {view === "open" && (
-                <Checkbox
-                  checked={allOnPage}
-                  indeterminate={someOnPage}
-                  disabled={!pickable.length}
-                  onChange={togglePage}
-                  label={<span className="sr-only">Select all</span>}
-                />
-              )}
-            </Th>
-            <Th>Donor</Th>
-            <Th align="right">Amount</Th>
-            <Th>Seva</Th>
-            <Th>When</Th>
-            <Th>Status</Th>
-            <Th align="right"> </Th>
-          </Thead>
-
-          {loading ? (
-            <SkeletonRows rows={6} cols={7} />
-          ) : (
-            <Tbody>
-              {!rows.length ? (
-                <tr>
-                  <td colSpan={7}>{emptyState}</td>
-                </tr>
-              ) : (
-                rows.map((r) => {
-                  const on = picked.has(r.id) || (allMatching && canPick(r));
-                  return (
-                    <tr key={r.id} className={on ? "bg-brand-50" : ""}>
-                      <Td>
-                        {canPick(r) && (
-                          <Checkbox
-                            checked={on}
-                            onChange={() => toggleRow(r)}
-                            label={<span className="sr-only">Select {who(r)}</span>}
-                          />
-                        )}
-                      </Td>
-                      <Td>
-                        <div className="font-medium text-ink">{r.name || "No name"}</div>
-                        <div className="text-xs tabular-nums text-ink-muted">{formatPhone(r.phone)}</div>
-                        {lastCall(r)}
-                      </Td>
-                      <Td align="right" className="font-medium tabular-nums text-ink">
-                        {r.amount ? currency(Number(r.amount)) : <span className="text-ink-faint">—</span>}
-                      </Td>
-                      <Td>
-                        {r.purpose || <span className="text-ink-faint">—</span>}
-                        <div className="text-xs text-ink-faint">{SITE_LABELS[r.source_site] ?? r.source_site}</div>
-                      </Td>
-                      <Td className="text-xs text-ink-muted">
-                        {shortDate(r.attempted_at)}
-                        <div className="text-ink-faint">{relativeDate(r.attempted_at)}</div>
-                        {view === "set_aside" && r.set_aside_at && (
-                          <div className="text-ink-faint">set aside {relativeDate(r.set_aside_at).toLowerCase()}</div>
-                        )}
-                      </Td>
-                      <Td>
-                        <div className="flex flex-wrap gap-1">{chips(r)}</div>
-                        {r.attempts_in_view > 1 && (
-                          <div className="mt-0.5 text-xs text-ink-muted">tried {number(r.attempts_in_view)} times</div>
-                        )}
-                      </Td>
-                      <Td align="right">
-                        <div className="flex justify-end gap-1.5">{actions(r, false)}</div>
-                      </Td>
-                    </tr>
-                  );
-                })
-              )}
-            </Tbody>
-          )}
-        </TableShell>
       </div>
 
       {data && !data.complete && !loading && (
@@ -1078,8 +906,6 @@ export default function PendingPaymentsPage() {
           Showing {number(rows.length)} of {number(data.open)}. Use filters to see more.
         </Alert>
       )}
-
-
 
       {linking && (
         <LinkDonationDialog
@@ -1096,9 +922,7 @@ export default function PendingPaymentsPage() {
         unit={plural(selectedCount, "person", "people")}
         allMatching={allMatching}
         onClear={clearSelection}
-        note={
-          elevated ? undefined : "They become your leads."
-        }
+        note={elevated ? undefined : "They become your leads."}
       >
         {elevated && (
           <Select
@@ -1116,7 +940,7 @@ export default function PendingPaymentsPage() {
           disabled={bulkBusy !== null}
           onClick={() => void adoptSelected(false)}
         >
-          Add {number(selectedCount)} as leads
+          Add to leads
         </Button>
         <Button
           icon="phoneOutgoing"
@@ -1124,7 +948,7 @@ export default function PendingPaymentsPage() {
           disabled={bulkBusy !== null}
           onClick={() => void adoptSelected(true)}
         >
-          Add & start calling
+          Call these {number(selectedCount)}
         </Button>
       </SelectionBar>
     </div>

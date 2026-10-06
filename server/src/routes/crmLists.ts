@@ -201,7 +201,7 @@ router.get('/lists', async (req, res) => {
                   -- last part, so a caller saw "40 to call" on the card and
                   -- was handed 12 - the other 28 belonged to colleagues.
                   COUNT(*) FILTER (WHERE ${CALLABLE} AND ${DUE_NOW} AND l.call_attempts < $3
-                                     AND (l.assigned_to = $1::uuid OR l.assigned_to IS NULL))::int AS to_call,
+                                     AND (l.assigned_to = $1::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller')))::int AS to_call,
                   -- The same for the whole team, for the admin's view of a
                   -- list's progress.
                   COUNT(*) FILTER (WHERE ${CALLABLE} AND ${DUE_NOW} AND l.call_attempts < $3)::int AS to_call_all,

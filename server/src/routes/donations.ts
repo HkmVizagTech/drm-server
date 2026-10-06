@@ -557,6 +557,28 @@ router.post('/offline', async (req, res) => {
     if (snapshot?.found) {
       const result = await upsertDonorSnapshot(snapshot, siteKey);
 
+      // What was typed on this receipt, kept on the donor where DRM has
+      // nothing yet. Neither site saves the PAN or the address on its donor
+      // record from a hand-raised receipt, so the snapshot above never brings
+      // them back, and the next 80G receipt for the same donor started blank.
+      // Only fills gaps: a value already on the donor is never replaced.
+      const pan = String(pan_number || '').trim().toUpperCase();
+      await pool
+        .query(
+          `UPDATE people SET
+             pan      = COALESCE(NULLIF(pan, ''), $2),
+             address  = COALESCE(NULLIF(address, ''), $3),
+             email    = COALESCE(NULLIF(email, ''), $4)
+           WHERE id = $1`,
+          [
+            result.personId,
+            want_certificate && /^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan) ? pan : null,
+            String(prasadam_address || '').trim() || null,
+            String(donor_email || '').trim().toLowerCase() || null,
+          ]
+        )
+        .catch((e) => console.error('donations.offline donor fill failed (non-fatal):', (e as Error).message));
+
       if (issued.externalId) {
         // Also correct what the sync path cannot know. upsertDonation writes a
         // fixed payment_mode of 'upi' because that is what the overwhelming

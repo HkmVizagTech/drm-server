@@ -114,7 +114,7 @@ async function sourceQuery(
     // them on purpose. Still nobody uncallable, and still nobody outside what
     // this caller may see.
     const scope = await leadScopeFor(user);
-    if (scope) conds.push(`(l.assigned_to = ${p(scope)}::uuid OR l.assigned_to IS NULL)`);
+    if (scope) conds.push(`(l.assigned_to = ${p(scope)}::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))`);
     if (src.lead_ids?.length) {
       const ids = p(src.lead_ids);
       conds.push(`l.id = ANY(${ids}::uuid[])`);
@@ -146,7 +146,13 @@ async function sourceQuery(
   conds.push(`l.call_attempts < ${p(await maxAttempts())}`);
   conds.push(DUE_NOW);
   if (src.kind === 'mine') conds.push(`l.assigned_to = ${p(me)}::uuid`);
-  else conds.push(`(l.assigned_to = ${p(me)}::uuid OR l.assigned_to IS NULL)`);
+  else if (src.kind === 'nearly_gave' && user?.role === 'caller') {
+    // Counted with the leads parked with staff who do not call, because
+    // starting this run hands those to the caller (see POST /sessions) - the
+    // start screen must not say 0 for a list that is about to have 17.
+    conds.push(`(l.assigned_to = ${p(me)}::uuid OR l.assigned_to IS NULL
+                 OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))`);
+  } else conds.push(`(l.assigned_to = ${p(me)}::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))`);
 
   if (src.kind === 'list') {
     conds.push(`EXISTS (SELECT 1 FROM calling_lists cl WHERE cl.id = ${p(src.list_id)}::uuid AND ${LIST_MATCH('cl', 'l')})`);
@@ -656,6 +662,18 @@ router.post('/sessions', async (req, res) => {
     if (src.kind === 'nearly_gave' && b.adopt_new !== false) {
       const rows = (await abandonedRowsFor({ days: 30 }, null)).filter((r) => !r.lead_id && !r.gave_anyway);
       if (rows.length) adopted = await adoptAbandonedRows(rows, { assignTo: null, userId: me });
+      // Leads from this list parked with somebody who does not make calls -
+      // an admin who added them all for themselves - come to the caller
+      // starting the run. Without this, "Call all" skipped them for ever.
+      if (req.user?.role === 'caller' && me) {
+        await pool.query(
+          `UPDATE leads SET assigned_to = $1::uuid, assigned_at = NOW(), updated_at = NOW()
+            WHERE 'abandoned' = ANY(tags) AND NOT do_not_call
+              AND status <> 'converted'
+              AND assigned_to IN (SELECT id FROM users WHERE role <> 'caller')`,
+          [me]
+        );
+      }
     }
 
     // Will this find anybody? Asked before creating anything, so an empty
@@ -1048,7 +1066,7 @@ router.get('/search', async (req, res) => {
            LEFT JOIN crm_statuses s ON s.slug = l.status
           WHERE (CASE WHEN $5::boolean THEN (l.phone LIKE $2::text OR l.alt_phone LIKE $2::text)
                       ELSE (l.name ILIKE $1::text OR l.email ILIKE $1::text) END)
-            AND ($3::uuid IS NULL OR l.assigned_to = $3::uuid OR l.assigned_to IS NULL)
+            AND ($3::uuid IS NULL OR l.assigned_to = $3::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))
           ORDER BY (lower(l.name) = lower($4::text)) DESC, l.updated_at DESC
           LIMIT 8`,
         [like, phoneLike, scope, q, byPhone]

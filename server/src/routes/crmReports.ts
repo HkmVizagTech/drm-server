@@ -323,7 +323,7 @@ router.get('/dashboard', async (req, res) => {
         `SELECT q.id, q.qr_id, q.label, q.purpose, u.name AS owner_name, q.owner_id,
                 COALESCE(SUM(p.amount), 0)::numeric AS raised,
                 COUNT(p.id)::int AS payments,
-                COUNT(p.id) FILTER (WHERE p.share_id IS NULL)::int AS unattributed
+                COUNT(p.id) FILTER (WHERE p.share_id IS NULL AND p.lead_id IS NULL AND p.person_id IS NULL)::int AS unattributed
            FROM razorpay_qrs q
            LEFT JOIN users u ON q.owner_id = u.id
            LEFT JOIN qr_payments p

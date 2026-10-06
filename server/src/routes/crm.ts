@@ -413,7 +413,7 @@ function callableScope(q: Record<string, unknown>, user?: { userId?: string }): 
 /** The SQL that narrows to one caller, appended to a built filter. */
 function withScope(f: Filters, scope: string | null): Filters {
   if (!scope) return f;
-  const clause = `(l.assigned_to = $${f.next}::uuid OR l.assigned_to IS NULL)`;
+  const clause = `(l.assigned_to = $${f.next}::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))`;
   return {
     where: f.where ? `${f.where} AND ${clause}` : `WHERE ${clause}`,
     values: [...f.values, scope],
@@ -500,6 +500,28 @@ function buildLeadFilters(q: Record<string, unknown>, startIdx = 1): Filters {
   if (q.min_external) {
     conditions.push(`l.external_total_donated >= $${i++}`);
     values.push(num(q.min_external));
+  }
+  // Dates, so a tile on the overview opens exactly the leads it counted:
+  // "added this month", "gave this month". The same day boundaries as the
+  // dashboard's own window, so the list and the number agree.
+  const day = (v: unknown) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v ?? '')) ? String(v) : null);
+  for (const [key, col] of [['added', 'l.created_at'], ['converted', 'l.converted_at']] as const) {
+    const from = day(q[`${key}_from`]);
+    const to = day(q[`${key}_to`]);
+    if (from) {
+      conditions.push(`${col} >= $${i++}::date`);
+      values.push(from);
+    }
+    if (to) {
+      conditions.push(`${col} < ($${i++}::date + INTERVAL '1 day')`);
+      values.push(to);
+    }
+  }
+  // Still being worked: an open stage, and not "do not call" - the overview's
+  // "Hoped for" counts exactly these.
+  if (q.open === 'true') {
+    conditions.push(`l.do_not_call = FALSE
+      AND NOT EXISTS (SELECT 1 FROM crm_statuses os WHERE os.slug = l.status AND os.is_open = FALSE)`);
   }
   if (q.search) {
     conditions.push(`(l.name ILIKE $${i} OR l.phone ILIKE $${i} OR l.email ILIKE $${i} OR l.city ILIKE $${i})`);
@@ -959,7 +981,11 @@ function buildAbandonedQuery(
              ld.last_outcome AS lead_last_outcome,
              ld.last_contacted_at AS lead_last_contacted_at,
              (SELECT MAX(d.dismissed_at) FROM abandoned_attempts d WHERE d.phone = l.phone) AS set_aside_at,
-             u.name AS assigned_to_name
+             u.name AS assigned_to_name,
+             -- Whether the lead is with somebody who makes calls. A lead an
+             -- admin added for themselves is parked, not being worked, and a
+             -- caller may take it over; a fellow caller's lead stays theirs.
+             (u.role = 'caller') AS lead_owner_calls
         FROM latest l
         LEFT JOIN leads ld ON ld.phone = l.phone
         LEFT JOIN users u ON ld.assigned_to = u.id
@@ -1260,7 +1286,7 @@ export interface AdoptResult {
  */
 export async function adoptAbandonedRows(
   rows: Record<string, unknown>[],
-  opts: { assignTo: string | null; userId: string | null }
+  opts: { assignTo: string | null; userId: string | null; takeParked?: boolean }
 ): Promise<AdoptResult> {
   const out: AdoptResult = { created: 0, already_yours: 0, already_others: 0, do_not_call: 0, gave_anyway: 0, lead_ids: [] };
   for (const r of rows) {
@@ -1277,6 +1303,20 @@ export async function adoptAbandonedRows(
       // it is being handed to. Only the acting person's own leads, or the
       // person they are handing to's, count as "already yours".
       if (r.lead_assigned_to && r.lead_assigned_to !== opts.userId && r.lead_assigned_to !== opts.assignTo) {
+        // Parked with somebody who does not make calls - an admin who added
+        // the whole list for themselves, say. A caller working the list takes
+        // it over; otherwise the one person ringing these donors could never
+        // reach them, and nobody else was going to.
+        if (opts.takeParked && r.lead_owner_calls === false && opts.userId) {
+          await pool.query(
+            `UPDATE leads SET assigned_to = $2::uuid, assigned_at = NOW(), updated_at = NOW()
+              WHERE id = $1 AND assigned_to = $3::uuid`,
+            [r.lead_id, opts.userId, r.lead_assigned_to]
+          );
+          out.already_yours++;
+          out.lead_ids.push(String(r.lead_id));
+          continue;
+        }
         out.already_others++;
         continue;
       }
@@ -1378,7 +1418,13 @@ router.post('/leads/abandoned/adopt-bulk', async (req, res) => {
 
   try {
     const rows = await abandonedRowsFor((b.filters ?? {}) as Record<string, unknown>, b.all ? null : ids);
-    const result = await adoptAbandonedRows(rows, { assignTo, userId: me });
+    const result = await adoptAbandonedRows(rows, {
+      assignTo,
+      userId: me,
+      // A caller adding for themselves takes over leads parked with staff
+      // who do not call.
+      takeParked: req.user?.role === 'caller' && assignTo === me,
+    });
     res.json({ requested: b.all ? rows.length : ids!.length, ...result });
   } catch (err) {
     console.error('crm.adoptAbandonedBulk error:', err);
@@ -1512,7 +1558,7 @@ router.get('/leads/:id', async (req, res) => {
     const lead = await pool.query(
       `SELECT ${LEAD_COLUMNS} ${LEAD_JOINS}
         WHERE l.id = $1
-          AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL)`,
+          AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))`,
       [req.params.id, scope]
     );
     // 404 rather than 403 on purpose: a caller narrowed to their own leads
@@ -1658,14 +1704,42 @@ async function upsertLead(
 
 router.post('/leads', async (req, res) => {
   try {
-    const { lead, created } = await upsertLead(req.body ?? {}, req.user?.userId ?? null);
+    const b = { ...(req.body ?? {}) } as Record<string, unknown>;
+    const isCaller = req.user?.role === 'caller';
+    const me = req.user?.userId ?? null;
+    if (isCaller) {
+      // A caller adds a lead for themselves - a walk-in, a number somebody
+      // passed on. They cannot set its stage or hand it to someone else.
+      b.assigned_to = me;
+      delete b.status;
+      if (!['manual', 'walk_in', 'referral', 'event'].includes(String(b.source ?? ''))) b.source = 'manual';
+    }
+    const { lead, created } = await upsertLead(b, me);
+    let owner: string | null = null;
+    if (!created && isCaller && me && lead.assigned_to !== me) {
+      // Already a lead. Free, or parked with somebody who does not make
+      // calls: it becomes theirs. A fellow caller's: it stays, and they are
+      // told whose it is rather than "already exists".
+      const taken = await pool.query(
+        `UPDATE leads SET assigned_to = $2::uuid, assigned_at = NOW(), updated_at = NOW()
+          WHERE id = $1 AND (assigned_to IS NULL
+                OR assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))
+          RETURNING *`,
+        [lead.id, me]
+      );
+      if (taken.rows.length) Object.assign(lead, taken.rows[0]);
+      else {
+        const o = await pool.query(`SELECT name FROM users WHERE id = $1`, [lead.assigned_to]);
+        owner = o.rows[0]?.name ?? 'another caller';
+      }
+    }
     if (created) {
       await pool.query(
         `INSERT INTO lead_activities (lead_id, user_id, kind, note) VALUES ($1,$2,'import',$3)`,
         [lead.id, req.user?.userId ?? null, `Lead added (${lead.source})`]
       );
     }
-    res.status(created ? 201 : 200).json({ lead, created, duplicate: !created });
+    res.status(created ? 201 : 200).json({ lead, created, duplicate: !created, owner_name: owner });
   } catch (err) {
     const status = (err as { status?: number }).status ?? 500;
     if (status === 400) return res.status(400).json({ error: (err as Error).message });
@@ -3016,7 +3090,7 @@ router.get('/queue', async (req, res) => {
       `SELECT ${LEAD_COLUMNS} ${LEAD_JOINS}
         WHERE ${CALLABLE}
           AND l.call_attempts < $1
-          AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL)
+          AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))
           AND ${DUE_NOW}
           AND ${NOT_CLAIMED_BY_OTHERS(4 + pred.values.length)}
           ${pred.sql}
@@ -3041,7 +3115,7 @@ router.get('/queue', async (req, res) => {
       `SELECT COUNT(*)::int AS to_call ${LEAD_JOINS}
         WHERE ${CALLABLE}
           AND l.call_attempts < $1
-          AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL)
+          AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))
           AND ${DUE_NOW}
           ${listPredicate(list, 3).sql}`,
       [attempts, mine ? req.user?.userId ?? null : null, ...pred.values]
@@ -3240,7 +3314,7 @@ router.get('/conversions/unseen', async (req, res) => {
         -- and it could never fire for either.
         WHERE l.converted_at IS NOT NULL
           AND l.conversion_seen_at IS NULL
-          AND (l.assigned_to = $1::uuid OR l.assigned_to IS NULL)
+          AND (l.assigned_to = $1::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))
           -- Anything older than a fortnight is history, not news.
           AND l.converted_at > NOW() - INTERVAL '14 days'
         ORDER BY l.converted_at DESC LIMIT 20`,

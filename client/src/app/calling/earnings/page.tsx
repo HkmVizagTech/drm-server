@@ -24,7 +24,8 @@
 // every row. Awaiting a check means nobody has looked yet; it does not mean
 // anybody doubts it.
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -142,10 +143,23 @@ const CREDITABLE = ["caller", "admin", "accountant"];
 
 const LIMIT = 50;
 
+// Opened from the overview with ?preset=&kind=, so a tile lands on exactly
+// the money it showed. useSearchParams needs a Suspense boundary.
 export default function CallerEarningsPage() {
+  return (
+    <Suspense fallback={null}>
+      <Earnings />
+    </Suspense>
+  );
+}
+
+function Earnings() {
   const { user } = useAuth();
-  const [preset, setPreset] = useState("month");
-  const [kind, setKind] = useState("");
+  const sp = useSearchParams();
+  const [preset, setPreset] = useState(() =>
+    PRESETS.some((x) => x.value === sp.get("preset")) ? (sp.get("preset") as string) : "month"
+  );
+  const [kind, setKind] = useState(() => sp.get("kind") ?? "");
   const [verified, setVerified] = useState("");
   const [userId, setUserId] = useState("");
   const [page, setPage] = useState(1);

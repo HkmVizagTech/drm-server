@@ -353,9 +353,13 @@ export default function DonationsPage() {
             {/* Secondary on purpose: this one issues NO receipt. It used to be
                 the green button, beside the one that did, and the two were
                 told apart by the word "offline". */}
-            <Button variant="secondary" icon="plus" onClick={() => setShowModal(true)}>
-              Add donation
-            </Button>
+            {/* Not for callers: it writes a donation row with no receipt,
+                which the server keeps closed to them. Send Receipt is open. */}
+            {user?.role !== "caller" && (
+              <Button variant="secondary" icon="plus" onClick={() => setShowModal(true)}>
+                Add donation
+              </Button>
+            )}
           </>
         }
       />

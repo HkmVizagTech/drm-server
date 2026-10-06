@@ -155,6 +155,13 @@ const FILTER_KEYS = [
   "batch",
   "list",
   "callable",
+  // Set by a tile on the calling overview, so the list is exactly the leads
+  // the number counted. No dropdown of their own: shown as chips instead.
+  "added_from",
+  "added_to",
+  "converted_from",
+  "converted_to",
+  "open",
 ] as const;
 
 const EMPTY = new Set<string>();
@@ -235,6 +242,7 @@ function Leads() {
   const [showAbandoned, setShowAbandoned] = useState(false);
   const [showBulk, setShowBulk] = useState(false);
   const [showAddToList, setShowAddToList] = useState(false);
+  const [showAddLead, setShowAddLead] = useState(false);
   const [calling, setCalling] = useState(false);
   const [selectingAll, setSelectingAll] = useState(false);
 
@@ -442,9 +450,17 @@ function Leads() {
 
   /* ------------------------------------------------------------- filters */
 
-  const activeCount = [urlSearch, status, source, assigned, due, preacher, tag, batch, list, callable].filter(
-    Boolean
-  ).length;
+  const fromOverview = {
+    added: [param("added_from"), param("added_to")] as const,
+    converted: [param("converted_from"), param("converted_to")] as const,
+    open: param("open"),
+  };
+  const activeCount = [
+    urlSearch, status, source, assigned, due, preacher, tag, batch, list, callable,
+    fromOverview.added[0] || fromOverview.added[1],
+    fromOverview.converted[0] || fromOverview.converted[1],
+    fromOverview.open,
+  ].filter(Boolean).length;
   const clearFilters = () => {
     setSearch("");
     setParams(Object.fromEntries(FILTER_KEYS.map((k) => [k, null])));
@@ -487,6 +503,11 @@ function Leads() {
               filename="leads"
               hint={`${number(total)} lead${total === 1 ? "" : "s"}`}
             />
+            {/* For everyone: a walk-in, or a number somebody passed on. A
+                caller had no way to add a single person at all. */}
+            <Button variant={elevated ? "secondary" : "primary"} icon="userPlus" onClick={() => setShowAddLead(true)}>
+              Add lead
+            </Button>
             {elevated && (
               <>
                 <Button variant="secondary" icon="rupee" onClick={() => setShowAbandoned(true)}>
@@ -627,6 +648,25 @@ function Leads() {
           </Field>
         </div>
       </Toolbar>
+
+      {/* What a tile on the overview opened - said in words, removable. */}
+      {(fromOverview.added[0] || fromOverview.added[1] || fromOverview.converted[0] || fromOverview.converted[1] || fromOverview.open) && (
+        <div className="mb-4 flex flex-wrap gap-2">
+          {(fromOverview.added[0] || fromOverview.added[1]) && (
+            <FilterChip
+              label={`Added ${rangeWords(fromOverview.added[0], fromOverview.added[1])}`}
+              onRemove={() => setParams({ added_from: null, added_to: null })}
+            />
+          )}
+          {(fromOverview.converted[0] || fromOverview.converted[1]) && (
+            <FilterChip
+              label={`Gave ${rangeWords(fromOverview.converted[0], fromOverview.converted[1])}`}
+              onRemove={() => setParams({ converted_from: null, converted_to: null })}
+            />
+          )}
+          {fromOverview.open && <FilterChip label="Still being called" onRemove={() => setParams({ open: null })} />}
+        </div>
+      )}
 
       {/* Filters that arrive by link rather than from the row above - a
           calling list's "See them", a tag - shown as chips so it is obvious
@@ -857,6 +897,13 @@ function Leads() {
                           <span className="text-ink-soft">{currency(Number(l.external_total_donated))}</span>
                           <div className="text-xs text-ink-faint">in temple accounts</div>
                         </>
+                      ) : l.converted_amount ? (
+                        // Given after a call (a QR payment, say) and not yet
+                        // on their donor record - still given, not "None".
+                        <>
+                          <span className="font-semibold text-ink">{currency(Number(l.converted_amount))}</span>
+                          <div className="text-xs text-ink-faint">after a call</div>
+                        </>
                       ) : (
                         <span className="text-ink-faint">None</span>
                       )}
@@ -920,6 +967,17 @@ function Leads() {
           onDone={afterBulk}
         />
       )}
+      {showAddLead && (
+        <AddLeadDialog
+          onClose={() => setShowAddLead(false)}
+          onAdded={(id, callNow) => {
+            setShowAddLead(false);
+            if (callNow) router.push(callHref(id, here));
+            else void reload();
+          }}
+        />
+      )}
+
       {showAddToList && (
         <AddToListDialog ids={chosenIds()} onClose={() => setShowAddToList(false)} onDone={afterBulk} />
       )}
@@ -1557,5 +1615,129 @@ function Tally({ label, value, tone = "neutral" }: { label: string; value: numbe
       <p className="text-2xs uppercase tracking-wide text-ink-muted">{label}</p>
       <p className={`text-lg font-semibold tabular-nums ${tones[tone]}`}>{number(value)}</p>
     </div>
+  );
+}
+
+/** "1 Oct – 6 Oct", "since 1 Oct", "until 6 Oct" - for a chip. */
+function rangeWords(fromIn: string, to: string): string {
+  let from = fromIn;
+  const d = (v: string) =>
+    new Date(`${v}T00:00:00+05:30`).toLocaleDateString("en-IN", { day: "numeric", month: "short", timeZone: "Asia/Kolkata" });
+  if (from === "1970-01-01") from = "";
+  if (!from && !to) return "any time";
+  if (from && to) return from === to ? `on ${d(from)}` : `${d(from)} – ${d(to)}`;
+  if (from) return `since ${d(from)}`;
+  return `until ${d(to)}`;
+}
+
+/**
+ * One person, typed in. A caller adds for themselves; a number DRM already
+ * has is not duplicated - it opens the lead that exists, and says whose it
+ * is when it belongs to another caller.
+ */
+function AddLeadDialog({ onClose, onAdded }: { onClose: () => void; onAdded: (id: string, callNow: boolean) => void }) {
+  const [phone, setPhone] = useState("");
+  const [name, setName] = useState("");
+  const [city, setCity] = useState("");
+  const [amount, setAmount] = useState("");
+  const [source, setSource] = useState("manual");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState<"save" | "call" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const digits = phone.replace(/\D/g, "").slice(-10);
+
+  async function save(callNow: boolean) {
+    setBusy(callNow ? "call" : "save");
+    setError(null);
+    try {
+      const r = await apiClient.post<{ lead: { id: string; name: string | null }; created: boolean; owner_name: string | null }>(
+        "/api/crm/leads",
+        {
+          phone: digits,
+          name: name.trim() || undefined,
+          city: city.trim() || undefined,
+          expected_amount: amount ? Number(amount) : undefined,
+          source,
+          remarks: note.trim() || undefined,
+        }
+      );
+      if (r.owner_name) {
+        setError(`${r.lead.name || "This number"} is already ${r.owner_name}'s lead.`);
+        setBusy(null);
+        return;
+      }
+      toast(r.created ? `${name.trim() || "Lead"} added` : `${r.lead.name || "This number"} was already a lead - it is yours now`);
+      onAdded(r.lead.id, callNow);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not add. Try again.");
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Modal
+      title="Add lead"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="secondary" disabled={digits.length !== 10 || !!busy} loading={busy === "save"} onClick={() => void save(false)}>
+            Save
+          </Button>
+          <Button icon="phone" disabled={digits.length !== 10 || !!busy} loading={busy === "call"} onClick={() => void save(true)}>
+            Save and call
+          </Button>
+        </>
+      }
+    >
+      {error && <Alert tone="warn">{error}</Alert>}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Mobile Number" htmlFor="al-phone" required>
+          <Input
+            id="al-phone"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value.replace(/[^\d+\s-]/g, ""))}
+            placeholder="98480 12345"
+            inputMode="tel"
+            autoFocus
+            className="tabular-nums"
+          />
+        </Field>
+        <Field label="Name" htmlFor="al-name">
+          <Input id="al-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Optional" />
+        </Field>
+        <Field label="City" htmlFor="al-city">
+          <Input id="al-city" value={city} onChange={(e) => setCity(e.target.value)} placeholder="Optional" />
+        </Field>
+        <Field label="Amount hoped for" htmlFor="al-amount">
+          <Input
+            id="al-amount"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value.replace(/\D/g, ""))}
+            placeholder="Optional"
+            inputMode="numeric"
+            className="tabular-nums"
+          />
+        </Field>
+        <Field label="Where from" className="sm:col-span-2">
+          <SegmentedControl
+            className="flex-wrap"
+            options={[
+              { value: "manual", label: "Phone call" },
+              { value: "walk_in", label: "Walk-in" },
+              { value: "referral", label: "Referral" },
+              { value: "event", label: "Event" },
+            ]}
+            value={source}
+            onChange={setSource}
+          />
+        </Field>
+        <Field label="Note" htmlFor="al-note" className="sm:col-span-2">
+          <Input id="al-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional" />
+        </Field>
+      </div>
+    </Modal>
   );
 }

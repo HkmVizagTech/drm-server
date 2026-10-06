@@ -2070,3 +2070,25 @@ CREATE INDEX IF NOT EXISTS idx_list_members_lead ON calling_list_members(lead_id
 ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS want_prasadam BOOLEAN NOT NULL DEFAULT FALSE;
 -- NULL = never asked (older rows): fall back to "there is a PAN".
 ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS want_certificate BOOLEAN;
+
+
+-- ===========================================================================
+-- WHO PAID A QR PAYMENT, WHEN NO QR WAS SENT TO THEM
+--
+-- A payment could only be linked through a qr_share, i.e. to somebody DRM had
+-- sent a QR to. Money from a regular donor scanning the temple QR, or from a
+-- walk-in, had nowhere to go. Now it can point straight at a lead or a person,
+-- and whoever linked it is recorded so the link can be taken back.
+--
+-- link_undo holds what the lead looked like before the link marked it
+-- Donated, so unlinking puts it back rather than leaving a lead converted by
+-- money that was never theirs.
+-- ===========================================================================
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS lead_id   UUID REFERENCES leads(id) ON DELETE SET NULL;
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS linked_by UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS linked_at TIMESTAMPTZ;
+-- share | lead | person | new
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS link_kind VARCHAR(10);
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS link_undo JSONB;
+CREATE INDEX IF NOT EXISTS idx_qr_payments_lead   ON qr_payments(lead_id)   WHERE lead_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_qr_payments_person ON qr_payments(person_id) WHERE person_id IS NOT NULL;

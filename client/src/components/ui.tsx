@@ -44,6 +44,7 @@ import {
 } from "react";
 import { currency, number, percentChange } from "@/lib/format";
 import { Icon, Spinner, type IconName } from "./icons";
+import NextLink from "next/link";
 
 export { Icon, Spinner };
 export type { IconName };
@@ -438,6 +439,7 @@ export function StatTile({
   accent = "default",
   icon,
   loading = false,
+  href,
 }: {
   label: string;
   value: string | number;
@@ -446,6 +448,8 @@ export function StatTile({
   accent?: "default" | "brand" | "good" | "warn" | "danger";
   icon?: IconName;
   loading?: boolean;
+  /** Opens the people or entries this number counts. */
+  href?: string;
 }) {
   const accents: Record<string, string> = {
     default: "text-ink",
@@ -464,8 +468,8 @@ export function StatTile({
 
   const pct = delta ? percentChange(delta.current, delta.previous) : null;
 
-  return (
-    <Card className="min-w-0">
+  const body = (
+    <Card className="min-w-0 h-full" interactive={!!href}>
       <div className="flex items-start justify-between gap-3">
         <p className="text-xs font-medium uppercase tracking-wide text-ink-muted">{label}</p>
         {icon && (
@@ -496,8 +500,18 @@ export function StatTile({
           </span>
         )}
         {sub && <span className="truncate text-xs text-ink-muted">{sub}</span>}
+        {href && <Icon name="arrowRight" size={13} className="ml-auto flex-none text-ink-faint" />}
       </div>
     </Card>
+  );
+  // A number on a dashboard is a question somebody will ask next - "which
+  // ones?" - so a tile that can answer it is a link to the answer.
+  return href ? (
+    <NextLink href={href} className="block rounded-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40">
+      {body}
+    </NextLink>
+  ) : (
+    body
   );
 }
 

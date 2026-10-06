@@ -242,6 +242,20 @@ async function creditAssignedLink(
   }
 }
 
+/**
+ * A site's payment mode in DRM's words. Online payments stay "upi", which is
+ * what every website donation has always been recorded as here, so reports
+ * that split by mode do not suddenly grow an "online" row.
+ */
+function siteModeToDrm(mode: string | null | undefined): string | null {
+  const m = String(mode ?? '').trim().toLowerCase();
+  if (!m) return null;
+  if (m === 'cash' || m === 'cheque') return m;
+  if (m === 'bank' || m === 'bank_transfer' || m === 'neft' || m === 'imps' || m === 'rtgs') return 'bank';
+  if (m === 'upi' || m === 'phonepe' || m === 'online' || m === 'qr') return 'upi';
+  return 'other';
+}
+
 async function upsertDonation(
   client: PoolClient,
   personId: string,
@@ -254,9 +268,16 @@ async function upsertDonation(
        person_id, amount, type, purpose, payment_mode, source, receipt_generated,
        receipt_number, receipt_issued_at, external_ref, created_at,
        source_site, source_page, campaign, utm_source, utm_medium, utm_campaign, payment_ref)
-     VALUES ($1, $2, $3, $4, 'upi', 'website', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+     VALUES ($1, $2, $3, $4, COALESCE($17, 'upi'), CASE WHEN $18::boolean THEN 'offline' ELSE 'website' END,
+             $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
      ON CONFLICT (external_ref) DO UPDATE SET
        amount            = EXCLUDED.amount,
+       -- Cash, cheque and bank donations entered on a site's own admin form
+       -- came in here as "upi" from the "website", because the sites never
+       -- said otherwise. They do now; a site that still does not say leaves
+       -- what DRM already has.
+       payment_mode      = COALESCE($17, donations.payment_mode),
+       source            = CASE WHEN $18::boolean THEN 'offline' ELSE donations.source END,
        receipt_generated = EXCLUDED.receipt_generated,
        receipt_number    = EXCLUDED.receipt_number,
        receipt_issued_at = EXCLUDED.receipt_issued_at,
@@ -295,6 +316,8 @@ async function upsertDonation(
       hkmvMappers.truncate(d.utm?.medium, 80),
       hkmvMappers.truncate(d.utm?.campaign, 120),
       hkmvMappers.truncate(d.paymentRef, 80),
+      siteModeToDrm(d.paymentMode),
+      d.offline === true,
     ]
   );
 

@@ -248,6 +248,59 @@ async function main() {
   const flags = (await pool.query(`SELECT want_prasadam, want_certificate, donor_pan FROM qr_payments WHERE id = $1`, [keep])).rows[0];
   check('prasadam and "no 80G this time" are saved on the payment', flags.want_prasadam === true && flags.want_certificate === false, flags);
 
+  console.log('\n7. leads an admin parked with themselves can be called by the caller');
+  await pool.query(`DELETE FROM abandoned_attempts`);
+  await pool.query(
+    `INSERT INTO abandoned_attempts (source_site, external_id, phone, name, amount, purpose, source_page, attempted_at, status) VALUES
+       ('hkmv','p1','9833333301','Parked One',700,'Gau seva','seva/gau-seva',NOW() - INTERVAL '3 hours','failed'),
+       ('hkmv','p2','9833333302','Bhavin Has',800,'Gau seva','seva/gau-seva',NOW() - INTERVAL '3 hours','failed'),
+       ('hkmv','p3','9833333303','Parked Two',900,'Gau seva','seva/gau-seva',NOW() - INTERVAL '3 hours','failed')`
+  );
+  let list = await req('GET', '/api/crm/leads/abandoned?days=30', admin);
+  const idOf = (name: string) => list.body.rows?.find((r: any) => r.name === name)?.id;
+  await req('POST', '/api/crm/leads/abandoned/adopt-bulk', admin, {
+    ids: [idOf('Parked One'), idOf('Parked Two')], filters: { days: '30' }, assign: 'me',
+  });
+  await req('POST', '/api/crm/leads/abandoned/adopt-bulk', admin, {
+    ids: [idOf('Bhavin Has')], filters: { days: '30' }, assign: BHAVIN,
+  });
+  list = await req('GET', '/api/crm/leads/abandoned?days=30', ana);
+  const parked = list.body.rows?.find((r: any) => r.name === 'Parked One');
+  check('the list says the admin does not make calls', parked?.lead_owner_calls === false, parked);
+  const taken = await req('POST', '/api/crm/leads/abandoned/adopt-bulk', ana, {
+    ids: [parked.id, list.body.rows.find((r: any) => r.name === 'Bhavin Has').id], filters: { days: '30' }, assign: 'me',
+  });
+  const owner = async (phone: string) => (await pool.query(`SELECT assigned_to FROM leads WHERE phone = $1`, [phone])).rows[0]?.assigned_to;
+  check('calling it hands it to her', taken.body.lead_ids?.length === 1 && (await owner('9833333301')) === ANA, taken.body);
+  check("but a fellow caller's lead stays his", taken.body.already_others === 1 && (await owner('9833333302')) === BHAVIN, taken.body);
+  const srcs = await req('GET', '/api/crm/sessions/sources', ana);
+  const ngCount = srcs.body.sources?.find((x: any) => x.kind === 'nearly_gave')?.count;
+  const run = await req('POST', '/api/crm/sessions', ana, { source: { kind: 'nearly_gave' } });
+  check('Call all includes the parked one, and takes it', (await owner('9833333303')) === ANA && (run.status === 200 || run.status === 201), [ngCount, run.status, run.body?.error]);
+  await req('POST', `/api/crm/sessions/${run.body.session?.id}/end`, ana, {});
+
+  console.log('\n8. a caller can add a lead, and the overview links open what they counted');
+  let r8 = await req('POST', '/api/crm/leads', ana, { phone: '98444 00001', name: 'Walk In', source: 'walk_in', status: 'converted', assigned_to: BHAVIN });
+  const w = (await pool.query(`SELECT assigned_to, status, source FROM leads WHERE phone = '9844400001'`)).rows[0];
+  check('a caller adds a lead for herself, as new', r8.status === 201 && w.assigned_to === ANA && w.status === 'new' && w.source === 'walk_in', [r8.status, w]);
+  await pool.query(`INSERT INTO leads (phone, name, assigned_to) VALUES ('9844400002','Parked Lead',$1)`, [ADMIN]);
+  r8 = await req('POST', '/api/crm/leads', ana, { phone: '9844400002' });
+  check('adding a number parked with an admin makes it hers', r8.body.lead?.assigned_to === ANA && !r8.body.owner_name, r8.body);
+  await pool.query(`INSERT INTO leads (phone, name, assigned_to) VALUES ('9844400003','Bhavins',$1)`, [BHAVIN]);
+  r8 = await req('POST', '/api/crm/leads', ana, { phone: '9844400003' });
+  check("a fellow caller's lead stays his, and she is told", r8.body.owner_name === 'Bhavin', r8.body);
+  const today8 = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  r8 = await req('GET', `/api/crm/leads?assigned_to=${ANA}&added_from=${today8}&added_to=${today8}&limit=100`, ana);
+  const names8 = (r8.body.leads ?? []).map((x: any) => x.name);
+  check('"added today" finds them', names8.includes('Walk In') && names8.includes('Parked Lead'), names8);
+  r8 = await req('GET', `/api/crm/leads?added_from=2000-01-01&added_to=2000-01-02&limit=100`, ana);
+  check('and a past window finds none', (r8.body.leads ?? []).length === 0, r8.body.total);
+  await pool.query(`UPDATE leads SET do_not_call = TRUE WHERE phone = '9844400001'`);
+  r8 = await req('GET', `/api/crm/leads?open=true&assigned_to=${ANA}&limit=100`, ana);
+  check('"still being called" leaves out do-not-call', !(r8.body.leads ?? []).some((x: any) => x.name === 'Walk In'), r8.body.leads?.map((x: any) => x.name));
+  r8 = await req('GET', '/api/crm/leads?limit=200', ana);
+  check('and leads parked with an admin show on her Leads screen', (r8.body.leads ?? []).some((x: any) => x.phone === '9833333301' || x.phone === '9844400002'), r8.body.total);
+
   server.close();
   await pool.end();
   console.log(failures ? `\n${failures} failed` : '\nall passed');

@@ -122,6 +122,15 @@ export function denyRole(...roles: UserRole[]) {
 const HARMLESS_WRITES: { method: string; path: RegExp }[] = [
   // POST /api/donations/:id/resend-receipt
   { method: 'POST', path: /^\/[^/]+\/resend-receipt\/?$/ },
+  // POST /api/donations/offline - raise a receipt for money a donor paid by
+  // cash, UPI, cheque or bank. Not harmless in the sense above - it creates a
+  // donation - but it is the caller's own job: the donor pays during the call
+  // and is waiting for the receipt. The site checks the details and refuses a
+  // repeated UTR, so a caller cannot double-issue, and the donor's existing
+  // record is only ever filled in, never overwritten. Everything else on the
+  // donations router (editing or deleting a donation, the bare record) stays
+  // closed to callers.
+  { method: 'POST', path: /^\/offline\/?$/ },
 ];
 
 export function readOnlyFor(...roles: UserRole[]) {

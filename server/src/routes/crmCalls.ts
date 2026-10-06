@@ -202,7 +202,7 @@ async function loadLeadFor(id: string, user?: { userId?: string; role?: string }
             (SELECT a.attempted_at FROM abandoned_attempts a WHERE a.phone = l.phone AND NOT ${FROM_DONATIONS_PAGE('a')} ORDER BY a.attempted_at DESC LIMIT 1) AS attempted_at,
             (SELECT a.amount FROM abandoned_attempts a WHERE a.phone = l.phone AND NOT ${FROM_DONATIONS_PAGE('a')} ORDER BY a.attempted_at DESC LIMIT 1) AS attempt_amount
        FROM leads l
-      WHERE l.id = $1 AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL)`,
+      WHERE l.id = $1 AND ($2::uuid IS NULL OR l.assigned_to = $2::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))`,
     [id, scope]
   );
   return r.rows[0] ?? null;
@@ -278,7 +278,7 @@ router.get('/leads/:id/donation-candidates', async (req, res) => {
            LEFT JOIN caller_credits cc ON cc.qr_payment_id = p.id AND cc.status = 'active'
            LEFT JOIN users cu ON cu.id = cc.user_id
           WHERE p.received_at >= $1::timestamptz
-            AND p.share_id IS NULL
+            AND p.share_id IS NULL AND p.lead_id IS NULL AND p.person_id IS NULL
             AND COALESCE(p.status, 'captured') IN ('captured', 'authorized')
             AND ($2::text = ''
                  OR p.payer_name ILIKE '%' || $2 || '%'
@@ -408,7 +408,8 @@ router.post('/leads/:id/link-donation', async (req, res) => {
         return res.status(404).json({ error: 'Payment not found.' });
       }
       const row = p.rows[0];
-      if (row.share_id) {
+      // Linked by any route - a QR send, a lead or a person - not only a send.
+      if (row.share_id || row.lead_id || row.person_id) {
         await client.query('ROLLBACK');
         return res.status(409).json({ error: 'This payment is already linked.' });
       }
@@ -423,7 +424,14 @@ router.post('/leads/:id/link-donation', async (req, res) => {
         occurredAt: at,
       });
       await client.query(`UPDATE leads SET converted_via = 'linked', converted_at = $2::timestamptz WHERE id = $1`, [lead.id, at]);
-      if (lead.person_id) await client.query(`UPDATE qr_payments SET person_id = COALESCE(person_id, $2) WHERE id = $1`, [row.id, lead.person_id]);
+      // On the payment too, so the QR payments screen shows who it was and
+      // stops listing it as "Not linked".
+      await client.query(
+        `UPDATE qr_payments SET lead_id = $2, person_id = COALESCE(person_id, $3::uuid),
+           linked_by = $4::uuid, linked_at = NOW(), link_kind = 'lead'
+         WHERE id = $1`,
+        [row.id, lead.id, lead.person_id ?? null, me]
+      );
       credited = row.credited_to ? { ok: false, already: row.credited_to } : { ok: !!creditTo };
     }
 
@@ -530,6 +538,11 @@ router.post('/link-donation/:activityId/undo', async (req, res) => {
                 reversed_reason = 'Link undone'
           WHERE qr_payment_id = $1 AND lead_id = $2 AND status = 'active'`,
         [u.qr_payment_id, act.lead_id, by || null]
+      );
+      await client.query(
+        `UPDATE qr_payments SET lead_id = NULL, person_id = NULL, linked_by = NULL, linked_at = NULL, link_kind = NULL
+          WHERE id = $1 AND lead_id = $2`,
+        [u.qr_payment_id, act.lead_id]
       );
     }
     if (u.closed_reminders?.length) {

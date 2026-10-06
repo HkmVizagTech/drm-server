@@ -15,7 +15,7 @@
 
 export type SiteKey = 'hkmv' | 'annadan';
 
-import { toAnnadan, type Address } from '../utils/address';
+import { isEmptyAddress, toAnnadan, type Address } from '../utils/address';
 
 export interface SiteConfig {
   key: SiteKey;
@@ -113,6 +113,11 @@ export interface HkmvDonation {
   campaign?: string | null;
   utm?: { source?: string | null; medium?: string | null; campaign?: string | null } | null;
   paymentRef?: string | null;
+  // How the money came in, and whether it was entered by hand rather than
+  // paid on the website. Absent from sites deployed before these were added,
+  // which keeps the old behaviour (UPI, website).
+  paymentMode?: string | null;
+  offline?: boolean | null;
   prasadam?: HkmvPrasadam | null;
 }
 
@@ -469,17 +474,45 @@ const ANNADAN_MODES: Record<string, string> = {
  * it are the city in the way everybody writes an Indian address, so those two
  * are lifted out and the rest is kept as written.
  */
-function partsFromText(text: string | null | undefined): Address | null {
+const INDIAN_STATES = new Set(
+  [
+    'andhra pradesh', 'arunachal pradesh', 'assam', 'bihar', 'chhattisgarh', 'goa', 'gujarat', 'haryana',
+    'himachal pradesh', 'jharkhand', 'karnataka', 'kerala', 'madhya pradesh', 'maharashtra', 'manipur',
+    'meghalaya', 'mizoram', 'nagaland', 'odisha', 'orissa', 'punjab', 'rajasthan', 'sikkim', 'tamil nadu',
+    'telangana', 'tripura', 'uttar pradesh', 'uttarakhand', 'west bengal', 'delhi', 'new delhi',
+    'jammu and kashmir', 'ladakh', 'puducherry', 'pondicherry', 'chandigarh', 'ap', 'a.p', 'a.p.', 'ts',
+  ]
+);
+
+/**
+ * A typed one-line address split into street, city, state and PIN, so the
+ * receipt and DCC get each part in its own field. Only what is clearly there
+ * is taken: a 6-digit PIN anywhere, a known state name as the last piece, and
+ * the piece before it as the city. Everything else stays in street.
+ */
+export function partsFromText(text: string | null | undefined): Address | null {
   const t = String(text ?? '').replace(/\s+/g, ' ').trim();
   if (!t) return null;
-  const pin = t.match(/\b(\d{6})\b/);
-  const withoutPin = pin ? t.replace(pin[0], '').replace(/[\s,.-]+$/, '').trim() : t;
+  const pin = t.match(/\b(\d{6})\b/) ?? t.match(/\b(\d{3}) (\d{3})\b/);
+  const pinCode = pin ? (pin[2] ? pin[1] + pin[2] : pin[1]) : null;
+  const withoutPin = pin
+    ? t.replace(pin[0], '').replace(/[\s,.-]+$/, '').replace(/[\s,]+-[\s,]*/g, ', ').trim()
+    : t;
   const pieces = withoutPin.split(',').map((x) => x.trim()).filter(Boolean);
+  let state: string | null = null;
+  if (pieces.length > 1 && INDIAN_STATES.has(pieces[pieces.length - 1].toLowerCase())) {
+    const s = pieces.pop()!;
+    state = /^(ap|a\.p\.?)$/i.test(s) ? 'Andhra Pradesh' : /^ts$/i.test(s) ? 'Telangana' : s;
+  }
   const city = pieces.length > 1 ? pieces.pop()! : null;
   return {
+    door: null,
+    house: null,
     street: pieces.join(', ') || withoutPin,
+    area: null,
     city,
-    pincode: pin ? pin[1] : null,
+    state,
+    pincode: pinCode,
     country: 'India',
   };
 }
@@ -488,9 +521,15 @@ export function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Re
   // Parsed once, used by whichever branch runs. A typed address with no
   // parts is split into parts here, so both the prasadam label and the 80G
   // certificate get a city and PIN.
-  const typed = input.prasadamParts ? null : partsFromText(input.prasadamAddress);
-  const parts = input.prasadamParts ?? typed;
-  const billing = input.billingParts && Object.values(input.billingParts).some(Boolean) ? input.billingParts : parts;
+  //
+  // "Given" means at least one real part. The donations route always passes
+  // normalizeAddress(...) output, which is an object of nulls when the form
+  // sent no parts - and treating that as an address replaced the typed one
+  // with nothing, so HKMV and DCC got only "India" on every receipt.
+  const given = (a?: Address | null): Address | null => (a && !isEmptyAddress(a) ? a : null);
+  const typed = given(input.prasadamParts) ? null : partsFromText(input.prasadamAddress);
+  const parts = given(input.prasadamParts) ?? typed;
+  const billing = given(input.billingParts) ?? parts;
   // The address goes to the site whenever the receipt needs one - for the
   // prasadam box OR for the 80G certificate. It used to go only with
   // prasadam, so an 80G receipt for a donor who wanted no prasadam reached
@@ -540,7 +579,7 @@ export function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Re
       offlinePaymentMode: ANNADAN_MODES[input.paymentMode] || 'other',
       paymentDate: input.paymentDate || undefined,
       certificate: !!input.wantCertificate,
-      panNumber: input.panNumber || '',
+      panNumber: (input.panNumber || '').trim().toUpperCase(),
       occasion: input.sevaName || '',
       mahaprasadam: !!input.wantPrasadam,
       // Who the box is for. annadan's Prasadam tab lists these columns, and
@@ -550,7 +589,7 @@ export function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Re
       // annadan keeps the address flat on the donation and its receipt reads
       // address/city/state/pincode separately, so sending only a blob is what
       // makes that receipt print ", ,  - ".
-      prasadamAddress: input.wantPrasadam ? input.prasadamAddress || '' : '',
+      prasadamAddress: input.wantPrasadam ? prasadamFlat.address || input.prasadamAddress || '' : '',
       ...(input.wantPrasadam && prasadamFlat.city ? { prasadamCity: prasadamFlat.city } : {}),
       ...(input.wantPrasadam && prasadamFlat.state ? { prasadamState: prasadamFlat.state } : {}),
       ...(input.wantPrasadam && prasadamFlat.pincode ? { prasadamPincode: prasadamFlat.pincode } : {}),
@@ -580,7 +619,7 @@ export function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Re
     paymentDate: input.paymentDate || undefined,
     sevaName: input.sevaName || undefined,
     type: input.sevaName || 'Manual Entry',
-    panNumber: input.panNumber || undefined,
+    panNumber: input.panNumber ? input.panNumber.trim().toUpperCase() : undefined,
     certificate: !!input.wantCertificate,
     wantPrasadam: !!input.wantPrasadam,
     // The object shape HKMV's schema and receipt template expect. HKMV has no
@@ -632,7 +671,11 @@ export async function createOfflineDonation(
       (typeof body?.error === 'string' && body.error) ||
       `${siteLabelFor(site)} did not accept this (${res.status}).`;
     const err = new Error(message) as Error & { status?: number };
-    err.status = res.status;
+    // annadan refuses a repeated reference with a 400 ("Reference number
+    // already exists"), where HKMV uses 409. Both mean the receipt is already
+    // there, so both are a 409 here - otherwise a QR payment receipted twice
+    // on annadan showed as failed and someone chased a receipt that existed.
+    err.status = res.status === 400 && /already (exists|recorded)/i.test(message) ? 409 : res.status;
     throw err;
   }
 

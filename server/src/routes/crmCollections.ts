@@ -371,7 +371,7 @@ router.post('/collections/:creditId/receipt', async (req, res) => {
         donorMobile: c.donor_phone,
         donorEmail: c.donor_email || null,
         amount: Number(c.amount),
-        paymentMode: c.method === 'cash' ? 'cash' : c.method === 'cheque' ? 'cheque' : 'upi',
+        paymentMode: ['cash', 'cheque', 'bank'].includes(String(c.method)) ? String(c.method) : 'upi',
         referenceNo: c.reference,
         paymentDate: new Date(c.occurred_at).toISOString(),
         sevaName: c.purpose || undefined,
