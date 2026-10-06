@@ -14,7 +14,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { callHref } from "@/lib/calling";
+import { useAuth } from "@/lib/auth-context";
 import { Icon, Spinner } from "./icons";
+import { CALL_EDGE, CallStateChip, callState, type CallStateInput } from "./calling/call-state";
 
 interface LeadHit {
   id: string;
@@ -26,16 +28,19 @@ interface LeadHit {
   do_not_call: boolean;
   assigned_to_name: string | null;
 }
-interface PersonHit {
+type LeadHitFull = LeadHit & CallStateInput;
+interface PersonHit extends CallStateInput {
   id: string;
   name: string;
   phone: string;
   email: string | null;
   total_donated: string;
+  /** Set when this donor is also a lead - then the call state is the lead's. */
+  lead_id: string | null;
 }
 
 type Hit =
-  | { kind: "lead"; key: string; href: string; callable: boolean; lead: LeadHit }
+  | { kind: "lead"; key: string; href: string; callable: boolean; lead: LeadHitFull }
   | { kind: "person"; key: string; href: string; person: PersonHit };
 
 export function GlobalSearch({ autoFocus = false }: { autoFocus?: boolean }) {
@@ -43,7 +48,8 @@ export function GlobalSearch({ autoFocus = false }: { autoFocus?: boolean }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [leads, setLeads] = useState<LeadHit[]>([]);
+  const [leads, setLeads] = useState<LeadHitFull[]>([]);
+  const { user } = useAuth();
   const [people, setPeople] = useState<PersonHit[]>([]);
   const [active, setActive] = useState(0);
   const input = useRef<HTMLInputElement>(null);
@@ -83,7 +89,7 @@ export function GlobalSearch({ autoFocus = false }: { autoFocus?: boolean }) {
       }
       setLoading(true);
       try {
-        const r = await api<{ leads: LeadHit[]; people: PersonHit[] }>(
+        const r = await api<{ leads: LeadHitFull[]; people: PersonHit[] }>(
           `/api/crm/search?q=${encodeURIComponent(term)}`
         );
         if (!live) return;
@@ -180,6 +186,15 @@ export function GlobalSearch({ autoFocus = false }: { autoFocus?: boolean }) {
           )}
           {hits.map((h, n) => {
             const isActive = n === active;
+            // The colour says where the calling has got to with them - given,
+            // do not call, call back due, called, or never rung - so a caller
+            // can tell at a glance whether they have spoken to this person.
+            const state =
+              h.kind === "lead"
+                ? callState(h.lead, user?.id)
+                : h.person.lead_id
+                ? callState(h.person, user?.id)
+                : callState({}, user?.id);
             const header =
               h.kind === "person" && (n === 0 || hits[n - 1].kind !== "person") ? (
                 <p
@@ -194,33 +209,39 @@ export function GlobalSearch({ autoFocus = false }: { autoFocus?: boolean }) {
                 {header}
                 <div
                   onMouseEnter={() => setActive(n)}
-                  className={`flex items-center gap-2 rounded-control px-3 py-2 ${isActive ? "bg-brand-50" : ""}`}
+                  className={`flex items-center gap-2 rounded-control border-l-[3px] px-3 py-2 ${CALL_EDGE[state.tone]} ${isActive ? "bg-brand-50" : ""}`}
                 >
                   <button type="button" onClick={() => go(h.href)} className="min-w-0 flex-1 text-left">
                     {h.kind === "lead" ? (
                       <>
-                        <span className="block truncate text-sm font-medium text-ink">
-                          {h.lead.name || "No name"}
-                          {h.lead.do_not_call && (
-                            <span className="ml-2 text-2xs font-semibold uppercase text-danger">Do not call</span>
-                          )}
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="truncate text-sm font-medium text-ink">{h.lead.name || "No name"}</span>
+                          <CallStateChip state={state} />
                         </span>
                         <span className="block truncate text-xs text-ink-muted tabular-nums">
                           {h.lead.phone}
-                          {h.lead.status_label ? ` · ${h.lead.status_label}` : ""}
-                          {h.lead.assigned_to_name ? ` · ${h.lead.assigned_to_name}` : ""}
+                          {h.lead.assigned_to_name ? ` · ${h.lead.assigned_to_name}'s lead` : ""}
                           {h.lead.city ? ` · ${h.lead.city}` : ""}
                         </span>
+                        {state.detail && (
+                          <span className="block truncate text-xs text-ink-soft">Last call: {state.detail}</span>
+                        )}
                       </>
                     ) : (
                       <>
-                        <span className="block truncate text-sm font-medium text-ink">{h.person.name}</span>
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="truncate text-sm font-medium text-ink">{h.person.name}</span>
+                          {h.person.lead_id && <CallStateChip state={state} />}
+                        </span>
                         <span className="block truncate text-xs text-ink-muted tabular-nums">
                           {h.person.phone}
                           {Number(h.person.total_donated) > 0
                             ? ` · gave ₹${Number(h.person.total_donated).toLocaleString("en-IN")}`
                             : ""}
                         </span>
+                        {state.detail && (
+                          <span className="block truncate text-xs text-ink-soft">Last call: {state.detail}</span>
+                        )}
                       </>
                     )}
                   </button>

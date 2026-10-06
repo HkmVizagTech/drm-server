@@ -301,6 +301,20 @@ async function main() {
   r8 = await req('GET', '/api/crm/leads?limit=200', ana);
   check('and leads parked with an admin show on her Leads screen', (r8.body.leads ?? []).some((x: any) => x.phone === '9833333301' || x.phone === '9844400002'), r8.body.total);
 
+  console.log('\n9. a person already rung is easy to spot');
+  const sl = (await pool.query(`INSERT INTO leads (phone, name, assigned_to) VALUES ('9855500001','Spot Me',$1) RETURNING id`, [ANA])).rows[0].id;
+  await pool.query(`INSERT INTO leads (phone, name, assigned_to) VALUES ('9855500002','Spot Never',$1)`, [ANA]);
+  await req('POST', `/api/crm/leads/${sl}/call`, ana, { disposition: 'no_answer' });
+  let s9 = await req('GET', '/api/crm/search?q=Spot', ana);
+  const hit = s9.body.leads?.find((x: any) => x.name === 'Spot Me');
+  check('search says who rang them and when', hit?.last_caller_id === ANA && !!hit.last_contacted_at && !!hit.last_outcome_label, hit);
+  check('and someone never rung has no last call', !s9.body.leads?.find((x: any) => x.name === 'Spot Never')?.last_contacted_at, s9.body.leads);
+  s9 = await req('GET', `/api/crm/leads?search=Spot&called_by=${ANA}&limit=50`, ana);
+  check('Leads: "called by me"', JSON.stringify((s9.body.leads ?? []).map((x: any) => x.name)) === '["Spot Me"]', s9.body.leads?.map((x: any) => x.name));
+  s9 = await req('GET', `/api/crm/leads?search=Spot&called=never&limit=50`, ana);
+  check('Leads: "not called yet"', JSON.stringify((s9.body.leads ?? []).map((x: any) => x.name)) === '["Spot Never"]', s9.body.leads?.map((x: any) => x.name));
+  check('lead rows carry the last caller', (await req('GET', `/api/crm/leads?search=Spot%20Me`, ana)).body.leads?.[0]?.last_caller_name === 'Ana');
+
   server.close();
   await pool.end();
   console.log(failures ? `\n${failures} failed` : '\nall passed');

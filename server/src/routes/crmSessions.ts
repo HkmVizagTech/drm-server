@@ -1060,10 +1060,21 @@ router.get('/search', async (req, res) => {
     const [leads, people] = await Promise.all([
       pool.query(
         `SELECT l.id, l.name, l.phone, l.alt_phone, l.city, l.status, l.do_not_call,
-                l.next_follow_up_at, l.last_outcome, u.name AS assigned_to_name, s.label AS status_label
+                l.next_follow_up_at, l.last_outcome, u.name AS assigned_to_name, s.label AS status_label,
+                -- Where the calling has got to, for the colour on each result:
+                -- given, do not call, call back due, called, never called.
+                s.is_open AS status_is_open, l.converted_at, l.last_contacted_at, l.call_attempts,
+                ld.label AS last_outcome_label, lc.last_caller_id, lc.last_caller_name
            FROM leads l
            LEFT JOIN users u ON u.id = l.assigned_to
            LEFT JOIN crm_statuses s ON s.slug = l.status
+           LEFT JOIN crm_dispositions ld ON ld.slug = l.last_outcome
+           LEFT JOIN LATERAL (
+             SELECT a.user_id AS last_caller_id, cu.name AS last_caller_name
+               FROM lead_activities a LEFT JOIN users cu ON cu.id = a.user_id
+              WHERE a.lead_id = l.id AND a.kind = 'call'
+              ORDER BY a.occurred_at DESC LIMIT 1
+           ) lc ON TRUE
           WHERE (CASE WHEN $5::boolean THEN (l.phone LIKE $2::text OR l.alt_phone LIKE $2::text)
                       ELSE (l.name ILIKE $1::text OR l.email ILIKE $1::text) END)
             AND ($3::uuid IS NULL OR l.assigned_to = $3::uuid OR l.assigned_to IS NULL OR l.assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))
@@ -1073,8 +1084,14 @@ router.get('/search', async (req, res) => {
       ),
       pool.query(
         `SELECT p.id, p.name, p.phone, p.email,
-                (SELECT COALESCE(SUM(d.amount), 0) FROM donations d WHERE d.person_id = p.id)::numeric AS total_donated
+                (SELECT COALESCE(SUM(d.amount), 0) FROM donations d WHERE d.person_id = p.id)::numeric AS total_donated,
+                -- A donor who is also a lead carries the lead's calling state,
+                -- so a search by name shows "called yesterday" either way.
+                pl.id AS lead_id, pl.last_contacted_at, pl.converted_at, pl.do_not_call,
+                pl.next_follow_up_at, pld.label AS last_outcome_label
            FROM people p
+           LEFT JOIN leads pl ON pl.phone = right(regexp_replace(p.phone, '\\D', '', 'g'), 10)
+           LEFT JOIN crm_dispositions pld ON pld.slug = pl.last_outcome
           WHERE (CASE WHEN $4::boolean THEN regexp_replace(p.phone, '\\D', '', 'g') LIKE $2::text
                       ELSE (p.name ILIKE $1::text OR p.email ILIKE $1::text) END)
           ORDER BY (lower(p.name) = lower($3::text)) DESC, p.updated_at DESC

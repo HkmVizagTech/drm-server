@@ -37,7 +37,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { callHref, formatPhone, runHref, startRun } from "@/lib/calling";
-import { currency, dueLabel, number, relativeDate } from "@/lib/format";
+import { currency, dueLabel, number } from "@/lib/format";
 import {
   Alert,
   Badge,
@@ -65,6 +65,7 @@ import {
   buttonClass,
 } from "@/components/ui";
 import { Icon } from "@/components/icons";
+import { CALL_EDGE, CallStateChip, callState } from "@/components/calling/call-state";
 import { ExportButton } from "@/components/export-button";
 import { toast } from "@/components/toast";
 import { SelectAllBanner, SelectionBar } from "@/components/bulk/selection-bar";
@@ -99,6 +100,11 @@ interface Lead {
   preacher_code: string | null;
   preacher_name: string | null;
   external_total_donated: string | null;
+  converted_at?: string | null;
+  status_is_open?: boolean | null;
+  last_caller_id?: string | null;
+  last_caller_name?: string | null;
+  last_outcome_label?: string | null;
 }
 
 interface Preacher { id: string; code: string; name: string | null; leads?: number }
@@ -162,6 +168,8 @@ const FILTER_KEYS = [
   "converted_from",
   "converted_to",
   "open",
+  "called",
+  "called_by",
 ] as const;
 
 const EMPTY = new Set<string>();
@@ -450,13 +458,15 @@ function Leads() {
 
   /* ------------------------------------------------------------- filters */
 
+  // "Calls": never rung, rung today or this week, or rung by me.
+  const calledFilter = param("called_by") ? "me" : param("called");
   const fromOverview = {
     added: [param("added_from"), param("added_to")] as const,
     converted: [param("converted_from"), param("converted_to")] as const,
     open: param("open"),
   };
   const activeCount = [
-    urlSearch, status, source, assigned, due, preacher, tag, batch, list, callable,
+    urlSearch, status, source, assigned, due, preacher, tag, batch, list, callable, calledFilter,
     fromOverview.added[0] || fromOverview.added[1],
     fromOverview.converted[0] || fromOverview.converted[1],
     fromOverview.open,
@@ -465,9 +475,6 @@ function Leads() {
     setSearch("");
     setParams(Object.fromEntries(FILTER_KEYS.map((k) => [k, null])));
   };
-
-  const outcomeLabel = (slug: string) =>
-    config?.dispositions.find((d) => d.slug === slug)?.label ?? slug.replace(/_/g, " ");
 
   const batchOptions = [
     { value: "", label: "Any sheet" },
@@ -592,6 +599,24 @@ function Leads() {
                 <option key={d.key} value={d.key}>{d.label || "Any follow-up"}</option>
               ))}
             </Select>
+          </Field>
+          <Field label="Calls" className="w-full sm:w-auto sm:min-w-[9rem] sm:flex-1">
+            <Select
+              value={calledFilter}
+              onChange={(v) =>
+                setParams(
+                  v === "me" ? { called: null, called_by: user?.id ?? null } : { called: v || null, called_by: null }
+                )
+              }
+              ariaLabel="Calls"
+              options={[
+                { value: "", label: "Any" },
+                { value: "never", label: "Not called yet" },
+                { value: "today", label: "Called today" },
+                { value: "week", label: "Called this week" },
+                { value: "me", label: "Called by me" },
+              ]}
+            />
           </Field>
           {/* "Ring everyone Jagat Tarini Mataji brought in" is one of the
               commonest ways the office builds a list, so the preacher is a
@@ -728,7 +753,12 @@ function Leads() {
             const on = isPicked(l.id);
             const overdue = l.next_follow_up_at && new Date(l.next_follow_up_at) < new Date();
             return (
-              <Card key={l.id} padded={false} tone={on ? "brand" : "default"} className="p-4">
+              <Card
+                key={l.id}
+                padded={false}
+                tone={on ? "brand" : "default"}
+                className={`border-l-[3px] p-4 ${CALL_EDGE[callState(l, user?.id).tone]}`}
+              >
                 <div className="flex items-start gap-3">
                   <Checkbox
                     className="mt-0.5"
@@ -741,9 +771,7 @@ function Leads() {
                       <Link href={`/leads/${l.id}`} className="min-w-0 truncate font-medium text-ink">
                         {l.name || "No name"}
                       </Link>
-                      <Badge tone={l.converted_amount ? "good" : l.do_not_call ? "danger" : "neutral"}>
-                        {l.do_not_call ? "Do not call" : l.status_label ?? l.status}
-                      </Badge>
+                      <CallStateChip state={callState(l, user?.id)} />
                     </div>
                     <p className="text-xs tabular-nums text-ink-muted">
                       {formatPhone(l.phone)}
@@ -755,13 +783,9 @@ function Leads() {
                           Due {dueLabel(l.next_follow_up_at)}
                         </span>
                       )}
+                      <span>{l.status_label ?? l.status}</span>
                       <span>{l.assigned_to_name ?? "Unassigned"}</span>
-                      {l.last_outcome && (
-                        <span>
-                          Last: {outcomeLabel(l.last_outcome)}
-                          {l.last_contacted_at && <> · {relativeDate(l.last_contacted_at).toLowerCase()}</>}
-                        </span>
-                      )}
+                      {callState(l, user?.id).detail && <span>Last call: {callState(l, user?.id).detail}</span>}
                     </div>
                   </div>
                 </div>
@@ -825,7 +849,7 @@ function Leads() {
                   // people's work changed, so what is in the selection has to be
                   // readable from across the table rather than one box at a time.
                   <tr key={l.id} className={on ? "bg-brand-50" : ""}>
-                    <Td>
+                    <Td className={`border-l-[3px] ${CALL_EDGE[callState(l, user?.id).tone]}`}>
                       <Checkbox
                         checked={on}
                         onChange={() => toggle(l.id)}
@@ -858,13 +882,13 @@ function Leads() {
                       )}
                     </Td>
                     <Td>
-                      <Badge tone={l.converted_amount ? "good" : "neutral"}>{l.status_label ?? l.status}</Badge>
-                      {l.last_outcome && (
-                        <div className="mt-0.5 text-xs text-ink-faint">
-                          {outcomeLabel(l.last_outcome)}
-                          {l.last_contacted_at && <> · {relativeDate(l.last_contacted_at).toLowerCase()}</>}
-                        </div>
-                      )}
+                      {/* The colour is where the calling has got to; the stage and
+                          the last call, with who made it, sit under it. */}
+                      <CallStateChip state={callState(l, user?.id)} />
+                      <div className="mt-0.5 text-xs text-ink-faint">
+                        {l.status_label ?? l.status}
+                        {callState(l, user?.id).detail && <> · {callState(l, user?.id).detail}</>}
+                      </div>
                     </Td>
                     <Td className="text-sm">
                       {l.preacher_code ? (

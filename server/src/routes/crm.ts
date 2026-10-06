@@ -357,7 +357,11 @@ const LEAD_COLUMNS = `
   s.label AS status_label, s.tone AS status_tone, s.is_open AS status_is_open,
   -- Shown on the lead row so a caller knows whether they are ringing a stranger
   -- or someone who has given eleven times before picking up the phone.
-  p.total_donated, p.donation_count, p.last_donation_at`;
+  p.total_donated, p.donation_count, p.last_donation_at,
+  -- Who rang them last, so a list or a search can say "you called" or
+  -- "Ravi called" next to the colour for where they are.
+  lc.last_caller_id, lc.last_caller_name,
+  ld.label AS last_outcome_label`;
 
 const LEAD_JOINS = `
   FROM leads l
@@ -370,7 +374,14 @@ const LEAD_JOINS = `
            MAX(d.created_at)                  AS last_donation_at
       FROM donations d
      WHERE d.person_id = l.person_id
-  ) p ON l.person_id IS NOT NULL`;
+  ) p ON l.person_id IS NOT NULL
+  LEFT JOIN LATERAL (
+    SELECT a.user_id AS last_caller_id, cu.name AS last_caller_name
+      FROM lead_activities a LEFT JOIN users cu ON cu.id = a.user_id
+     WHERE a.lead_id = l.id AND a.kind = 'call'
+     ORDER BY a.occurred_at DESC LIMIT 1
+  ) lc ON TRUE
+  LEFT JOIN crm_dispositions ld ON ld.slug = l.last_outcome`;
 
 interface Filters {
   where: string;
@@ -516,6 +527,19 @@ function buildLeadFilters(q: Record<string, unknown>, startIdx = 1): Filters {
       conditions.push(`${col} < ($${i++}::date + INTERVAL '1 day')`);
       values.push(to);
     }
+  }
+  // Where the calling has got to with them. "me" needs the caller's id, so it
+  // arrives as called_by=<user id>.
+  if (q.called) {
+    const c = String(q.called);
+    if (c === 'never') conditions.push(`l.last_contacted_at IS NULL`);
+    else if (c === 'today') conditions.push(`l.last_contacted_at >= date_trunc('day', NOW())`);
+    else if (c === 'week') conditions.push(`l.last_contacted_at >= NOW() - INTERVAL '7 days'`);
+    else if (c === 'called') conditions.push(`l.last_contacted_at IS NOT NULL`);
+  }
+  if (q.called_by && /^[0-9a-f-]{36}$/i.test(String(q.called_by))) {
+    conditions.push(`EXISTS (SELECT 1 FROM lead_activities ca WHERE ca.lead_id = l.id AND ca.kind = 'call' AND ca.user_id = $${i++}::uuid)`);
+    values.push(String(q.called_by));
   }
   // Still being worked: an open stage, and not "do not call" - the overview's
   // "Hoped for" counts exactly these.

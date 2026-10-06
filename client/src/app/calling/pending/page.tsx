@@ -57,6 +57,7 @@ import { ExportButton } from "@/components/export-button";
 import { toast } from "@/components/toast";
 import { SelectAllBanner, SelectionBar } from "@/components/bulk/selection-bar";
 import { LinkDonationDialog } from "@/components/calling/link-donation";
+import { CALL_EDGE, CallStateChip, callState } from "@/components/calling/call-state";
 
 interface Row {
   id: string;
@@ -868,8 +869,19 @@ export default function PendingPaymentsPage() {
           rows.map((r) => {
             const on = picked.has(r.id) || (allMatching && canPick(r));
             const last = lastCall(r);
+            // The same colours as search and Leads: rung before or not.
+            const cs = callState({
+              do_not_call: r.lead_do_not_call,
+              last_contacted_at: r.lead_last_contacted_at,
+              last_outcome_label: r.lead_last_outcome ? outcomeLabel(r.lead_last_outcome) : null,
+            });
             return (
-              <Card key={r.id} padded={false} tone={on ? "brand" : "default"} className="px-3 py-3 sm:px-4">
+              <Card
+                key={r.id}
+                padded={false}
+                tone={on ? "brand" : "default"}
+                className={`border-l-[3px] px-3 py-3 sm:px-4 ${CALL_EDGE[cs.tone]}`}
+              >
                 <div className="flex items-start gap-3">
                   <span className="mt-0.5 w-5 flex-none">
                     {canPick(r) && (
@@ -881,9 +893,10 @@ export default function PendingPaymentsPage() {
                     )}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-baseline gap-x-2">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <span className="truncate font-medium text-ink">{r.name || "No name"}</span>
                       <span className="text-sm tabular-nums text-ink-muted">{formatPhone(r.phone)}</span>
+                      {view === "open" && <CallStateChip state={cs} />}
                     </div>
                     <p className="mt-0.5 text-sm text-ink-soft">{story(r)}</p>
                     {last && <p className="mt-0.5 text-xs text-ink-muted">{last}</p>}
