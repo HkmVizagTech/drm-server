@@ -36,6 +36,7 @@ import { fetchAbandonedPage, isSiteConfigured, type SiteKey } from '../services/
 import { buildWorkbook } from '../utils/spreadsheet';
 import { parseDate, istDate } from '../bootTimezone';
 import { recordCredit } from '../services/credits';
+import { leadMoneyState, rupees } from '../services/leadMoney';
 import {
   sendExport, formatFrom, describeFilters, EXPORT_ROW_CAP, type ExportFormat,
 } from '../utils/export';
@@ -3398,6 +3399,21 @@ router.post('/leads/:id/donated', async (req, res) => {
     if (!before.rows.length) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    /* THE MONEY IS ALREADY HERE.
+     *
+     * Their QR payment, PhonePe entry or site donation has been linked and
+     * counted. Writing the caller's word on top would be the same gift twice
+     * - in the lead's amount and, when the payment's credit is not on the
+     * lead, in the caller's total. A second, separate gift is recorded where
+     * its money is: Collected by PhonePe, or the QR payment itself. */
+    const money = await leadMoneyState(client, String(req.params.id), { at: asDate(req.body?.at) });
+    if (money?.converted && !money.wordOnly && money.near) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: `Already counted: ${rupees(money.saidAmount)} from their payment. Nothing added. A new gift goes under Collected by PhonePe.`,
+      });
     }
 
     const result = await client.query(

@@ -1955,6 +1955,11 @@ CREATE TABLE IF NOT EXISTS collections (
 CREATE INDEX IF NOT EXISTS idx_collections_phone ON collections(donor_phone);
 CREATE INDEX IF NOT EXISTS idx_collections_reference ON collections(reference) WHERE reference IS NOT NULL;
 
+-- The lead a PhonePe entry landed on, as it was before - so removing an entry
+-- that turned out not to be money puts the lead (and the amount noted on the
+-- call, which the entry had replaced) back. See services/leadMoney.ts.
+ALTER TABLE collections ADD COLUMN IF NOT EXISTS lead_undo JSONB;
+
 
 -- ===========================================================================
 -- CALLING SESSIONS THAT REMEMBER THEIR PLACE

@@ -17,7 +17,8 @@
     "test:sessions": "tsx scripts/test-sessions.ts",
     "test:calls": "tsx scripts/test-calls.ts",
     "test:payloads": "tsx scripts/test-site-payloads.ts",
-    "test:qrlink": "tsx scripts/test-qr-link.ts"
+    "test:qrlink": "tsx scripts/test-qr-link.ts",
+    "test:onegift": "tsx scripts/test-one-gift.ts"
   },
   "keywords": [],
   "author": "",

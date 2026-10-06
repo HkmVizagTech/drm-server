@@ -38,7 +38,10 @@ import {
   EXPORT_ROW_CAP,
   type ExportFormat,
 } from '../utils/export';
-import { recordCredit, reverseCreditFor } from '../services/credits';
+import { recordCredit, reverseCreditFor, type Credit, type CreditKind } from '../services/credits';
+import { leadMoneyState, leadHasCredit, leadForPayer, leadBefore, restoreLead, restoreWordCredit, rupees, type LeadUndo } from '../services/leadMoney';
+
+type Db = { query: PoolClient['query'] };
 import type { PoolClient } from 'pg';
 
 const router = Router();
@@ -654,9 +657,49 @@ export async function markLeadDonated(
    * because the caller of this function is the only thing that knows whether
    * it watched a QR get paid or is taking somebody's word for it.
    */
-  evidence?: { qrPaymentId?: string; shareId?: string; personId?: string; occurredAt?: string | Date }
-): Promise<void> {
+  evidence?: {
+    qrPaymentId?: string;
+    shareId?: string;
+    personId?: string;
+    occurredAt?: string | Date;
+    /** 'qr' unless said otherwise; a PhonePe entry passes 'offline'. */
+    kind?: CreditKind;
+    /** Left false only for money a person reports rather than one DRM watched arrive. */
+    verified?: boolean;
+    createdBy?: string | null;
+  }
+): Promise<MarkResult> {
   const db = client ?? pool;
+
+  /* ONE GIFT, COUNTED ONCE - see services/leadMoney.ts.
+   *
+   * "Donated now ₹1,000" on the call, then the ₹1,000 itself linked here: the
+   * payment takes the word's place rather than being added to it. The word's
+   * credit, if it had one, is reversed and the payment's credit is written for
+   * the same caller, so the total shows the money once and the money is real. */
+  const state = await leadMoneyState(db as Db, leadId, {
+    qrPaymentId: evidence?.qrPaymentId ?? null,
+    shareId: evidence?.shareId ?? null,
+    at: evidence?.occurredAt ?? null,
+  });
+  let replaced: MarkResult['replaced'] = null;
+  if (state?.sameGift) {
+    if (state.wordCredit) {
+      await db.query(
+        `UPDATE caller_credits SET status = 'reversed', reversed_at = NOW(), reversed_by = $2::uuid,
+                reversed_reason = 'Replaced by the real payment'
+          WHERE id = $1 AND status = 'active'`,
+        [state.wordCredit.id, evidence?.createdBy ?? creditTo ?? null]
+      );
+      creditTo = creditTo ?? state.wordCredit.user_id;
+    }
+    replaced = { creditId: state.wordCredit?.id ?? null, said: state.saidAmount };
+    const said = state.saidAmount;
+    note =
+      said !== null && said !== amount
+        ? `${note}. Counted once: ${rupees(amount)} paid, in place of the ${rupees(said)} noted earlier`
+        : `${note}. Counted once: the same gift noted earlier`;
+  }
 
   // Credit the caller who actually did it.
   //
@@ -677,7 +720,9 @@ export async function markLeadDonated(
   await db.query(
     `UPDATE leads SET
        status             = 'converted',
-       converted_amount   = COALESCE(converted_amount, 0) + $2::numeric,
+       -- The real amount in place of the word, or added when this is a new gift.
+       converted_amount   = CASE WHEN $4::boolean THEN $2::numeric
+                                 ELSE COALESCE(converted_amount, 0) + $2::numeric END,
        converted_at       = COALESCE(converted_at, NOW()),
        converted_via      = 'manual',
        converted_note     = COALESCE(converted_note, $3),
@@ -692,7 +737,7 @@ export async function markLeadDonated(
        conversion_seen_at = NOW(),
        updated_at         = NOW()
      WHERE id = $1`,
-    [leadId, amount, note]
+    [leadId, amount, note, !!replaced]
   );
 
   // The promise they made is kept. Marked done rather than deleted, so the
@@ -729,18 +774,26 @@ export async function markLeadDonated(
    * them to pay credited the colleague and showed nothing for their own
    * shift. Separating the two is the point of having a ledger.
    */
+  let credit: Credit | null = null;
   if (creditTo) {
-    await recordCredit(
+    // A lead that already carries a credit for an earlier, real gift: this is
+    // a second gift, and it still counts - only without the lead on it, which
+    // the one-credit-per-lead index would refuse. The payment's own index
+    // still stops the same payment being counted twice.
+    const carryLead = !(await leadHasCredit(db as Db, leadId));
+    credit = await recordCredit(
       {
         userId: creditTo,
         amount,
-        kind: 'qr',
+        kind: evidence?.kind ?? 'qr',
         occurredAt: evidence?.occurredAt ?? new Date(),
-        leadId,
+        leadId: carryLead ? leadId : null,
         qrPaymentId: evidence?.qrPaymentId ?? null,
         shareId: evidence?.shareId ?? null,
         personId: evidence?.personId ?? null,
         note,
+        createdBy: evidence?.createdBy ?? undefined,
+        verified: evidence?.verified,
       },
       client as never
     ).catch((e) => {
@@ -751,6 +804,13 @@ export async function markLeadDonated(
       return null;
     });
   }
+  return { credit, replaced };
+}
+
+export interface MarkResult {
+  credit: Credit | null;
+  /** Set when this money took the place of an amount noted on somebody's word. */
+  replaced: { creditId: string | null; said: number | null } | null;
 }
 
 /** A lead's name for a note, or their number when they have no name yet. */
@@ -1865,10 +1925,12 @@ router.post('/qr/payments/:id/claim', authenticate, async (req, res) => {
 
   try {
     const { rows } = await pool.query(
-      `SELECT p.id, p.amount, p.received_at, p.payer_name,
+      `SELECT p.id, p.amount, p.received_at, p.payer_name, p.share_id,
+              COALESCE(p.lead_id, sh.lead_id) AS lead_id,
               q.label AS qr_label,
               cc.id AS credit_id, cu.name AS credit_user_name
          FROM qr_payments p
+         LEFT JOIN qr_shares sh ON sh.id = p.share_id
          LEFT JOIN razorpay_qrs q ON q.qr_id = p.qr_id
          LEFT JOIN caller_credits cc ON cc.qr_payment_id = p.id AND cc.status = 'active'
          LEFT JOIN users cu ON cc.user_id = cu.id
@@ -1884,6 +1946,31 @@ router.post('/qr/payments/:id/claim', authenticate, async (req, res) => {
       });
     }
 
+    /* THE LEAD THIS MONEY WENT TO MAY ALREADY BE COUNTED - ON A CALLER'S WORD.
+     *
+     * A payment linked to a lead before word and money were reconciled can
+     * leave the lead's "Donated" credit standing with this payment uncredited.
+     * Claiming it must not add a second figure for the same gift: the payment
+     * takes the word's place, exactly as linking it now does. A lead counted
+     * with real money is someone else's figure, and is said so. */
+    let replacedWord: string | null = null;
+    let carryLead = false;
+    if (p.lead_id) {
+      const st = await leadMoneyState(pool, p.lead_id, { qrPaymentId: p.id, shareId: p.share_id, at: p.received_at });
+      if (st?.sameGift && st.wordCredit) {
+        await pool.query(
+          `UPDATE caller_credits SET status = 'reversed', reversed_at = NOW(), reversed_by = $2::uuid,
+                  reversed_reason = 'Replaced by the real payment'
+            WHERE id = $1 AND status = 'active'`,
+          [st.wordCredit.id, me]
+        );
+        replacedWord = st.wordCredit.id;
+        carryLead = true;
+      } else {
+        carryLead = !(await leadHasCredit(pool, p.lead_id));
+      }
+    }
+
     const note = str(req.body?.note, 300);
     const credit = await recordCredit({
       userId: forUser,
@@ -1891,6 +1978,7 @@ router.post('/qr/payments/:id/claim', authenticate, async (req, res) => {
       kind: 'qr',
       occurredAt: p.received_at,
       qrPaymentId: p.id,
+      leadId: carryLead ? p.lead_id : null,
       note: note
         ? `Added by hand: ${note}`
         : `Added by hand${p.qr_label ? ` from QR ${p.qr_label}` : ''}`,
@@ -1898,6 +1986,7 @@ router.post('/qr/payments/:id/claim', authenticate, async (req, res) => {
     });
 
     if (!credit) {
+      if (replacedWord) await restoreWordCredit(pool, replacedWord);
       // Lost the race rather than hit an error. Said plainly, because the
       // screen refreshing to show somebody else's name on it would otherwise
       // look like the button did nothing.
@@ -2009,26 +2098,18 @@ async function paymentFor(id: string, user: Who, client?: PoolClient) {
 }
 
 /** What a lead looked like before a link marked it Donated, for unlinking. */
-async function leadBefore(client: PoolClient, leadId: string) {
-  const b = await client.query(
-    `SELECT status, converted_at, converted_amount, converted_via, converted_note, converted_donation_id,
-            conversion_seen_at, next_follow_up_at, follow_up_note, awaiting_qr_at, alt_phone,
-            assigned_to, assigned_at
-       FROM leads WHERE id = $1 FOR UPDATE`,
-    [leadId]
-  );
-  const open = await client.query(`SELECT id FROM lead_reminders WHERE lead_id = $1 AND status = 'open'`, [leadId]);
-  return { lead_id: leadId, before: b.rows[0] ?? null, open_reminders: open.rows.map((r) => r.id as string) };
-}
-
 export type LinkTarget =
   | { kind: 'share'; id: string }
-  | { kind: 'lead'; id: string }
+  | { kind: 'lead'; id: string; routed?: boolean }
   | { kind: 'person'; id: string }
   | { kind: 'new'; name: string; phone: string };
 
 type LinkResult =
-  | { ok: true; kind: string; name: string | null; phone: string | null; personId: string | null; existing?: boolean }
+  | {
+      ok: true; kind: string; name: string | null; phone: string | null; personId: string | null; existing?: boolean;
+      /** The amount noted on the call that this payment took the place of. */
+      replaced?: { said: number | null } | null;
+    }
   | { ok: false; status: number; error: string };
 
 /**
@@ -2059,8 +2140,33 @@ async function linkPayment(client: PoolClient, pay: any, target: LinkTarget, use
   let personId: string | null = null;
   let leadId: string | null = null;
   let shareId: string | null = null;
-  let kind: string = target.kind;
+  let replaced: MarkResult['replaced'] = null;
   let existing = false;
+
+  /* A PERSON WHO IS ALSO A LEAD IS LINKED AS THE LEAD.
+   *
+   * "Who paid?" offers people and numbers as well as leads, and the receipt
+   * route links by the donor's number. When that number belongs to a lead
+   * still being chased - or one marked Donated on the call, waiting for this
+   * very money - the payment is theirs as a lead: the chase stops, and the
+   * amount said on the call is replaced rather than added to. Linking it to
+   * the bare person left the lead converted on the caller's word AND a
+   * second credit for the money, which is the same gift counted twice. */
+  if (target.kind === 'person' || target.kind === 'new') {
+    let personId: string | null = null;
+    let ph: string | null = null;
+    if (target.kind === 'person') {
+      const pr = await client.query(`SELECT id, phone FROM people WHERE id = $1`, [target.id]);
+      personId = pr.rows[0]?.id ?? null;
+      ph = pr.rows[0]?.phone ?? null;
+    } else {
+      ph = phone10(target.phone) || null;
+      if (ph) personId = (await client.query(`SELECT id FROM people WHERE phone = $1`, [ph])).rows[0]?.id ?? null;
+    }
+    const viaLead = await leadForPayer(client, { personId, phone: ph }, pay.received_at);
+    if (viaLead) target = { kind: 'lead', id: viaLead, routed: true };
+  }
+  let kind: string = target.kind;
 
   if (target.kind === 'share') {
     const sh = await client.query(
@@ -2081,9 +2187,11 @@ async function linkPayment(client: PoolClient, pay: any, target: LinkTarget, use
     );
     if (share.lead_id) {
       undo = { ...undo, lead: await leadBefore(client, share.lead_id) };
-      await markLeadDonated(share.lead_id, amount, note, client, share.shared_by ?? null, {
-        ...evidence, shareId: share.id, personId: share.person_id ?? undefined,
+      const marked = await markLeadDonated(share.lead_id, amount, note, client, share.shared_by ?? null, {
+        ...evidence, shareId: share.id, personId: share.person_id ?? undefined, createdBy: me,
       });
+      (undo.lead as Record<string, unknown>).restored_credit = marked.replaced?.creditId ?? null;
+      replaced = marked.replaced;
     } else if (share.shared_by) {
       await recordCredit(
         { userId: share.shared_by, amount, kind: 'qr', ...evidence, shareId: share.id, personId: share.person_id ?? undefined, note },
@@ -2093,7 +2201,7 @@ async function linkPayment(client: PoolClient, pay: any, target: LinkTarget, use
   } else if (target.kind === 'lead') {
     const ld = await client.query(
       `SELECT * FROM leads WHERE id = $1 AND ($2::uuid IS NULL OR assigned_to = $2::uuid OR assigned_to IS NULL OR assigned_to IN (SELECT id FROM users WHERE role <> 'caller'))`,
-      [target.id, isCaller ? me : null]
+      [target.id, isCaller && !target.routed ? me : null]
     );
     if (!ld.rows.length) return { ok: false, status: 404, error: 'Lead not found.' };
     const lead = ld.rows[0];
@@ -2114,7 +2222,11 @@ async function linkPayment(client: PoolClient, pay: any, target: LinkTarget, use
       lead.assigned_to = me;
     }
     const creditTo = lead.assigned_to ?? (isCaller ? me : null);
-    await markLeadDonated(lead.id, amount, note, client, creditTo, { ...evidence, personId: lead.person_id ?? undefined });
+    const marked = await markLeadDonated(lead.id, amount, note, client, creditTo, {
+      ...evidence, personId: lead.person_id ?? undefined, createdBy: me,
+    });
+    (undo.lead as Record<string, unknown>).restored_credit = marked.replaced?.creditId ?? null;
+    replaced = marked.replaced;
     // The number they paid from, so their next payment from it is recognised.
     const payer = phone10(pay.payer_phone);
     if (/^[6-9]\d{9}$/.test(payer) && payer !== lead.phone && !lead.alt_phone) {
@@ -2163,7 +2275,7 @@ async function linkPayment(client: PoolClient, pay: any, target: LinkTarget, use
      WHERE id = $1`,
     [pay.id, shareId, leadId, personId, me, kind, JSON.stringify(undo), name, phone10(phone) || null]
   );
-  return { ok: true, kind, name, phone, personId, existing };
+  return { ok: true, kind, name, phone, personId, existing, replaced: replaced ? { said: replaced.said } : null };
 }
 
 /** Used by the receipt route: link to the donor on the receipt when nobody linked it. */
@@ -2350,6 +2462,8 @@ router.post('/qr/payments/:id/link', authenticate, async (req, res) => {
       person_id: r.personId,
       existing: !!r.existing,
       counted_for: credit.rows[0]?.name ?? null,
+      // "Donated now" on the call was this same money: counted once.
+      replaced_said: r.replaced ? r.replaced.said : undefined,
     });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -2408,44 +2522,10 @@ router.post('/qr/payments/:id/unlink', authenticate, async (req, res) => {
       );
     }
 
-    const undo = (pay.link_undo ?? {}) as {
-      lead?: { lead_id: string; before: Record<string, any> | null; open_reminders: string[]; set_alt_phone?: boolean };
-      donor_was?: { name: string | null; phone: string | null };
-    };
-    let leadRestored = false;
-    if (undo.lead?.before) {
-      const bf = undo.lead.before;
-      const r = await client.query(
-        `UPDATE leads SET status = $2, converted_at = $3::timestamptz, converted_amount = $4::numeric,
-                converted_via = $5, converted_note = $6, converted_donation_id = $7::uuid,
-                conversion_seen_at = $8::timestamptz, next_follow_up_at = $9::timestamptz,
-                follow_up_note = $10, awaiting_qr_at = $11::timestamptz, assigned_to = $12::uuid,
-                assigned_at = $13::timestamptz,
-                alt_phone = CASE WHEN $14::boolean THEN $15 ELSE alt_phone END,
-                updated_at = NOW()
-          WHERE id = $1 AND status = 'converted'`,
-        [
-          undo.lead.lead_id, bf.status, bf.converted_at, bf.converted_amount, bf.converted_via, bf.converted_note,
-          bf.converted_donation_id, bf.conversion_seen_at, bf.next_follow_up_at, bf.follow_up_note,
-          bf.awaiting_qr_at, bf.assigned_to, bf.assigned_at, !!undo.lead.set_alt_phone, bf.alt_phone ?? null,
-        ]
-      );
-      leadRestored = (r.rowCount ?? 0) > 0;
-      if (leadRestored && undo.lead.open_reminders?.length) {
-        await client.query(
-          `UPDATE lead_reminders SET status = 'open', completed_at = NULL, updated_at = NOW()
-            WHERE id = ANY($1::uuid[]) AND status = 'done'`,
-          [undo.lead.open_reminders]
-        );
-      }
-      if (leadRestored) {
-        await client.query(
-          `INSERT INTO lead_activities (lead_id, user_id, kind, from_value, to_value, note)
-           VALUES ($1::uuid, $2::uuid, 'status_change', 'converted', $3, $4)`,
-          [undo.lead.lead_id, me || null, bf.status, 'QR payment unlinked: it was not theirs']
-        );
-      }
-    }
+    const undo = (pay.link_undo ?? {}) as { lead?: LeadUndo; donor_was?: { name: string | null; phone: string | null } };
+    // Put the lead back - and the amount noted on the call, with its credit,
+    // when this payment had taken its place.
+    const leadRestored = undo.lead ? await restoreLead(client, undo.lead, me || null, 'QR payment unlinked: it was not theirs') : false;
 
     await client.query(
       `UPDATE qr_payments SET share_id = NULL, lead_id = NULL, person_id = NULL,

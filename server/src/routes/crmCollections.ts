@@ -33,7 +33,9 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
-import { recordCredit, reverseCredit, verifyCredit } from '../services/credits';
+import { recordCredit, reverseCredit, verifyCredit, type Credit } from '../services/credits';
+import { leadForPayer, leadBefore, restoreLead, type LeadUndo } from '../services/leadMoney';
+import { markLeadDonated } from './crmQr';
 import { parseDate, istDate } from '../bootTimezone';
 import { createOfflineDonation, type SiteKey } from '../services/hkmvClient';
 import { sendExport, formatFrom, describeFilters, EXPORT_ROW_CAP, type ExportFormat } from '../utils/export';
@@ -62,13 +64,16 @@ const SELECT = `
   u.name  AS caller_name,
   vu.name AS verified_by_name,
   col.donor_name, col.donor_phone, col.method, col.reference,
-  col.receipt_status, col.receipt_number, col.receipt_site, col.sevak_name
+  col.receipt_status, col.receipt_number, col.receipt_site, col.sevak_name,
+  col.donor_email, col.donor_pan, col.donor_address, col.purpose, col.receipt_error,
+  ld.name AS lead_name
 `;
 const JOINS = `
   FROM caller_credits c
   JOIN users u ON c.user_id = u.id
   LEFT JOIN users vu ON c.verified_by = vu.id
   LEFT JOIN collections col ON col.credit_id = c.id
+  LEFT JOIN leads ld ON ld.id = c.lead_id
 `;
 
 /**
@@ -104,21 +109,56 @@ router.post('/collections', async (req, res) => {
     // empty day and Monday as an extraordinary one.
     const when = parseDate(req.body?.at) ?? new Date().toISOString();
 
-    const credit = await recordCredit(
-      {
-        userId: forUser,
-        amount,
+    /* THE LEAD THIS MONEY IS FROM.
+     *
+     * Named by the screen, or found by the donor's number: a lead still being
+     * chased, or one marked "Donated now" on the call that is waiting for
+     * exactly this money. Either way the entry lands on the lead - the chase
+     * stops, and an amount said on the call is REPLACED by this one, not added
+     * to it (services/leadMoney.ts). Before, an entry touched no lead at all:
+     * the lead kept its own figure, and when the site's receipt for this money
+     * synced back, the lead was credited a second time for the same gift. */
+    const personId = str(req.body?.person_id, 36);
+    const askedLead = str(req.body?.lead_id, 36);
+    const leadId =
+      (askedLead && (await client.query(`SELECT id FROM leads WHERE id = $1`, [askedLead])).rows[0]?.id) ||
+      (await leadForPayer(client, { personId, phone: donorPhone }, when));
+    const note = str(req.body?.note, 300) ?? `${donorName}, collected by PhonePe`;
+
+    let credit: Credit | null = null;
+    let leadUndo: LeadUndo | null = null;
+    let replacedSaid: number | null | undefined;
+    let leadName: string | null = null;
+    if (leadId) {
+      leadUndo = await leadBefore(client, leadId);
+      const ld = (await client.query(`SELECT name, person_id FROM leads WHERE id = $1`, [leadId])).rows[0];
+      leadName = ld?.name ?? null;
+      const marked = await markLeadDonated(leadId, amount, note, client, forUser, {
         kind: 'offline',
-        occurredAt: when,
-        leadId: str(req.body?.lead_id, 36),
-        personId: str(req.body?.person_id, 36),
-        note: str(req.body?.note, 300) ?? `${donorName}, collected by PhonePe`,
-        createdBy: me,
-        // The one path that reports money rather than observing it.
         verified: false,
-      },
-      client
-    );
+        occurredAt: when,
+        personId: personId ?? ld?.person_id ?? undefined,
+        createdBy: me,
+      });
+      credit = marked.credit;
+      leadUndo.restored_credit = marked.replaced?.creditId ?? null;
+      replacedSaid = marked.replaced ? marked.replaced.said : undefined;
+    } else {
+      credit = await recordCredit(
+        {
+          userId: forUser,
+          amount,
+          kind: 'offline',
+          occurredAt: when,
+          personId,
+          note,
+          createdBy: me,
+          // The one path that reports money rather than observing it.
+          verified: false,
+        },
+        client
+      );
+    }
 
     if (!credit) {
       await client.query('ROLLBACK');
@@ -128,8 +168,8 @@ router.post('/collections', async (req, res) => {
     await client.query(
       `INSERT INTO collections
          (credit_id, donor_name, donor_phone, donor_email, donor_pan, donor_address,
-          purpose, method, reference, sevak_name, sevak_phone, recorded_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          purpose, method, reference, sevak_name, sevak_phone, recorded_by, lead_undo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)`,
       [
         credit.id,
         donorName,
@@ -149,11 +189,18 @@ router.post('/collections', async (req, res) => {
         str(req.body?.sevak_name, 160),
         phone10(req.body?.sevak_phone),
         me,
+        leadUndo ? JSON.stringify(leadUndo) : null,
       ]
     );
 
     await client.query('COMMIT');
-    res.status(201).json({ credit_id: credit.id, amount, occurred_at: credit.occurred_at });
+    res.status(201).json({
+      credit_id: credit.id,
+      amount,
+      occurred_at: credit.occurred_at,
+      // Which lead it landed on, and the amount said on the call it replaced.
+      lead: leadId ? { id: leadId, name: leadName, replaced_said: replacedSaid } : null,
+    });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.recordCollection error:', err);
@@ -302,17 +349,35 @@ router.post('/collections/:creditId/verify', authorize('admin', 'accountant'), a
  * at all - and reversing frees the evidence so the right person can claim it.
  */
 router.delete('/collections/:creditId', authorize('admin', 'accountant'), async (req, res) => {
+  const client = await pool.connect();
   try {
+    await client.query('BEGIN');
     const ok = await reverseCredit(
       String(req.params.creditId),
       req.user?.userId ?? '',
-      str(req.body?.reason, 300) ?? 'Not in the bank statement'
+      str(req.body?.reason, 300) ?? 'Not in the bank statement',
+      client
     );
-    if (!ok) return res.status(404).json({ error: 'Nothing to undo.' });
+    if (!ok) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Nothing to undo.' });
+    }
+    // The lead it landed on goes back to how it was - and the amount said on
+    // the call, which this entry had replaced, is counted again.
+    const col = await client.query(`SELECT lead_undo FROM collections WHERE credit_id = $1`, [req.params.creditId]);
+    const undo = col.rows[0]?.lead_undo as LeadUndo | null;
+    if (undo) {
+      await restoreLead(client, undo, req.user?.userId ?? null, 'PhonePe entry removed: not in the bank statement');
+      await client.query(`UPDATE collections SET lead_undo = NULL WHERE credit_id = $1`, [req.params.creditId]);
+    }
+    await client.query('COMMIT');
     res.json({ reversed: true });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
     console.error('crm.reverseCollection error:', err);
     res.status(500).json({ error: 'Could not undo. Try again.' });
+  } finally {
+    client.release();
   }
 });
 
@@ -350,6 +415,41 @@ router.post('/collections/:creditId/receipt', async (req, res) => {
     if (c.receipt_status === 'issued') {
       return res.status(409).json({ error: 'Receipt already issued.', receipt_number: c.receipt_number });
     }
+
+    /* WHAT THE RECEIPT DIALOG FILLED IN, saved before the receipt is raised.
+     *
+     * The UTR, PAN or address often only turns up when the receipt is asked
+     * for. The dialog shows the entry's details already filled and lets them
+     * be completed there, rather than sending the caller off to find another
+     * screen to edit the entry first. Only what was sent is changed. */
+    const b = req.body ?? {};
+    const patch: Record<string, string | null> = {};
+    if (b.reference !== undefined) patch.reference = str(b.reference, 80);
+    if (b.donor_name !== undefined && str(b.donor_name, 160)) patch.donor_name = str(b.donor_name, 160);
+    if (b.donor_phone !== undefined && phone10(b.donor_phone)) patch.donor_phone = phone10(b.donor_phone);
+    if (b.donor_email !== undefined) patch.donor_email = str(b.donor_email, 160);
+    if (b.donor_pan !== undefined) patch.donor_pan = (str(b.donor_pan, 12) ?? '').toUpperCase() || null;
+    if (b.donor_address !== undefined) patch.donor_address = str(b.donor_address, 400);
+    if (b.purpose !== undefined) patch.purpose = str(b.purpose, 120);
+    if (b.sevak_name !== undefined) patch.sevak_name = str(b.sevak_name, 160);
+    if (b.method !== undefined && str(b.method, 40)) patch.method = str(b.method, 40);
+    const keys = Object.keys(patch);
+    if (keys.length) {
+      await pool.query(
+        `UPDATE collections SET ${keys.map((k, i) => `${k} = $${i + 2}`).join(', ')} WHERE credit_id = $1`,
+        [c.credit_id, ...keys.map((k) => patch[k])]
+      );
+      Object.assign(c, patch);
+    }
+    // 80G is only sent with a PAN; "no 80G" sends the receipt without it.
+    const want80G = b.want_80g === undefined ? !!c.donor_pan : b.want_80g === true;
+    const wantPrasadam = b.want_prasadam === true;
+    if (want80G && !/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(String(c.donor_pan ?? ''))) {
+      return res.status(400).json({ error: 'Enter a valid PAN Number.' });
+    }
+    if ((want80G || wantPrasadam) && !c.donor_address) {
+      return res.status(400).json({ error: 'Enter the Address.' });
+    }
     if (!c.reference) {
       return res.status(400).json({
         error: 'Enter the Transaction ID (UTR) first.',
@@ -375,9 +475,9 @@ router.post('/collections/:creditId/receipt', async (req, res) => {
         referenceNo: c.reference,
         paymentDate: new Date(c.occurred_at).toISOString(),
         sevaName: c.purpose || undefined,
-        panNumber: c.donor_pan || undefined,
-        wantCertificate: !!c.donor_pan,
-        wantPrasadam: false,
+        panNumber: want80G ? c.donor_pan || undefined : undefined,
+        wantCertificate: want80G,
+        wantPrasadam,
         prasadamAddress: c.donor_address || undefined,
         sevakName: c.sevak_name || undefined,
         sevakMobile: c.sevak_phone || undefined,

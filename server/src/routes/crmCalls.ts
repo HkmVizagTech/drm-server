@@ -22,6 +22,7 @@ import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { recordCredit } from '../services/credits';
+import { leadMoneyState, restoreWordCredit } from '../services/leadMoney';
 import { markLeadDonated } from './crmQr';
 import { leadScopeFor } from './crm';
 import { FROM_DONATIONS_PAGE } from './crmLists';
@@ -342,6 +343,10 @@ router.post('/leads/:id/link-donation', async (req, res) => {
     let label: string;
     let otherPhone: string | null = null;
     let credited: { ok: boolean; already?: string | null } = { ok: false };
+    // The credit this link wrote, and the "Donated now" credit it replaced -
+    // both remembered so Undo puts the figures back exactly.
+    let creditId: string | null = null;
+    let restoredCredit: string | null = null;
 
     if (donationId) {
       const d = await client.query(
@@ -364,6 +369,9 @@ router.post('/leads/:id/link-donation', async (req, res) => {
       amount = Number(row.amount);
       at = row.created_at;
       otherPhone = String(row.donor_phone ?? '').replace(/\D/g, '').slice(-10) || null;
+      // Read before the lead is rewritten below: "Donated now" on the call
+      // and this donation are one gift, and the donation takes its place.
+      const word = await leadMoneyState(client, lead.id, { at });
       label = `₹${amount.toLocaleString('en-IN')} by ${row.donor_name ?? 'someone'}${otherPhone ? ` (${otherPhone})` : ''}${row.receipt_number ? `, receipt ${row.receipt_number}` : ''}`;
 
       await client.query(
@@ -378,11 +386,22 @@ router.post('/leads/:id/link-donation', async (req, res) => {
          WHERE id = $1`,
         [lead.id, donationId, amount, at, `Gave from another number: ${label}`, creditTo]
       );
+      let creditFor = creditTo;
+      if (word?.sameGift && word.wordCredit) {
+        await client.query(
+          `UPDATE caller_credits SET status = 'reversed', reversed_at = NOW(), reversed_by = $2::uuid,
+                  reversed_reason = 'Replaced by the real payment'
+            WHERE id = $1 AND status = 'active'`,
+          [word.wordCredit.id, me]
+        );
+        restoredCredit = word.wordCredit.id;
+        creditFor = creditFor ?? word.wordCredit.user_id;
+      }
       if (row.credited_to) credited = { ok: false, already: row.credited_to };
-      else if (creditTo && amount > 0) {
+      else if (creditFor && amount > 0) {
         const c = await recordCredit(
           {
-            userId: creditTo,
+            userId: creditFor,
             amount,
             kind: 'lead',
             occurredAt: at,
@@ -395,6 +414,7 @@ router.post('/leads/:id/link-donation', async (req, res) => {
           client
         );
         credited = c ? { ok: true } : { ok: false, already: 'somebody else' };
+        creditId = c?.id ?? null;
       }
     } else {
       const p = await client.query(
@@ -418,11 +438,14 @@ router.post('/leads/:id/link-donation', async (req, res) => {
       otherPhone = row.payer_phone ?? null;
       label = `₹${amount.toLocaleString('en-IN')} by QR from ${row.payer_name ?? row.payer_vpa ?? 'an unknown payer'}`;
       // The credit goes through markLeadDonated only when nobody has it yet.
-      await markLeadDonated(lead.id, amount, `Gave from another number: ${label}`, client, row.credited_to ? null : creditTo, {
+      const marked = await markLeadDonated(lead.id, amount, `Gave from another number: ${label}`, client, row.credited_to ? null : creditTo, {
         qrPaymentId: row.id,
         personId: lead.person_id ?? undefined,
         occurredAt: at,
+        createdBy: me,
       });
+      creditId = marked.credit?.id ?? null;
+      restoredCredit = marked.replaced?.creditId ?? null;
       await client.query(`UPDATE leads SET converted_via = 'linked', converted_at = $2::timestamptz WHERE id = $1`, [lead.id, at]);
       // On the payment too, so the QR payments screen shows who it was and
       // stops listing it as "Not linked".
@@ -460,6 +483,8 @@ router.post('/leads/:id/link-donation', async (req, res) => {
           before: before.rows[0],
           donation_id: donationId,
           qr_payment_id: qrId,
+          credit_id: creditId,
+          restored_credit: restoredCredit,
           closed_reminders: closed.rows.map((r) => r.id),
           set_alt_phone: !before.rows[0].alt_phone,
         }),
@@ -505,6 +530,8 @@ router.post('/link-donation/:activityId/undo', async (req, res) => {
       before: Record<string, unknown>;
       donation_id: string | null;
       qr_payment_id: string | null;
+      credit_id?: string | null;
+      restored_credit?: string | null;
       closed_reminders: string[];
       set_alt_phone: boolean;
     };
@@ -524,6 +551,14 @@ router.post('/link-donation/:activityId/undo', async (req, res) => {
       ]
     );
     const by = req.user?.userId ?? '';
+    if (u.credit_id) {
+      await client.query(
+        `UPDATE caller_credits SET status = 'reversed', reversed_at = NOW(), reversed_by = $2::uuid,
+                reversed_reason = 'Link undone'
+          WHERE id = $1 AND status = 'active'`,
+        [u.credit_id, by || null]
+      );
+    }
     if (u.donation_id) {
       await client.query(
         `UPDATE caller_credits SET status = 'reversed', reversed_at = NOW(), reversed_by = $3::uuid,
@@ -552,6 +587,8 @@ router.post('/link-donation/:activityId/undo', async (req, res) => {
         [u.closed_reminders]
       );
     }
+    // The "Donated now" credit this donation had replaced comes back with the lead.
+    await restoreWordCredit(client, u.restored_credit);
     // markLeadDonated writes its own status_change row; it goes with the link.
     await client.query(
       `DELETE FROM lead_activities WHERE lead_id = $1 AND kind = 'status_change'

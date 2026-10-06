@@ -241,13 +241,24 @@ function WhoPaid({
     setError(null);
     try {
       const body = adding ? { kind: "new", name: name.trim(), phone: typed } : { kind: chosen!.kind, id: chosen!.id };
-      const r = await apiClient.post<{ name: string | null; existing: boolean; counted_for: string | null }>(
-        `/api/crm/qr/payments/${payment.id}/link`,
-        body
-      );
+      const r = await apiClient.post<{
+        name: string | null;
+        existing: boolean;
+        counted_for: string | null;
+        kind?: string;
+        replaced_said?: number | null;
+      }>(`/api/crm/qr/payments/${payment.id}/link`, body);
+      // "Donated now" on the call was this same money: said, so nobody adds it again.
+      const once =
+        r.replaced_said !== undefined
+          ? r.replaced_said !== null && Number(r.replaced_said) !== Number(payment.amount)
+            ? ` Counted once: ${currency(Number(payment.amount))} in place of the ${currency(Number(r.replaced_said))} noted on the call.`
+            : " Counted once with the gift noted on the call."
+          : "";
       onLinked(
-        `Linked to ${r.name ?? "the donor"}${r.existing ? " (already in DRM)" : ""}.` +
-          (r.counted_for ? ` Counted for ${r.counted_for}.` : "")
+        `Linked to ${r.name ?? "the donor"}${r.kind === "lead" && body.kind !== "lead" ? " (their lead)" : r.existing ? " (already in DRM)" : ""}.` +
+          (r.counted_for ? ` Counted for ${r.counted_for}.` : "") +
+          once
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not link. Try again.");

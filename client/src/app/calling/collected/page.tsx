@@ -55,6 +55,7 @@ import {
   Toolbar,
 } from "@/components/ui";
 import { ExportButton } from "@/components/export-button";
+import { DonorFields, emptyReceipt, receiptProblems, type ReceiptValues } from "@/components/receipts/receipt-form";
 
 interface Collection {
   /** The credit id. Every action on this screen is addressed to it. */
@@ -74,6 +75,13 @@ interface Collection {
   receipt_number: string | null;
   receipt_site: string | null;
   sevak_name: string | null;
+  donor_email?: string | null;
+  donor_pan?: string | null;
+  donor_address?: string | null;
+  purpose?: string | null;
+  receipt_error?: string | null;
+  /** The lead this payment landed on, when it was from one. */
+  lead_name?: string | null;
 }
 
 interface CollectionsResponse {
@@ -101,10 +109,6 @@ const METHODS = [
   { value: "cheque", label: "Cheque" },
 ];
 
-const SITES = [
-  { value: "hkmv", label: "harekrishnavizag.org" },
-  { value: "annadan", label: "annadan" },
-];
 
 const CREDITABLE = ["caller", "admin", "accountant"];
 
@@ -382,6 +386,7 @@ export default function CollectedByHandPage() {
                       <span className="block text-xs tabular-nums text-ink-muted">{c.donor_phone}</span>
                     )}
                     {c.sevak_name && <span className="block text-2xs text-ink-faint">On the name of {c.sevak_name}</span>}
+                    {c.lead_name && <span className="block text-2xs text-good">Lead: {c.lead_name} · Donated</span>}
                   </Td>
                   <Td align="right" className="whitespace-nowrap font-medium tabular-nums text-ink">
                     {currency(Number(c.amount))}
@@ -458,10 +463,12 @@ export default function CollectedByHandPage() {
       {recording && (
         <RecordDialog
           onClose={() => setRecording(false)}
-          onDone={async (what) => {
+          onDone={async (what, sendFor) => {
             setRecording(false);
             setNotice(what);
             await load();
+            // "Save & send receipt": straight on to the receipt, filled in.
+            if (sendFor) setReceipting(sendFor);
           }}
         />
       )}
@@ -574,7 +581,7 @@ function RecordDialog({
   onDone,
 }: {
   onClose: () => void;
-  onDone: (notice: string) => Promise<void> | void;
+  onDone: (notice: string, sendReceiptFor?: Collection) => Promise<void> | void;
 }) {
   const [amount, setAmount] = useState("");
   const [donorName, setDonorName] = useState("");
@@ -594,6 +601,104 @@ function RecordDialog({
 
   const phoneDigits = donorPhone.replace(/\D/g, "");
   const ready = Number(amount) > 0 && donorName.trim().length > 0 && phoneDigits.length >= 10;
+  const [known, setKnown] = useState<string | null>(null);
+
+  // A donor DRM already knows fills themselves in - only blanks, never over
+  // what was typed. Same lookup as the other receipt forms.
+  const mobile10 = phoneDigits.slice(-10);
+  useEffect(() => {
+    if (mobile10.length !== 10) return;
+    let live = true;
+    const t = window.setTimeout(async () => {
+      try {
+        const r = await apiClient.get<{ people: Record<string, unknown>[] }>(
+          `/api/people?search=${encodeURIComponent(mobile10)}&limit=1`
+        );
+        const p = r.people?.[0];
+        if (!live) return;
+        setKnown(p ? "Known donor - details filled in" : null);
+        if (!p) return;
+        setDonorName((x) => x || String(p.name ?? ""));
+        setDonorEmail((x) => x || String(p.email ?? ""));
+        setDonorPan((x) => x || String(p.pan ?? ""));
+        setDonorAddress((x) => x || String(p.prasadam_address ?? p.address ?? ""));
+      } catch {
+        /* a convenience; the form works without it */
+      }
+    }, 300);
+    return () => {
+      live = false;
+      window.clearTimeout(t);
+    };
+  }, [mobile10]);
+
+  async function save(thenReceipt: boolean) {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await apiClient.post<{
+        credit_id: string;
+        occurred_at: string;
+        lead: { id: string; name: string | null; replaced_said?: number | null } | null;
+      }>("/api/crm/collections", {
+        amount: Number(amount),
+        donor_name: donorName.trim(),
+        donor_phone: phoneDigits,
+        donor_email: donorEmail.trim() || undefined,
+        donor_pan: donorPan.trim() || undefined,
+        donor_address: donorAddress.trim() || undefined,
+        purpose: purpose.trim() || undefined,
+        method,
+        reference: reference.trim() || undefined,
+        sevak_name: sevakName.trim() || undefined,
+        // A bare YYYY-MM-DD, sent as the input gave it. The server
+        // anchors it at IST midnight; wrapping it in a Date here
+        // would read it in the browser's zone and book a Friday
+        // collection on Thursday for anyone west of the temple.
+        at,
+        note: note.trim() || undefined,
+      });
+      const amt = currency(Number(amount));
+      const who = donorName.trim();
+      // Said plainly when it landed on a lead, and when it took the place of
+      // the amount noted on the call - so nobody adds it a second time.
+      const onLead = r.lead
+        ? r.lead.replaced_said !== undefined && r.lead.replaced_said !== null
+          ? ` Counted once with the ${currency(Number(r.lead.replaced_said))} noted on the call.`
+          : ` ${r.lead.name ?? "Their lead"} is marked Donated.`
+        : "";
+      const notice = `${amt} from ${who} saved.${onLead}${reference.trim() ? "" : " Add the UTR later."}`;
+      await onDone(
+        notice,
+        thenReceipt
+          ? {
+              id: r.credit_id,
+              amount: String(Number(amount)),
+              occurred_at: r.occurred_at,
+              note: null,
+              verified_at: null,
+              caller_name: "",
+              verified_by_name: null,
+              donor_name: who,
+              donor_phone: phoneDigits.slice(-10),
+              method,
+              reference: reference.trim() || null,
+              receipt_status: null,
+              receipt_number: null,
+              receipt_site: null,
+              sevak_name: sevakName.trim() || null,
+              donor_email: donorEmail.trim() || null,
+              donor_pan: donorPan.trim() || null,
+              donor_address: donorAddress.trim() || null,
+              purpose: purpose.trim() || null,
+            }
+          : undefined
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save. Try again.");
+      setBusy(false);
+    }
+  }
 
   return (
     <Modal
@@ -604,44 +709,16 @@ function RecordDialog({
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button
-            loading={busy}
-            disabled={!ready}
-            onClick={async () => {
-              setBusy(true);
-              setError(null);
-              try {
-                await apiClient.post("/api/crm/collections", {
-                  amount: Number(amount),
-                  donor_name: donorName.trim(),
-                  donor_phone: phoneDigits,
-                  donor_email: donorEmail.trim() || undefined,
-                  donor_pan: donorPan.trim() || undefined,
-                  donor_address: donorAddress.trim() || undefined,
-                  purpose: purpose.trim() || undefined,
-                  method,
-                  reference: reference.trim() || undefined,
-                  sevak_name: sevakName.trim() || undefined,
-                  // A bare YYYY-MM-DD, sent as the input gave it. The server
-                  // anchors it at IST midnight; wrapping it in a Date here
-                  // would read it in the browser's zone and book a Friday
-                  // collection on Thursday for anyone west of the temple.
-                  at,
-                  note: note.trim() || undefined,
-                });
-                await onDone(
-                  reference.trim()
-                    ? `${currency(Number(amount))} from ${donorName.trim()} saved.`
-                    : `${currency(Number(amount))} from ${donorName.trim()} saved. Add the UTR later.`
-                );
-              } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not save. Try again.");
-                setBusy(false);
-              }
-            }}
-          >
+          <Button variant={reference.trim() ? "secondary" : "primary"} loading={busy} disabled={!ready} onClick={() => save(false)}>
             Save
           </Button>
+          {/* One step when the UTR is in hand: save, then the receipt form
+              opens already filled in. */}
+          {reference.trim() && (
+            <Button loading={busy} disabled={!ready} onClick={() => save(true)}>
+              Save &amp; send receipt
+            </Button>
+          )}
         </>
       }
     >
@@ -666,7 +743,7 @@ function RecordDialog({
         <Field label="Donor Name" htmlFor="col-name" required>
           <Input id="col-name" value={donorName} onChange={(e) => setDonorName(e.target.value)} />
         </Field>
-        <Field label="Mobile Number" htmlFor="col-phone" required>
+        <Field label="Mobile Number" htmlFor="col-phone" required hint={known ?? undefined}>
           <Input
             id="col-phone"
             value={donorPhone}
@@ -760,10 +837,67 @@ function ReceiptDialog({
   onClose: () => void;
   onDone: (notice: string) => Promise<void> | void;
 }) {
-  const [site, setSite] = useState(collection.receipt_site ?? "hkmv");
+  // The entry's own details, filled in - the caller only completes what is
+  // missing (often just the UTR or the PAN) and presses Send. Same form as a
+  // QR payment's receipt, so both look and work the same.
+  const [v, setV] = useState<ReceiptValues>(() => ({
+    ...emptyReceipt(),
+    donorName: collection.donor_name ?? "",
+    mobile: collection.donor_phone ?? "",
+    email: collection.donor_email ?? "",
+    seva: collection.purpose ?? "",
+    onNameOf: collection.sevak_name ?? "",
+    pan: collection.donor_pan ?? "",
+    want80G: !!collection.donor_pan,
+    address: collection.donor_address ?? "",
+    site: (collection.receipt_site as ReceiptValues["site"]) || "hkmv",
+  }));
+  const set = (patch: Partial<ReceiptValues>) => setV((x) => ({ ...x, ...patch }));
+  const [reference, setReference] = useState(collection.reference ?? "");
+  const [method, setMethod] = useState(collection.method ?? "upi");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const blocked = !collection.reference;
+  const [shown, setShown] = useState(false);
+  const [error, setError] = useState<string | null>(collection.receipt_error ?? null);
+
+  const problem = !reference.trim()
+    ? method === "cheque"
+      ? "Enter the Cheque No."
+      : "Enter the Transaction ID (UTR)."
+    : receiptProblems(v, { needSite: true });
+
+  async function send() {
+    setShown(true);
+    if (problem) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await apiClient.post<{ receipt_status: string; receipt_number?: string }>(
+        `/api/crm/collections/${collection.id}/receipt`,
+        {
+          site: v.site,
+          reference: reference.trim(),
+          method,
+          donor_name: v.donorName.trim(),
+          donor_phone: v.mobile.replace(/\D/g, "").slice(-10),
+          donor_email: v.email.trim(),
+          donor_pan: v.want80G ? v.pan.trim() : undefined,
+          donor_address: v.address.trim(),
+          purpose: v.seva.trim(),
+          sevak_name: v.onNameOf.trim(),
+          want_80g: v.want80G,
+          want_prasadam: v.wantPrasadam,
+        }
+      );
+      await onDone(
+        r.receipt_number
+          ? `Receipt No. ${r.receipt_number} sent for ${currency(Number(collection.amount))}.`
+          : `Receipt: ${r.receipt_status}.`
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not send receipt. Try again.");
+      setBusy(false);
+    }
+  }
 
   return (
     <Modal
@@ -774,63 +908,43 @@ function ReceiptDialog({
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button
-            loading={busy}
-            disabled={blocked}
-            onClick={async () => {
-              setBusy(true);
-              setError(null);
-              try {
-                const r = await apiClient.post<{ receipt_status: string; receipt_number?: string }>(
-                  `/api/crm/collections/${collection.id}/receipt`,
-                  { site }
-                );
-                await onDone(
-                  r.receipt_number
-                    ? `Receipt No. ${r.receipt_number} sent for ${currency(Number(collection.amount))}.`
-                    : `Receipt: ${r.receipt_status}.`
-                );
-              } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not send receipt. Try again.");
-                setBusy(false);
-              }
-            }}
-          >
+          <Button loading={busy} onClick={send}>
             Send receipt
           </Button>
         </>
       }
     >
       {error && <Alert tone="danger">{error}</Alert>}
+      {shown && problem && <Alert tone="warn">{problem}</Alert>}
 
-      {blocked ? (
-        <Alert tone="warn">No UTR yet. Add the UTR first.</Alert>
-      ) : (
-        <Alert tone="warn">This cannot be undone. The donor gets the receipt by e-mail.</Alert>
-      )}
+      <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2 rounded-card bg-sunken/60 px-3 py-2 text-sm">
+        <span className="font-semibold tabular-nums text-ink">{currency(Number(collection.amount))}</span>
+        <span className="text-ink-muted">{dateTime(collection.occurred_at)}</span>
+      </div>
 
-      <dl className="mb-4 grid gap-2 text-sm sm:grid-cols-2">
-        <div>
-          <dt className="text-xs text-ink-muted">Donor</dt>
-          <dd className="text-ink">{collection.donor_name ?? "—"}</dd>
-        </div>
-        <div>
-          <dt className="text-xs text-ink-muted">Amount</dt>
-          <dd className="font-medium tabular-nums text-ink">{currency(Number(collection.amount))}</dd>
-        </div>
-        <div>
-          <dt className="text-xs text-ink-muted">Date</dt>
-          <dd className="text-ink">{dateTime(collection.occurred_at)}</dd>
-        </div>
-        <div>
-          <dt className="text-xs text-ink-muted">UTR / Cheque No.</dt>
-          <dd className="tabular-nums text-ink">{collection.reference ?? "—"}</dd>
-        </div>
-      </dl>
+      <div className="mb-4 grid gap-3 sm:grid-cols-2">
+        <Field label="Paid by">
+          <Select value={method} onChange={setMethod} ariaLabel="Paid by" options={METHODS} />
+        </Field>
+        <Field
+          label={method === "cheque" ? "Cheque No." : "Transaction ID (UTR)"}
+          htmlFor="rc-ref"
+          required
+          hint={method === "cheque" ? undefined : "12 digits on the PhonePe screen"}
+        >
+          <Input
+            id="rc-ref"
+            value={reference}
+            onChange={(e) => setReference(e.target.value)}
+            placeholder={method === "cheque" ? "Cheque No." : "e.g. 431802274915"}
+            className="tabular-nums"
+          />
+        </Field>
+      </div>
 
-      <Field label="Site">
-        <Select value={site} onChange={setSite} ariaLabel="Site" options={SITES} disabled={blocked} />
-      </Field>
+      <DonorFields v={v} set={set} showPrasadam showSite showMyDonor={false} />
+
+      <p className="mt-4 text-xs text-ink-muted">This cannot be undone. The donor gets the receipt by e-mail.</p>
     </Modal>
   );
 }
