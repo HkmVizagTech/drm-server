@@ -21,7 +21,8 @@
     "test:onegift": "tsx scripts/test-one-gift.ts",
     "test:sankalpam": "tsx scripts/test-sankalpam.ts",
     "test:names": "tsx scripts/test-donor-names.ts",
-    "test:backfill": "tsx scripts/test-names-backfill.ts"
+    "test:backfill": "tsx scripts/test-names-backfill.ts",
+    "test:webhook": "tsx scripts/test-webhook-sync.ts"
   },
   "keywords": [],
   "author": "",
