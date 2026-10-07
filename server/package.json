@@ -19,7 +19,8 @@
     "test:payloads": "tsx scripts/test-site-payloads.ts",
     "test:qrlink": "tsx scripts/test-qr-link.ts",
     "test:onegift": "tsx scripts/test-one-gift.ts",
-    "test:sankalpam": "tsx scripts/test-sankalpam.ts"
+    "test:sankalpam": "tsx scripts/test-sankalpam.ts",
+    "test:names": "tsx scripts/test-donor-names.ts"
   },
   "keywords": [],
   "author": "",

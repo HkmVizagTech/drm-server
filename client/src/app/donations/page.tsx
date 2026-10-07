@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState, FormEvent } from "react";
 import Link from "next/link";
-import { apiClient } from "@/lib/api";
+import { apiClient, isAbort } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { clockTime, currency, dateTime, number, shortDate, titleCase } from "@/lib/format";
 import { SourceCell, siteLabel } from "@/components/source";
@@ -253,10 +253,27 @@ export default function DonationsPage() {
     if (value) setPeriod("");
   };
 
+  /**
+   * Load the list, cancelling whatever load was already in flight.
+   *
+   * WHY THE ABORT MATTERS HERE
+   * Typing in the search box fires a request every 300ms, and nothing
+   * guarantees the answers come back in the order they were asked. Searching
+   * "gi" -> "gir" -> "giri" could settle on the results for "gir" if that
+   * query happened to be the slow one, because each .then() wrote into the
+   * same state with no idea whether it was still the current question. The
+   * screen then showed rows that matched nothing in the box, which reads as
+   * data corruption rather than as a race.
+   *
+   * Aborting is better than the usual `cancelled` flag for this: the flag only
+   * stops the write, while this also tears down the connection, so a fast
+   * typist stops holding open six queries the server is still running.
+   */
   const fetchDonations = useCallback(() => {
+    const controller = new AbortController();
     setLoading(true);
     apiClient
-      .get<DonationsResponse>(`/api/donations?${filterParams()}`)
+      .get<DonationsResponse>(`/api/donations?${filterParams()}`, { signal: controller.signal })
       .then((d) => {
         setData(d);
         setLoadError(null);
@@ -265,8 +282,21 @@ export default function DonationsPage() {
       // said "no records" when the truth was "the server refused", or "the
       // server broke" - indistinguishable to anybody without DevTools open,
       // and the reason a permissions bug can sit unnoticed for weeks.
-      .catch((e) => setLoadError(e instanceof Error ? e.message : "Could not load this list"))
-      .finally(() => setLoading(false));
+      //
+      // A cancelled request is not one of those. It is this component throwing
+      // away its own question, so it must not paint an error over the answer
+      // to the question that replaced it.
+      .catch((e) => {
+        if (isAbort(e)) return;
+        setLoadError(e instanceof Error ? e.message : "Could not load this list");
+      })
+      .finally(() => {
+        // Equally: the superseded request must not clear the spinner that the
+        // request replacing it just turned on, or the screen flashes "no
+        // records" between every keystroke.
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
   }, [filterParams]);
 
   useEffect(fetchDonations, [fetchDonations]);

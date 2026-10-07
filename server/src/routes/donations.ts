@@ -15,6 +15,7 @@ import {
 import { upsertDonorSnapshot } from '../services/hkmvSync';
 import { canonPage, canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 import { displayPurposeSql } from '../utils/donationLabel';
+import { registerName } from '../services/personNames';
 import {
   describeFilters,
   sendExport,
@@ -191,7 +192,23 @@ function buildDonationFilters(q: Record<string, unknown>): DonationFilters {
     idx++;
   }
   if (search) {
-    conditions.push(`(p.name ILIKE $${idx} OR p.phone ILIKE $${idx} OR d.receipt_number ILIKE $${idx})`);
+    // Searching a name has to find the gift made under it, not only the donor
+    // whose record carries it. Before person_names, typing a mother's name
+    // returned nothing at all - her daughter's phone was filed under the
+    // daughter, and the mother existed only as an overwritten string.
+    //
+    // Three places a name can live, so all three are matched: the donor
+    // record, the name written on the donation, and the roster of every name
+    // this phone has given under.
+    conditions.push(`(
+      p.name ILIKE $${idx}
+      OR p.phone ILIKE $${idx}
+      OR d.receipt_number ILIKE $${idx}
+      OR d.given_name ILIKE $${idx}
+      OR d.sevak_name ILIKE $${idx}
+      OR EXISTS (SELECT 1 FROM person_names pn
+                  WHERE pn.person_id = p.id AND pn.name ILIKE $${idx})
+    )`);
     values.push(`%${search}%`);
     idx++;
   }
@@ -225,7 +242,26 @@ function buildDonationFilters(q: Record<string, unknown>): DonationFilters {
 // display_purpose alongside the raw purpose, never instead of it: the table
 // shows the readable label while the filters, the exports and anything
 // reconciled against the source site keep the value that site sent.
-const DONATION_SELECT = `d.*, p.name as donor_name, p.phone as donor_phone,
+/* ADDITIVE ONLY. `donor_name` STILL MEANS WHAT IT ALWAYS MEANT.
+
+   Other applications read this endpoint, so the existing fields keep their
+   existing meaning exactly: donor_name is the donor record's name, as it has
+   always been, and a caller that knows nothing about any of this sees no
+   change at all.
+
+   The new fact goes in a NEW field. `given_name` is the name the gift was
+   actually given under, and it is NULL on every donation taken before the
+   column existed - which is most of them, and honestly so: there is no record
+   of what was typed then, and inventing one would be worse than admitting it.
+
+   A screen that wants the richer answer reads `given_name ?? donor_name`. A
+   consumer that does not care carries on reading donor_name and is unaffected.
+
+   An earlier version of this changed donor_name itself to COALESCE over the
+   two. That was wrong for an API somebody else depends on: it is a silent
+   change of meaning in a field that already had one, and the consumer finds
+   out from a mismatched report rather than from an error. */
+const DONATION_SELECT = `d.*, p.name AS donor_name, p.phone as donor_phone,
               ${displayPurposeSql('d.purpose', 'd.source_page')} AS display_purpose`;
 
 const DONATION_FROM = `FROM donations d JOIN people p ON d.person_id = p.id`;
@@ -501,6 +537,22 @@ router.post('/offline', async (req, res) => {
   const sevakName = String(sevak_name || '').trim().slice(0, 160) || null;
   const sevakMobile = String(sevak_phone || '').trim().slice(0, 15) || null;
 
+  /* The 80G certificate goes out in the Donor Name, as it always has.
+
+     That is already the right answer, because the form asks for the two names
+     separately and has done since it was written:
+
+       Donor Name        -> who the gift is from, and whose 80G it is
+       "On the name of"  -> who it is offered for
+
+     A daughter giving in her mother's name fills in both, and the certificate
+     is hers while the paper still says it was offered for her mother. Nothing
+     here needs to guess, and an earlier version of this comment described code
+     that did - it compared the PAN given against the PAN on file and quietly
+     substituted the donor on record. That overruled the one person who had
+     actually asked the donor whose certificate it is. It is gone. */
+  const typedName = String(donor_name).trim();
+
   // Who is recording this, for the audit trail and for the note that shows on
   // the source site's own record.
   let enteredByName: string | null = null;
@@ -512,7 +564,7 @@ router.post('/offline', async (req, res) => {
   let issued;
   try {
     issued = await createOfflineDonation(siteKey, {
-      donorName: String(donor_name).trim(),
+      donorName: typedName,
       donorMobile: String(donor_mobile).trim(),
       donorEmail: donor_email ? String(donor_email).trim() : null,
       amount: amt,
@@ -579,6 +631,27 @@ router.post('/offline', async (req, res) => {
         )
         .catch((e) => console.error('donations.offline donor fill failed (non-fatal):', (e as Error).message));
 
+      /* The name this gift came under joins the donor's list of names.
+
+         Without this the roster only ever learns from the websites, and a
+         family that gives at the counter - which is most of this route's
+         traffic - would never appear on it. registerName gives the primary
+         slot to whichever real name arrived first and never takes it back, so
+         calling it here cannot rename anybody. */
+      /* Both names join this number's list.
+
+         The donor's own name takes the primary slot if nothing holds it yet.
+         The "on the name of" name - the mother, the father, the child the seva
+         was offered for - joins as one of the family names, which is exactly
+         what the list is for. registerName never moves a primary that is
+         already set, so neither call can rename anybody. */
+      await Promise.all([
+        registerName(pool, result.personId, typedName, 'drm'),
+        sevakName ? registerName(pool, result.personId, sevakName, 'drm') : Promise.resolve(null),
+      ]).catch((e) =>
+        console.error('donations.offline could not record the donor names:', (e as Error).message)
+      );
+
       if (issued.externalId) {
         // Also correct what the sync path cannot know. upsertDonation writes a
         // fixed payment_mode of 'upi' because that is what the overwhelming
@@ -600,7 +673,10 @@ router.post('/offline', async (req, res) => {
              payment_mode = $4,
              payment_ref  = COALESCE(payment_ref, $5),
              sevak_name   = COALESCE($6, sevak_name),
-             sevak_phone  = COALESCE($7, sevak_phone)
+             sevak_phone  = COALESCE($7, sevak_phone),
+             -- The name this gift was given under, which is NOT necessarily
+             -- the name on the certificate - see the block above.
+             given_name   = COALESCE(given_name, $8)
            WHERE external_ref = $2 AND person_id = $3
            RETURNING id`,
           [
@@ -611,6 +687,7 @@ router.post('/offline', async (req, res) => {
             ref,
             sevakName,
             sevakMobile,
+            typedName || null,
           ]
         );
         synced = (marked.rowCount ?? 0) > 0;
@@ -640,17 +717,28 @@ router.post('/sync', async (req, res) => {
 
   for (const d of donations) {
     // Upsert person by phone, then insert donation
+    /* THE NAME IS NOT OVERWRITTEN HERE ANY MORE.
+
+       This used to be `DO UPDATE SET name = EXCLUDED.name`, which meant the
+       second gift from a phone renamed the donor - silently, with nothing
+       kept. A family giving in three names ended up as whoever gave last.
+
+       Now the donor record keeps the name it has, the gift records the name it
+       was given under, and person_names holds the list. */
     const person = await pool.query(
       `INSERT INTO people (name, phone, email)
        VALUES ($1, $2, $3)
-       ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name, email = COALESCE(EXCLUDED.email, people.email)
+       ON CONFLICT (phone) DO UPDATE SET email = COALESCE(EXCLUDED.email, people.email)
        RETURNING id`,
       [d.name, d.phone, d.email]
     );
+    const personId = person.rows[0].id;
+    await registerName(pool, personId, d.name, 'drm');
     const donation = await pool.query(
-      `INSERT INTO donations (person_id, amount, type, purpose, payment_mode, source)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [person.rows[0].id, d.amount, d.type || 'one-time', d.purpose, d.payment_mode, d.source]
+      `INSERT INTO donations (person_id, amount, type, purpose, payment_mode, source, given_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [personId, d.amount, d.type || 'one-time', d.purpose, d.payment_mode, d.source,
+       String(d.name ?? '').trim() || null]
     );
     results.push(donation.rows[0]);
   }

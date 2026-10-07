@@ -2174,3 +2174,138 @@ CREATE TABLE IF NOT EXISTS sankalpam_sends (
   done_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (date_id, year)
 );
+
+
+/* =========================================================================
+   ONE PHONE, ONE DONOR, MANY NAMES
+   =========================================================================
+
+   THE SITUATION THIS EXISTS FOR
+   A donor gives once in her own name. Months later she gives again from the
+   same phone, in her mother's name, because the seva is offered for her
+   mother. It is one donor, one relationship and one phone number - and two
+   names, both of them real.
+
+   WHAT USED TO HAPPEN
+   `people.phone` is UNIQUE, so the donor id was already stable - that part was
+   never broken. The name was. Two paths disagreed about what to do with the
+   second name, and both lost it:
+
+     - routes/donations.ts did `ON CONFLICT (phone) DO UPDATE SET name =
+       EXCLUDED.name`. The mother's name simply replaced the daughter's, with
+       no record that the daughter had ever been called anything else.
+     - services/hkmvSync.ts was more careful - decideName() kept the loser in
+       people.name_alt and raised a flag on the "Name mismatches" screen. But
+       name_alt holds exactly ONE name, so a third name evicted the second, and
+       the flag framed a normal family donation as an error for staff to
+       resolve.
+
+   Neither is right, because neither is a disagreement. Nobody is wrong about
+   this donor's name. A phone number in an Indian household belongs to a
+   family, and the temple receives money from that family under whichever name
+   the occasion calls for.
+
+   SO: the names become a list, and the donation records which one it was made
+   under.
+
+   WHY donations.given_name AND NOT JUST THE JOIN
+   The donations list reads `p.name AS donor_name` - a live join - so the name
+   shown against a gift made in March is whatever the person is called today.
+   Correct a spelling and three years of history quietly re-label themselves.
+   That is the same mistake caller_credits was built to avoid: a fact about the
+   past has to be written down when it happens, not re-derived from a row that
+   keeps moving. given_name is that written fact.
+
+   It is nullable, and nothing backfills it. A donation taken before this
+   existed has no honest answer - we know what the donor is called NOW, not
+   what was typed then - so reads fall back to the join with
+   it stays NULL, and only rows taken from here on assert anything. The
+   donor_name field on the API keeps its existing meaning; this arrives beside
+   it as given_name.
+   ========================================================================= */
+
+-- The name a donation was actually given under. Written once, at creation.
+--
+-- NAMED given_name, NOT donor_name, AND THAT IS DELIBERATE. The donations list
+-- selects `d.*` and then `p.name AS donor_name`; a column called donor_name on
+-- donations would collide with that alias, and which of the two a client got
+-- would rest on the order pg happens to assign duplicate field names. Other
+-- applications read that endpoint. A field whose meaning rests on that is a
+-- field that will mean something else one day.
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS given_name VARCHAR(255);
+
+CREATE TABLE IF NOT EXISTS person_names (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  person_id UUID NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+
+  -- As it should be shown: the spelling a human would recognise.
+  name VARCHAR(255) NOT NULL,
+
+  /* The same name, flattened, so "RAVI  DAS" and "Ravi Das" are one entry
+     rather than two. Stored rather than computed in the index because every
+     read path needs to match against it the same way, and a function index
+     that one query forgets to mirror is how duplicates get in. */
+  name_key VARCHAR(255) NOT NULL,
+
+  /* The donor's own name - the one the relationship is in, and the one the
+     calling team should greet them by. The FIRST name seen for this phone,
+     not the most recent: a family member's name must never take over the
+     record just by being newer. */
+  is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+
+  -- Where this name came from: hkmv, annadan, drm, import, qr.
+  source VARCHAR(20),
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  UNIQUE (person_id, name_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_person_names_person ON person_names(person_id);
+-- Searching "giri" has to find the family member as well as the account
+-- holder, so this index carries the flattened form the search matches on.
+CREATE INDEX IF NOT EXISTS idx_person_names_key ON person_names(name_key varchar_pattern_ops);
+
+/* Exactly one primary per person, enforced rather than trusted. Without this
+   a retry or a concurrent webhook can leave two rows claiming to be the
+   donor's own name, and every screen then picks whichever the planner
+   returned first. */
+CREATE UNIQUE INDEX IF NOT EXISTS uq_person_names_primary
+  ON person_names(person_id) WHERE is_primary;
+
+/* ---------------------------------------------------------------- backfill
+
+   Idempotent: ON CONFLICT DO NOTHING on (person_id, name_key), so re-running
+   schema.sql adds nothing and the uniqueness above cannot be violated.
+
+   A CAVEAT WORTH KNOWING. people.name is the name that WON under the old
+   newest-wins rule, which is not necessarily the first one seen - that
+   information was overwritten and is not recoverable. So the primary chosen
+   here is the best available answer, not a certain one. From now on the first
+   name seen really is the one kept. Anyone who finds a primary that looks like
+   the family member rather than the donor can swap it on the donor's record. */
+INSERT INTO person_names (person_id, name, name_key, is_primary, source, first_seen_at, last_seen_at)
+SELECT p.id,
+       p.name,
+       lower(regexp_replace(btrim(p.name), '\s+', ' ', 'g')),
+       TRUE,
+       COALESCE(p.profile_source, 'drm'),
+       p.created_at,
+       COALESCE(p.updated_at, p.created_at)
+  FROM people p
+ WHERE btrim(COALESCE(p.name, '')) <> ''
+ON CONFLICT (person_id, name_key) DO NOTHING;
+
+-- The name that LOST the old newest-wins contest. It was a real name on a
+-- real donation, so it belongs in the list rather than in a warning.
+INSERT INTO person_names (person_id, name, name_key, is_primary, source, first_seen_at, last_seen_at)
+SELECT p.id,
+       p.name_alt,
+       lower(regexp_replace(btrim(p.name_alt), '\s+', ' ', 'g')),
+       FALSE,
+       COALESCE(p.name_alt_source, 'drm'),
+       COALESCE(p.name_conflict_at, p.created_at),
+       COALESCE(p.name_conflict_at, p.created_at)
+  FROM people p
+ WHERE btrim(COALESCE(p.name_alt, '')) <> ''
+ON CONFLICT (person_id, name_key) DO NOTHING;

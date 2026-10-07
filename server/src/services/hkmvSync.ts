@@ -20,6 +20,7 @@ import type { PoolClient } from 'pg';
 import pool from '../db/pool';
 import { hkmvMappers, HkmvDonation, HkmvSubscription, HkmvTransaction, SiteKey } from './hkmvClient';
 import { decideName } from './profileSync';
+import { registerName } from './personNames';
 import { recordCredit } from './credits';
 import { addressValues, fromHkmvSaved } from '../utils/address';
 
@@ -150,7 +151,27 @@ async function upsertPerson(
     ]
   );
 
-  return { id: result.rows[0].id, created: result.rows[0].created };
+  const personId = result.rows[0].id as string;
+
+  // The names list, kept alongside people.name rather than instead of it.
+  //
+  // Both are registered on every sync, not just the incoming one: a donor who
+  // existed before person_names did has no roster yet, and this is the moment
+  // we know her own name AND the one this donation came under. Registering the
+  // primary first is what makes it the primary - registerName gives the slot
+  // to whichever real name arrives first and never takes it back.
+  //
+  // Non-fatal by the same rule as everything else on this path: the donation
+  // has already landed, and failing the webhook over a bookkeeping row would
+  // make the site retry money it has already delivered.
+  try {
+    await registerName(client, personId, chosenName, site);
+    if (decision.alt) await registerName(client, personId, decision.alt, site);
+  } catch (e) {
+    console.error('hkmvSync: could not record donor names -', (e as Error).message);
+  }
+
+  return { id: personId, created: result.rows[0].created };
 }
 
 /**
@@ -261,15 +282,18 @@ async function upsertDonation(
   personId: string,
   d: HkmvDonation,
   fallbackAddress: string | null,
-  site: SiteKey
+  site: SiteKey,
+  /* The name this snapshot arrived under - see donor_name in the INSERT. */
+  donorName: string | null
 ): Promise<{ donationId: string; deliveryUpserted: boolean }> {
   const donationResult = await client.query(
     `INSERT INTO donations (
        person_id, amount, type, purpose, payment_mode, source, receipt_generated,
        receipt_number, receipt_issued_at, external_ref, created_at,
-       source_site, source_page, campaign, utm_source, utm_medium, utm_campaign, payment_ref)
+       source_site, source_page, campaign, utm_source, utm_medium, utm_campaign, payment_ref,
+       given_name)
      VALUES ($1, $2, $3, $4, COALESCE($17, 'upi'), CASE WHEN $18::boolean THEN 'offline' ELSE 'website' END,
-             $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+             $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $19)
      ON CONFLICT (external_ref) DO UPDATE SET
        amount            = EXCLUDED.amount,
        -- Cash, cheque and bank donations entered on a site's own admin form
@@ -293,6 +317,17 @@ async function upsertDonation(
        -- EXCLUDED.payment_ref would wipe that reference on the very next
        -- import, silently losing the only link back to the bank statement.
        payment_ref       = COALESCE(EXCLUDED.payment_ref, donations.payment_ref)
+     -- given_name IS DELIBERATELY ABSENT FROM THIS LIST.
+     --
+     -- A snapshot carries the donor's name ONCE, at the top, and then every
+     -- donation they have ever made (HkmvDonation itself has no name field).
+     -- So the name in hand is the name the site holds TODAY - which is the
+     -- right answer for a gift arriving now and the wrong one for a gift made
+     -- three years ago under somebody else's name.
+     --
+     -- Writing it only on INSERT means a new donation records the name it came
+     -- under, and an existing one is never relabelled by a later sync. That is
+     -- the whole point of storing it rather than joining to people.name.
      -- amount, created_at and utm_campaign come back so the credit below is
      -- written from what the row actually says rather than from the snapshot
      -- in hand. They differ in the cases that matter: utm_campaign is
@@ -318,6 +353,8 @@ async function upsertDonation(
       hkmvMappers.truncate(d.paymentRef, 80),
       siteModeToDrm(d.paymentMode),
       d.offline === true,
+      // $19 - the name this snapshot arrived under, written on INSERT only.
+      (donorName ?? '').trim().slice(0, 255) || null,
     ]
   );
 
@@ -451,7 +488,7 @@ export async function upsertDonorSnapshot(
       // DRM's ledger tracks confirmed donations only - pending/failed/cancelled
       // attempts on the live site aren't real contributions here.
       if (d.status !== 'completed') continue;
-      const { deliveryUpserted } = await upsertDonation(client, personId, d, fallbackAddress, site);
+      const { deliveryUpserted } = await upsertDonation(client, personId, d, fallbackAddress, site, snapshot.donor.name ?? null);
       donationsSynced++;
       if (deliveryUpserted) deliveriesSynced++;
     }

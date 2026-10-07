@@ -6,6 +6,7 @@ import { upsertDonorSnapshot, upsertTransactionBatch } from '../services/hkmvSyn
 import { groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 import { normalizeAddress, addressValues, type Address } from '../utils/address';
 import { pushProfileToSites } from '../services/profileSync';
+import { namesFor } from '../services/personNames';
 import {
   describeFilters,
   sendExport,
@@ -307,6 +308,30 @@ router.get('/:id/profile', async (req, res) => {
 });
 
 // Staff notes on a person (lightweight CRM log, not a full audit trail)
+/**
+ * GET /:id/names - every name this phone number has given under.
+ *
+ * ONE PHONE IS ONE DONOR, AND A DONOR CAN BE A FAMILY. The donor's own name is
+ * flagged `is_primary` and sorts first; the rest are the mothers, fathers and
+ * children the gifts were offered for. Each carries what was actually given
+ * under it, so the answer to "we gave in my mother's name last Kartik" is on
+ * the screen rather than in somebody's memory.
+ *
+ * Counts come from the name written on each donation. Gifts taken before that
+ * was recorded fall to the primary - see the person_names block in schema.sql
+ * for why they are not guessed at.
+ */
+router.get('/:id/names', async (req, res) => {
+  try {
+    const person = await pool.query('SELECT id, name, phone FROM people WHERE id = $1', [req.params.id]);
+    if (!person.rows.length) return res.status(404).json({ error: 'Person not found' });
+    res.json({ person: person.rows[0], names: await namesFor(req.params.id) });
+  } catch (err) {
+    console.error('people.names error:', err);
+    res.status(500).json({ error: 'Could not load the names for this donor.' });
+  }
+});
+
 router.get('/:id/notes', async (req, res) => {
   const { id } = req.params;
   const result = await pool.query(

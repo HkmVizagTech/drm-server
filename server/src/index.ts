@@ -107,6 +107,38 @@ app.use(
   })
 );
 
+// Nothing this API returns may be reused without asking.
+//
+// THE BUG THIS FIXES
+// Searching the donations list for a donor returned 200, and searching for the
+// same donor again returned 304 - correctly, because Express hashes the body
+// into a weak ETag and the rows really had not changed. The 304 was never the
+// problem. The problem was the loads where the browser did not ask at all.
+//
+// Express sets an ETag on every res.json() and nothing here set Cache-Control,
+// so the response carried no instruction about how long it stays good. A cache
+// with no instruction is entitled to invent one (RFC 9111 "heuristic
+// freshness"), and browsers invent different ones - so the same screen would
+// revalidate on one machine and silently serve a stored copy on another. When
+// it served the stored copy, a donation another donor had just made was simply
+// not there, and the list looked settled rather than stale.
+//
+// WHY no-store AND NOT no-cache
+// no-cache would also be correct: it forces a revalidation every time, and the
+// 304s would stay (accurately). no-store goes further and keeps the response
+// out of the browser's disk cache altogether, which matters here because these
+// payloads carry donor names, phone numbers, addresses and PAN, and the office
+// machines are shared. Giving up a few kilobytes of revalidation traffic on a
+// 25-row page is a trade worth making for that.
+//
+// A route that genuinely wants to be cached overrides this by setting its own
+// Cache-Control, which replaces the header rather than adding to it - see the
+// QR image in routes/crmQr.ts, which stays at `private, max-age=300`.
+app.use(['/api', '/health'], (_req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
+
 // Health check
 app.get('/health', (_req, res) => {
   // The migration outcome is here on purpose. A deploy whose schema did not

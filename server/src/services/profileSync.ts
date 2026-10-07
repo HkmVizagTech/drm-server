@@ -60,17 +60,25 @@ export interface NameDecision {
  * was not a truncation or an encoding fault - it was a first write that
  * nothing could ever correct.
  *
- * The rule now is newest-wins, with the loser kept. But two things are NOT
- * treated as disagreements, because calling them one would put a warning on
- * half the donor list:
+ * Two things are NOT treated as changes at all, because calling them one would
+ * put a warning on half the donor list:
  *
  *   - a placeholder. "Donor 9876543210" is what DRM invents when a site sends
  *     no name at all, and a real name must always beat it.
  *   - the same name spelled with different spacing or case.
  *
- * A genuine disagreement - two different real names for one phone number - is
- * recorded rather than silently resolved, because it is usually a shared
- * family number and somebody should look.
+ * WHAT CHANGED, AND WHY IT IS NO LONGER "NEWEST WINS"
+ * A second real name on one phone used to replace the first. The old comment
+ * here called that a disagreement and guessed, correctly, that it was "usually
+ * a shared family number" - but it still resolved it by overwriting, so the
+ * donor's own name was lost the first time a daughter gave in her mother's
+ * name. It is not a disagreement and there is nothing to resolve: a phone in
+ * an Indian household belongs to a family, and both names are real.
+ *
+ * So the FIRST name stays. The incoming one is returned as `alt` and the
+ * caller writes it to person_names, where the full list lives - see
+ * services/personNames.ts. `alt` keeps feeding the Name differences screen,
+ * which is now a place to notice a typo rather than a queue of errors.
  */
 export function decideName(
   current: string | null,
@@ -102,8 +110,9 @@ export function decideName(
     };
   }
 
-  // A real disagreement. Newest wins, and the old one is kept beside it.
-  return { name: inc, alt: cur, altSource: incomingSource, conflict: true };
+  // A second real name on one phone. The donor's own name - the one already
+  // here - stays primary; the new one is handed back for the names list.
+  return { name: cur, alt: inc, altSource: incomingSource, conflict: true };
 }
 
 /* ------------------------------------------------------------- pushing out */

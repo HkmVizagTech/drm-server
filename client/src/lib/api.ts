@@ -31,8 +31,20 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   return res.json();
 }
 
+/**
+ * Was this rejection a cancelled request rather than a failure?
+ *
+ * A component that aborts its own fetch on unmount or on a new keystroke gets
+ * a rejected promise for a request it deliberately threw away. Rendering that
+ * as "Could not load this list" puts an error on screen for working software -
+ * which is worse than the stale data the abort was there to prevent.
+ */
+export function isAbort(e: unknown): boolean {
+  return e instanceof DOMException && e.name === 'AbortError';
+}
+
 export const apiClient = {
-  get: <T>(path: string) => api<T>(path),
+  get: <T>(path: string, init?: RequestInit) => api<T>(path, init),
   post: <T>(path: string, body: unknown) => api<T>(path, { method: 'POST', body: JSON.stringify(body) }),
   put: <T>(path: string, body: unknown) => api<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
   patch: <T>(path: string, body: unknown) => api<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
@@ -40,9 +52,10 @@ export const apiClient = {
   // For binary responses (PDF receipts) that a plain <a href> can't carry an
   // Authorization header for - fetches the file as a Blob so the caller can
   // open it in a new tab via URL.createObjectURL.
-  getBlob: async (path: string): Promise<Blob> => {
+  getBlob: async (path: string, init?: RequestInit): Promise<Blob> => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
     const res = await fetch(`${API_URL}${path}`, {
+      ...init,
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) {
