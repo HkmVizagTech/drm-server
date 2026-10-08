@@ -109,6 +109,11 @@ async function main() {
       donations: [{ externalId: 'paid-7', amount: 251, type: 'Gau seva', status: 'completed', createdAt: new Date().toISOString(), isRecurring: false }] },
     'hkmv'
   );
+  // From the main site's /donations page: not on Nearly gave, so no bell either.
+  await pool.query(
+    `INSERT INTO abandoned_attempts (source_site, external_id, phone, name, amount, purpose, source_page, status, attempted_at)
+     VALUES ('hkmv', 'dp-1', '9000000009', 'Donations Page', 500, 'General', '/donations', 'failed', NOW() - INTERVAL '2 minutes')`
+  );
   let n = await announceNearlyGave();
   const titles = (await pool.query(`SELECT title, body FROM drm_notifications ORDER BY created_at`)).rows;
   check('a failed payment is announced at once', titles.some((t) => t.title.startsWith('Payment failed · Failed Fast')), titles);
@@ -117,6 +122,7 @@ async function main() {
   check('nobody from last month, nobody who paid since', !titles.some((t) => /Last Month|Paid Later/.test(t.title)), { n, titles });
   check('nobody who paid from another number under the same full name', !titles.some((t) => /Sita/.test(t.title)), titles);
   check('but a one-word name needs the same amount too', titles.some((t) => /Ramesh/.test(t.title)), titles);
+  check('nobody from the /donations page, which Nearly gave leaves out', !titles.some((t) => /Donations Page/.test(t.title)), titles);
   check('three in all', n === 3, n);
   n = await announceNearlyGave();
   check('running again announces nothing twice', n === 0 && (await ngCount()) === 3);
@@ -197,6 +203,10 @@ async function main() {
   r = await req('GET', '/api/crm/leads/abandoned?days=7', ana);
   const phones = (r.body.rows ?? []).map((x: any) => x.phone);
   check('a failed payment is on the list at once', phones.includes('9000000001'), phones);
+  // Everyone the bell announced is on the list (or marked donated there).
+  const announced = (await pool.query(`SELECT DISTINCT phone FROM drm_notifications WHERE kind = 'nearly_gave'`)).rows.map((x) => x.phone);
+  const all = (await req('GET', '/api/crm/leads/abandoned?days=7&include_settled=true', ana)).body.rows.map((x: any) => x.phone);
+  check('everyone the bell announced is on Nearly gave', announced.every((p) => all.includes(p)), { announced, all });
   check('one pending 6 minutes is on it', phones.includes('9000000002'), phones);
   check('paid before anyone rang: off the list', !phones.includes('9000000005') && !phones.includes('9000000006'), phones);
   const paid = r.body.rows?.find((x: any) => x.phone === '9000000003');
