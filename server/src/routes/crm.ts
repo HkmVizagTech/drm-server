@@ -32,7 +32,9 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
-import { fetchAbandonedPage, isSiteConfigured, type SiteKey } from '../services/hkmvClient';
+import { fetchAbandonedPage, isSiteConfigured, type SiteKey, type AbandonedDonation } from '../services/hkmvClient';
+import { gaveSinceSql } from '../services/gaveSince';
+import { PENDING_GRACE_MINUTES } from '../services/nearlyGaveWatch';
 import { buildWorkbook } from '../utils/spreadsheet';
 import { parseDate, istDate } from '../bootTimezone';
 import { recordCredit } from '../services/credits';
@@ -362,7 +364,13 @@ const LEAD_COLUMNS = `
   -- Who rang them last, so a list or a search can say "you called" or
   -- "Ravi called" next to the colour for where they are.
   lc.last_caller_id, lc.last_caller_name,
-  ld.label AS last_outcome_label`;
+  ld.label AS last_outcome_label,
+  -- How the calls went, beside call_attempts (which counts every call): the
+  -- ones nobody picked up, and the ones where THEY rang the temple back.
+  (SELECT COUNT(*)::int FROM lead_activities ca
+    WHERE ca.lead_id = l.id AND ca.kind = 'call' AND ca.connected IS FALSE) AS calls_missed,
+  (SELECT COUNT(*)::int FROM lead_activities ca
+    WHERE ca.lead_id = l.id AND ca.kind = 'call' AND ca.direction = 'inbound') AS calls_in`;
 
 const LEAD_JOINS = `
   FROM leads l
@@ -688,13 +696,60 @@ router.get('/leads/export.xlsx', (req, res) => exportLeadsFile(req, res, 'xlsx')
  * Only one sync per site runs at a time. Two page loads a second apart would
  * otherwise each start a full crawl of both sites.
  */
+/**
+ * Store one unfinished donation from a site. False when it cannot be used (no
+ * number to ring, no id to key on, no date). Shared by the full sync behind
+ * the Nearly gave screen and the quick poll that raises notifications.
+ */
+export async function storeAbandonedAttempt(site: SiteKey, d: AbandonedDonation): Promise<boolean> {
+  const phone = normalizePhone(d.mobile);
+  const externalId = String(d.externalId ?? '').trim();
+  if (!isDialable(phone) || !externalId || !d.attemptedAt) return false;
+  await pool.query(
+    `INSERT INTO abandoned_attempts
+       (source_site, external_id, phone, name, email, amount, purpose,
+        source_page, status, attempted_at, last_seen_at)
+     VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10::timestamptz, NOW())
+     ON CONFLICT (source_site, external_id) DO UPDATE SET
+       -- The site is authoritative on everything except what DRM has
+       -- decided about the row, so the dismissal is simply not touched.
+       phone        = EXCLUDED.phone,
+       name         = COALESCE(EXCLUDED.name, abandoned_attempts.name),
+       email        = COALESCE(EXCLUDED.email, abandoned_attempts.email),
+       amount       = COALESCE(EXCLUDED.amount, abandoned_attempts.amount),
+       purpose      = COALESCE(EXCLUDED.purpose, abandoned_attempts.purpose),
+       source_page  = COALESCE(EXCLUDED.source_page, abandoned_attempts.source_page),
+       status       = EXCLUDED.status,
+       attempted_at = EXCLUDED.attempted_at,
+       last_seen_at = NOW()`,
+    [
+      site,
+      externalId.slice(0, 80),
+      phone,
+      cut(d.name, 255),
+      cut(d.email, 255),
+      d.amount ?? null,
+      // The sites' seva names and page URLs are free text and overrun
+      // these columns. Unclipped, one 270-character festival name
+      // threw mid-crawl and cost every page after it.
+      cut(d.purpose, 255),
+      cut(d.sourcePage, 255),
+      cut(d.status, 20),
+      d.attemptedAt,
+    ]
+  );
+  return true;
+}
+
 async function syncAbandoned(
   sites: SiteKey[],
   opts: { days?: number; minMinutes?: number } = {}
 ): Promise<{ site: string; seen: number; error: string | null }[]> {
   const days = Math.min(365, Math.max(1, opts.days ?? 90));
   const since = new Date(Date.now() - days * 86_400_000).toISOString();
-  const minMinutes = Math.max(15, opts.minMinutes ?? 60);
+  // Pending ones from five minutes old - the site has sent its WhatsApp
+  // reminder at three, and a donor still not done by five is worth a call.
+  const minMinutes = Math.max(3, opts.minMinutes ?? PENDING_GRACE_MINUTES);
   const results: {
     site: string;
     seen: number;
@@ -752,49 +807,11 @@ async function syncAbandoned(
       for (let page = 1; page <= MAX_ABANDONED_PAGES; page++) {
         const result = await fetchAbandonedPage(site, { page, limit: 200, since, minMinutes });
         for (const d of result.donations) {
-          const phone = normalizePhone(d.mobile);
           // No number to ring, no id to key on, or no date to place it: all
           // three make the row unusable. Counted, because a silent drop is how
           // "the site has 2,000 and DRM shows 1,870" becomes unexplainable.
-          const externalId = String(d.externalId ?? '').trim();
-          if (!isDialable(phone) || !externalId || !d.attemptedAt) {
-            skipped++;
-            continue;
-          }
-          seen++;
-          await pool.query(
-            `INSERT INTO abandoned_attempts
-               (source_site, external_id, phone, name, email, amount, purpose,
-                source_page, status, attempted_at, last_seen_at)
-             VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10::timestamptz, NOW())
-             ON CONFLICT (source_site, external_id) DO UPDATE SET
-               -- The site is authoritative on everything except what DRM has
-               -- decided about the row, so the dismissal is simply not touched.
-               phone        = EXCLUDED.phone,
-               name         = COALESCE(EXCLUDED.name, abandoned_attempts.name),
-               email        = COALESCE(EXCLUDED.email, abandoned_attempts.email),
-               amount       = COALESCE(EXCLUDED.amount, abandoned_attempts.amount),
-               purpose      = COALESCE(EXCLUDED.purpose, abandoned_attempts.purpose),
-               source_page  = COALESCE(EXCLUDED.source_page, abandoned_attempts.source_page),
-               status       = EXCLUDED.status,
-               attempted_at = EXCLUDED.attempted_at,
-               last_seen_at = NOW()`,
-            [
-              site,
-              externalId.slice(0, 80),
-              phone,
-              cut(d.name, 255),
-              cut(d.email, 255),
-              d.amount ?? null,
-              // The sites' seva names and page URLs are free text and overrun
-              // these columns. Unclipped, one 270-character festival name
-              // threw mid-crawl and cost every page after it.
-              cut(d.purpose, 255),
-              cut(d.sourcePage, 255),
-              cut(d.status, 20),
-              d.attemptedAt,
-            ]
-          );
+          if (await storeAbandonedAttempt(site, d)) seen++;
+          else skipped++;
         }
         if (!result.hasMore) break;
         // Still more to come and this was the last page we will ask for. The
@@ -908,8 +925,9 @@ function buildAbandonedQuery(
   scope.push(`a.attempted_at >= NOW() - ($${i++} || ' days')::interval`);
   values.push(String(viewDays));
 
-  // Leave them alone until the attempt has had time to complete.
-  scope.push(`a.attempted_at <= NOW() - INTERVAL '15 minutes'`);
+  // A failed payment is shown at once. One still pending is left alone for
+  // five minutes, while the donor may still be on the payment page.
+  scope.push(`(a.status = 'failed' OR a.attempted_at <= NOW() - INTERVAL '${PENDING_GRACE_MINUTES} minutes')`);
 
   // Guarded against NaN: a non-numeric min_amount used to reach Postgres as
   // 'NaN'::numeric, which sorts above every number, so the endpoint answered
@@ -980,22 +998,13 @@ function buildAbandonedQuery(
     ),
     resolved AS (
       SELECT l.*,
-             -- Did they give anyway? Any donation at or after the attempt,
-             -- from either site, by any means.
-             EXISTS (
-               SELECT 1 FROM people p JOIN donations d ON d.person_id = p.id
-                WHERE right(regexp_replace(p.phone,'\\D','','g'), 10) = l.phone
-                  AND d.created_at >= l.attempted_at
-             )
-             -- Or their lead was marked as having given since - which is the
-             -- only way to know about somebody who gave from ANOTHER phone
-             -- under another name ("my son paid from his number"). The
-             -- caller linked that donation to the lead; this keeps them off
-             -- the list the same as a donation from their own number would.
-             OR EXISTS (
-               SELECT 1 FROM leads gl
-                WHERE gl.phone = l.phone AND gl.converted_at >= l.attempted_at
-             ) AS gave_anyway,
+             -- Did they give anyway? Same mobile, a lead marked as donated,
+             -- or the same name within a day - see services/gaveSince.ts.
+             ${gaveSinceSql('l')} AS gave_anyway,
+             -- Rung since they tried. Somebody who then paid stays on the
+             -- list, marked as donated, so the call that did it is seen;
+             -- somebody who paid before anyone rang just drops off.
+             (ld.last_contacted_at IS NOT NULL AND ld.last_contacted_at >= l.attempted_at) AS called_since,
              ld.id AS lead_id,
              ld.status AS lead_status,
              -- So the screen can say "do not call" and hide the Call button,
@@ -1005,6 +1014,13 @@ function buildAbandonedQuery(
              ld.assigned_to AS lead_assigned_to,
              ld.last_outcome AS lead_last_outcome,
              ld.last_contacted_at AS lead_last_contacted_at,
+             -- How many times they have been rung, how many went unanswered,
+             -- and how many times they rang back.
+             ld.call_attempts AS lead_call_attempts,
+             (SELECT COUNT(*)::int FROM lead_activities ca
+               WHERE ca.lead_id = ld.id AND ca.kind = 'call' AND ca.connected IS FALSE) AS lead_calls_missed,
+             (SELECT COUNT(*)::int FROM lead_activities ca
+               WHERE ca.lead_id = ld.id AND ca.kind = 'call' AND ca.direction = 'inbound') AS lead_calls_in,
              (SELECT MAX(d.dismissed_at) FROM abandoned_attempts d WHERE d.phone = l.phone) AS set_aside_at,
              u.name AS assigned_to_name,
              -- Whether the lead is with somebody who makes calls. A lead an
@@ -1104,7 +1120,7 @@ router.get('/leads/abandoned', async (req, res) => {
       pool.query(
         `${base}
          SELECT * FROM resolved l
-          ${req.query.include_settled === 'true' ? '' : 'WHERE NOT gave_anyway'}
+          ${req.query.include_settled === 'true' ? '' : 'WHERE NOT gave_anyway OR called_since'}
           ORDER BY ${order}
           LIMIT 500`,
         values
@@ -1114,6 +1130,7 @@ router.get('/leads/abandoned', async (req, res) => {
          SELECT COUNT(*)::int AS total,
                 COUNT(*) FILTER (WHERE NOT gave_anyway)::int AS open,
                 COUNT(*) FILTER (WHERE gave_anyway)::int AS gave_anyway,
+                COUNT(*) FILTER (WHERE gave_anyway AND called_since)::int AS paid_after_call,
                 COUNT(*) FILTER (WHERE NOT gave_anyway AND lead_id IS NOT NULL)::int AS already_leads,
                 COALESCE(SUM(amount) FILTER (WHERE NOT gave_anyway), 0)::numeric AS value_at_stake
            FROM resolved`,
@@ -1127,10 +1144,12 @@ router.get('/leads/abandoned', async (req, res) => {
       rows: page.rows,
       // Compared against the real total, not the page length: at exactly 500
       // the old form said "showing the first 500 of 500".
-      complete: page.rows.length >= (req.query.include_settled === 'true' ? t.total : t.open),
+      complete: page.rows.length >= (req.query.include_settled === 'true' ? t.total : t.open + t.paid_after_call),
       total: t.total,
       open: t.open,
       gave_anyway: t.gave_anyway,
+      // Paid after a caller rang them: still shown, marked as donated.
+      paid_after_call: t.paid_after_call,
       already_leads: t.already_leads,
       // What walked away, over everybody still worth ringing - not over the
       // page. This is the number that decides whether the list is worth a

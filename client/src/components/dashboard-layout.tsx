@@ -26,6 +26,7 @@ import Link from "next/link";
 import { Sidebar, navLocation } from "./sidebar";
 import { ReminderBell } from "./reminder-bell";
 import { CallingAlertsProvider } from "./calling-alerts";
+import { NotificationPopups } from "./notification-popups";
 import { Icon } from "./icons";
 import { GlobalSearch } from "./global-search";
 import { Toaster } from "./toast";
@@ -182,6 +183,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         </main>
         <Toaster />
       </div>
+      <NotificationPopups />
     </CallingAlertsProvider>
   );
 }

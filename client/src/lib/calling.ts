@@ -308,6 +308,9 @@ export interface CallLead {
   last_contacted_at: string | null;
   last_outcome: string | null;
   call_attempts: number;
+  /** Calls nobody picked up, and calls where they rang the temple back. */
+  calls_missed?: number;
+  calls_in?: number;
   expected_amount: string | null;
   do_not_call: boolean;
   converted_at: string | null;

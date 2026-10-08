@@ -18,7 +18,8 @@
 
 import type { PoolClient } from 'pg';
 import pool from '../db/pool';
-import { hkmvMappers, HkmvDonation, HkmvSubscription, HkmvTransaction, SiteKey } from './hkmvClient';
+import { hkmvMappers, HkmvDonation, HkmvSubscription, HkmvTransaction, SiteKey, siteDay } from './hkmvClient';
+import { refreshSankalpFromPerson } from './sankalpDays';
 import { decideName } from './profileSync';
 import { registerName } from './personNames';
 import { recordCredit } from './credits';
@@ -31,6 +32,7 @@ export interface HkmvDonorPayload {
   mobile?: string;
   email?: string | null;
   panNumber?: string | null;
+  dob?: string | null;
   savedAddress?: { street?: string; city?: string; state?: string; pincode?: string; country?: string } | null;
   donorSince?: string;
   sourceSite?: SiteKey | null;
@@ -103,9 +105,9 @@ async function upsertPerson(
   const result = await client.query(
     `INSERT INTO people (name, phone, email, pan, prasadam_address, roles, source_sites, created_at,
                          address_door, address_house, address_street, address_area,
-                         address_city, address_state, address_pincode, address_country)
+                         address_city, address_state, address_pincode, address_country, date_of_birth)
      VALUES ($1, $2, $3, $4, $5, ARRAY['donor']::TEXT[], ARRAY[$7]::TEXT[], COALESCE($6::timestamptz, NOW()),
-             $8, $9, $10, $11, $12, $13, $14, $15)
+             $8, $9, $10, $11, $12, $13, $14, $15, $19::date)
      ON CONFLICT (phone) DO UPDATE SET
        name             = EXCLUDED.name,
        name_alt         = CASE WHEN $16::boolean THEN $17 ELSE people.name_alt END,
@@ -113,6 +115,9 @@ async function upsertPerson(
        name_conflict_at = CASE WHEN $16::boolean THEN NOW() ELSE people.name_conflict_at END,
        email            = COALESCE(people.email, EXCLUDED.email),
        pan              = COALESCE(people.pan, EXCLUDED.pan),
+       -- The date of birth the donor typed on the site's form. Fills a gap;
+       -- one a staff member entered here is kept.
+       date_of_birth    = COALESCE(people.date_of_birth, EXCLUDED.date_of_birth),
        prasadam_address = COALESCE(people.prasadam_address, EXCLUDED.prasadam_address),
        -- Address parts fill gaps here and are only overwritten by
        -- mergeIncomingProfile, which knows when the site last changed them.
@@ -148,6 +153,7 @@ async function upsertPerson(
       decision.conflict,
       decision.alt,
       decision.altSource,
+      siteDay(donor.dob),
     ]
   );
 
@@ -291,9 +297,9 @@ async function upsertDonation(
        person_id, amount, type, purpose, payment_mode, source, receipt_generated,
        receipt_number, receipt_issued_at, external_ref, created_at,
        source_site, source_page, campaign, utm_source, utm_medium, utm_campaign, payment_ref,
-       given_name)
+       given_name, occasion, seva_date, sevak_name, sevak_phone)
      VALUES ($1, $2, $3, $4, COALESCE($17, 'upi'), CASE WHEN $18::boolean THEN 'offline' ELSE 'website' END,
-             $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $19)
+             $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $19, $20, $21::date, $22, $23)
      ON CONFLICT (external_ref) DO UPDATE SET
        amount            = EXCLUDED.amount,
        -- Cash, cheque and bank donations entered on a site's own admin form
@@ -316,7 +322,13 @@ async function upsertDonation(
        -- no payment reference of its own for a manual donation. A bare
        -- EXCLUDED.payment_ref would wipe that reference on the very next
        -- import, silently losing the only link back to the bank statement.
-       payment_ref       = COALESCE(EXCLUDED.payment_ref, donations.payment_ref)
+       payment_ref       = COALESCE(EXCLUDED.payment_ref, donations.payment_ref),
+       -- What the donor said the donation was for, and the day and person it
+       -- is for. Sites deployed before they sent these leave what is here.
+       occasion          = COALESCE(EXCLUDED.occasion, donations.occasion),
+       seva_date         = COALESCE(EXCLUDED.seva_date, donations.seva_date),
+       sevak_name        = COALESCE(donations.sevak_name, EXCLUDED.sevak_name),
+       sevak_phone       = COALESCE(donations.sevak_phone, EXCLUDED.sevak_phone)
      -- given_name IS DELIBERATELY ABSENT FROM THIS LIST.
      --
      -- A snapshot carries the donor's name ONCE, at the top, and then every
@@ -355,6 +367,10 @@ async function upsertDonation(
       d.offline === true,
       // $19 - the name this snapshot arrived under, written on INSERT only.
       (donorName ?? '').trim().slice(0, 255) || null,
+      hkmvMappers.truncate(d.occasion ?? null, 80),
+      siteDay(d.sevaDate),
+      hkmvMappers.truncate(d.sevakName ?? null, 160),
+      String(d.sevakMobile ?? '').replace(/\D/g, '').slice(-10) || null,
     ]
   );
 
@@ -499,6 +515,19 @@ export async function upsertDonorSnapshot(
       subscriptionsSynced++;
     }
 
+    // A donor already on the Sankalpam list gets any special day they have
+    // just told the site about - a birthday typed on the form, the day a seva
+    // was booked for. In a savepoint: the donation is the money, and a
+    // Sankalpam row must never cost it.
+    try {
+      await client.query('SAVEPOINT sankalp');
+      await refreshSankalpFromPerson(client, personId);
+      await client.query('RELEASE SAVEPOINT sankalp');
+    } catch (e) {
+      await client.query('ROLLBACK TO SAVEPOINT sankalp').catch(() => undefined);
+      console.error('hkmvSync: Sankalpam days not updated -', (e as Error).message);
+    }
+
     await client.query('COMMIT');
     return { personId, site, created, donationsSynced, subscriptionsSynced, deliveriesSynced };
   } catch (err) {
@@ -571,6 +600,7 @@ export async function upsertTransactionBatch(
       d.name = txn.donor.name || d.name;
       d.email = txn.donor.email || d.email;
       d.panNumber = txn.donor.panNumber || d.panNumber;
+      d.dob = txn.donor.dob || d.dob;
       d.savedAddress = txn.donor.savedAddress || d.savedAddress;
       // donorSince is the EARLIEST donation, so it moves backwards only.
       if (txn.donor.donorSince && (!d.donorSince || txn.donor.donorSince < d.donorSince)) {

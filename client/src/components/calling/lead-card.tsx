@@ -142,6 +142,8 @@ export function LeadCard({
             {lead.call_attempts > 0 && (
               <Badge tone={lead.call_attempts >= 4 ? "warn" : "neutral"}>
                 {lead.call_attempts} call{lead.call_attempts === 1 ? "" : "s"}
+                {lead.calls_missed ? ` · ${lead.calls_missed} not answered` : ""}
+                {lead.calls_in ? ` · rang back ${lead.calls_in === 1 ? "once" : `${lead.calls_in}×`}` : ""}
               </Badge>
             )}
             {lead.nearly_gave && (

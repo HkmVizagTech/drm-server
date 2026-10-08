@@ -1,6 +1,9 @@
 import cron from 'node-cron';
 import pool from '../db/pool';
 import { APP_TIMEZONE } from '../bootTimezone';
+import { pollNearlyGave } from '../services/nearlyGaveWatch';
+import { notify } from '../services/notifications';
+import type { AbandonedDonation, SiteKey } from '../services/hkmvClient';
 
 // WHAT WAS WRONG WITH THIS JOB, because it ran wrong for a long time and the
 // output looked entirely normal.
@@ -71,4 +74,64 @@ export function scheduleBirthdayAnniversaryCheck() {
       client.release();
     }
   }, { timezone: APP_TIMEZONE });
+}
+
+/* ------------------------------------------------------- notifications */
+
+
+/**
+ * Nearly gave: ask the sites every minute and announce what has just failed,
+ * or been left pending for 5 minutes. Sankalpam: the morning's list at 6:45 IST.
+ */
+export function scheduleNotifications(store: (site: SiteKey, d: AbandonedDonation) => Promise<boolean>) {
+  const opts = { timezone: APP_TIMEZONE };
+  cron.schedule('* * * * *', () => {
+    void pollNearlyGave(store).catch((e) => console.error('[CRON] nearly gave poll:', (e as Error).message));
+  }, opts);
+  cron.schedule('45 6 * * *', () => {
+    void sankalpMorning().catch((e) => console.error('[CRON] sankalpam morning:', (e as Error).message));
+  }, opts);
+  // Started after 6:45 (a deploy at noon): today's morning note still goes out.
+  const hhmm = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: APP_TIMEZONE });
+  if (hhmm >= '06:45') void sankalpMorning().catch(() => undefined);
+}
+
+/**
+ * One notification a morning: today's videos, tomorrow's, any missed, and the
+ * calls due to ask donors for their days. Raised once per day (ref_key), and
+ * not at all on a day with nothing to do.
+ */
+export async function sankalpMorning(): Promise<boolean> {
+  const { sankalpCounts } = await import('../routes/sankalpam');
+  const c = await sankalpCounts();
+  const parts = [
+    c.today ? `${c.today} video${c.today === 1 ? '' : 's'} to send today` : null,
+    c.missed ? `${c.missed} missed` : null,
+    c.tomorrow ? `${c.tomorrow} tomorrow` : null,
+  ].filter(Boolean);
+  let raised = false;
+  if (parts.length) {
+    raised = await notify({
+      kind: 'sankalpam',
+      title: c.today ? `Sankalpam today: ${c.today} to send` : 'Sankalpam',
+      body: parts.join(' · '),
+      link: '/sankalpam',
+      refKey: `sk:${c.date}`,
+    });
+  }
+  if (c.calls_due || c.never_rung) {
+    const calls = [
+      c.calls_due ? `${c.calls_due} callback${c.calls_due === 1 ? '' : 's'} due` : null,
+      c.never_rung ? `${c.never_rung} not rung yet` : null,
+    ].filter(Boolean);
+    raised =
+      (await notify({
+        kind: 'sankalpam',
+        title: 'Sankalpam: donors to ring for their special days',
+        body: calls.join(' · '),
+        link: '/sankalpam?tab=need',
+        refKey: `skc:${c.date}`,
+      })) || raised;
+  }
+  return raised;
 }

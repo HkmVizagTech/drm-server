@@ -15,7 +15,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { apiClient } from "@/lib/api";
-import { istToday, number } from "@/lib/format";
+import { currency, istToday, number, relativeDate } from "@/lib/format";
 import {
   KIND,
   MONTHS_LONG,
@@ -27,6 +27,9 @@ import {
   type Occurrence,
   type SankalpDonor,
   type SankalpStatus,
+  OUTCOME_WORDS,
+  SOURCE,
+  type SankalpSource,
 } from "@/lib/sankalpam";
 import { useCallingAlerts } from "@/components/calling-alerts";
 import { toast } from "@/components/toast";
@@ -34,6 +37,9 @@ import { ExportButton } from "@/components/export-button";
 import { SankalpRow } from "@/components/sankalpam/sankalp-row";
 import { DonorDialog } from "@/components/sankalpam/donor-dialog";
 import { UploadDialog } from "@/components/sankalpam/upload-dialog";
+import { SourceChip } from "@/components/sankalpam/source-chip";
+import { NeedDetailsView } from "@/components/sankalpam/need-details";
+import { AddDonorsDialog } from "@/components/sankalpam/add-donors-dialog";
 import {
   Alert,
   Badge,
@@ -49,7 +55,7 @@ import {
   Tabs,
 } from "@/components/ui";
 
-type Tab = "today" | "calendar" | "donors";
+type Tab = "today" | "calendar" | "donors" | "need";
 const key = (o: { date_id: string; year: number }) => `${o.date_id}:${o.year}`;
 
 export default function SankalpamPage() {
@@ -64,12 +70,19 @@ function Sankalpam() {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const tab = (["today", "calendar", "donors"].includes(params.get("tab") ?? "") ? params.get("tab") : "today") as Tab;
+  const tab = (["today", "calendar", "donors", "need"].includes(params.get("tab") ?? "") ? params.get("tab") : "today") as Tab;
   const setTab = (t: string) => router.replace(t === "today" ? pathname : `${pathname}?tab=${t}`, { scroll: false });
 
   const { sankalpam: summary, refresh: refreshAlerts } = useCallingAlerts();
-  const [editing, setEditing] = useState<string | null | undefined>(undefined);
+  // ?edit=<id> opens that donor straight away - how "Add to Sankalpam" on a
+  // person's page and a notification about a new day land here.
+  const [editing, setEditingState] = useState<string | null | undefined>(() => params.get("edit") ?? undefined);
+  const setEditing = (v: string | null | undefined) => {
+    setEditingState(v);
+    if (v === undefined && params.get("edit")) setTab(tab);
+  };
   const [uploading, setUploading] = useState(false);
+  const [addingDonors, setAddingDonors] = useState(false);
   // Bumped after any change, so whichever view is open reloads.
   const [version, setVersion] = useState(0);
   const changed = useCallback(async () => {
@@ -78,6 +91,19 @@ function Sankalpam() {
   }, [refreshAlerts]);
 
   const due = summary ? summary.today + summary.missed : undefined;
+
+  // How many donors still have no special day - the count on "Need details".
+  const [needCount, setNeedCount] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    apiClient
+      .get<{ counts?: { need_days: number } }>("/api/sankalpam/donors?limit=1")
+      .then((d) => live && setNeedCount(d.counts?.need_days))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [version]);
 
   return (
     <div>
@@ -90,6 +116,9 @@ function Sankalpam() {
             <ExportButton path="/api/sankalpam/export" filename="sankalpam" />
             <Button variant="secondary" icon="upload" onClick={() => setUploading(true)}>
               Upload sheet
+            </Button>
+            <Button variant="secondary" icon="userPlus" onClick={() => setAddingDonors(true)}>
+              Add donors
             </Button>
             <Button icon="plus" onClick={() => setEditing(null)}>
               Add sankalp
@@ -106,12 +135,24 @@ function Sankalpam() {
           { key: "today", label: "Today", icon: "bell", count: due || undefined },
           { key: "calendar", label: "Calendar", icon: "calendar" },
           { key: "donors", label: "Donors", icon: "users" },
+          { key: "need", label: "Calls", icon: "phone", count: needCount || undefined },
         ]}
       />
 
       {tab === "today" && <TodayView version={version} onEdit={setEditing} onChanged={changed} onAdd={() => setEditing(null)} onUpload={() => setUploading(true)} />}
       {tab === "calendar" && <CalendarView version={version} onEdit={setEditing} onChanged={changed} />}
       {tab === "donors" && <DonorsView version={version} onEdit={setEditing} />}
+      {tab === "need" && <NeedDetailsView version={version} onEdit={setEditing} onChanged={() => void changed()} />}
+
+      {addingDonors && (
+        <AddDonorsDialog
+          onClose={() => setAddingDonors(false)}
+          onDone={async () => {
+            setAddingDonors(false);
+            await changed();
+          }}
+        />
+      )}
 
       {editing !== undefined && (
         <DonorDialog
@@ -560,7 +601,10 @@ function DonorsView({ version, onEdit }: { version: number; onEdit: (id: string)
   const [preacher, setPreacher] = useState("");
   const [month, setMonth] = useState("");
   const [noDays, setNoDays] = useState(false);
-  const [data, setData] = useState<{ donors: SankalpDonor[]; total: number; dates: number; preachers: string[] } | null>(null);
+  // The switch that keeps the office's sheet, DRM's own donors and those
+  // added by hand apart.
+  const [source, setSource] = useState<"" | SankalpSource>("");
+  const [data, setData] = useState<DonorList | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -574,8 +618,9 @@ function DonorsView({ version, onEdit }: { version: number; onEdit: (id: string)
     if (q) p.set("search", q);
     if (preacher) p.set("preacher", preacher);
     if (month) p.set("month", month);
+    if (source) p.set("source", source);
     apiClient
-      .get<{ donors: SankalpDonor[]; total: number; dates: number; preachers: string[] }>(`/api/sankalpam/donors?${p}`)
+      .get<DonorList>(`/api/sankalpam/donors?${p}`)
       .then((d) => {
         if (!live) return;
         setData(d);
@@ -585,7 +630,7 @@ function DonorsView({ version, onEdit }: { version: number; onEdit: (id: string)
     return () => {
       live = false;
     };
-  }, [q, preacher, month, version]);
+  }, [q, preacher, month, source, version]);
 
   const withoutDays = (data?.donors ?? []).filter((d) => !d.dates.length).length;
   const list = (data?.donors ?? []).filter((d) => !noDays || !d.dates.length);
@@ -593,6 +638,7 @@ function DonorsView({ version, onEdit }: { version: number; onEdit: (id: string)
 
   return (
     <div className="space-y-4">
+      <SourceSwitch value={source} onChange={setSource} counts={data?.counts} />
       <div className="flex flex-wrap items-end gap-2">
         <SearchInput value={search} onChange={setSearch} placeholder="Name, number, patron no. or occasion" className="min-w-0 flex-1 basis-64" />
         <Select
@@ -646,11 +692,15 @@ function DonorsView({ version, onEdit }: { version: number; onEdit: (id: string)
                 <button
                   type="button"
                   onClick={() => onEdit(d.id)}
-                  className="flex w-full flex-wrap items-start gap-x-4 gap-y-2 px-4 py-3.5 text-left transition-colors hover:bg-brand-50/50 sm:px-5"
+                  className={`flex w-full flex-wrap items-start gap-x-4 gap-y-2 border-l-[3px] px-4 py-3.5 text-left transition-colors hover:bg-brand-50/50 sm:px-5 ${SOURCE_EDGE[d.source] ?? "border-l-transparent"}`}
                 >
                   <div className="min-w-0 flex-1 basis-56">
-                    <p className="font-medium text-ink">
+                    <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-medium text-ink">
                       {d.donor_name}
+                      <SourceChip source={d.source} />
+                      {Number(d.total_given) > 0 && (
+                        <span className="text-xs font-normal text-ink-muted">gave {currency(Number(d.total_given))}</span>
+                      )}
                       {!d.active && (
                         <span className="ml-2">
                           <Badge tone="neutral">Switched off</Badge>
@@ -664,6 +714,9 @@ function DonorsView({ version, onEdit }: { version: number; onEdit: (id: string)
                       {d.patron_number && <span className="tabular-nums">{d.patron_number}</span>}
                       {d.gotram && <span>Gotram: {d.gotram}</span>}
                     </p>
+                    {!!d.call_count && (
+                      <p className="mt-0.5 text-xs text-ink-muted">{callLine(d)}</p>
+                    )}
                   </div>
                   <div className="flex min-w-0 flex-1 basis-64 flex-wrap gap-1.5 sm:justify-end">
                     {d.dates.length ? (
@@ -696,6 +749,73 @@ function DonorsView({ version, onEdit }: { version: number; onEdit: (id: string)
       {data && data.total > list.length && !noDays && (
         <p className="text-center text-xs text-ink-muted">Showing the first {number(list.length)}. Search to find others.</p>
       )}
+    </div>
+  );
+}
+
+interface DonorList {
+  donors: SankalpDonor[];
+  total: number;
+  dates: number;
+  preachers: string[];
+  counts?: { sheet: number; donors: number; manual: number; need_days: number; need_gotram: number };
+}
+
+const SOURCE_EDGE: Record<SankalpSource, string> = {
+  sheet: "border-l-violet-300",
+  donors: "border-l-emerald-400",
+  manual: "border-l-sky-300",
+};
+
+/** "3 calls · last: No answer, 2 days ago by Ana" */
+function callLine(d: SankalpDonor): string {
+  if (!d.call_count) return "Not rung yet";
+  const last = d.last_call_outcome ? OUTCOME_WORDS[d.last_call_outcome] : null;
+  return [
+    `${d.call_count} call${d.call_count === 1 ? "" : "s"}`,
+    last && d.last_call_at ? `last: ${last}, ${relativeDate(d.last_call_at).toLowerCase()}${d.last_caller_name ? ` by ${d.last_caller_name}` : ""}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** All / Uploaded sheet / From donations / Added by hand - each with its own colour. */
+function SourceSwitch({
+  value,
+  onChange,
+  counts,
+}: {
+  value: "" | SankalpSource;
+  onChange: (v: "" | SankalpSource) => void;
+  counts?: DonorList["counts"];
+}) {
+  const items: { key: "" | SankalpSource; label: string; n?: number; dot?: string }[] = [
+    { key: "", label: "All", n: counts ? counts.sheet + counts.donors + counts.manual : undefined },
+    { key: "sheet", label: SOURCE.sheet.label, n: counts?.sheet, dot: SOURCE.sheet.dot },
+    { key: "donors", label: SOURCE.donors.label, n: counts?.donors, dot: SOURCE.donors.dot },
+    { key: "manual", label: SOURCE.manual.label, n: counts?.manual, dot: SOURCE.manual.dot },
+  ];
+  return (
+    <div role="tablist" className="flex flex-wrap gap-1.5">
+      {items.map((it) => {
+        const on = it.key === value;
+        return (
+          <button
+            key={it.key || "all"}
+            type="button"
+            role="tab"
+            aria-selected={on}
+            onClick={() => onChange(it.key)}
+            className={`inline-flex min-h-9 items-center gap-1.5 rounded-full px-3 py-1 text-sm font-medium ring-1 ring-inset transition-colors ${
+              on ? "bg-brand-700 text-white ring-brand-700" : "bg-surface text-ink-soft ring-line hover:bg-sunken"
+            }`}
+          >
+            {it.dot && <span className={`h-2 w-2 rounded-full ${it.dot}`} aria-hidden />}
+            {it.label}
+            {it.n !== undefined && <span className={`tabular-nums ${on ? "text-white/80" : "text-ink-faint"}`}>{number(it.n)}</span>}
+          </button>
+        );
+      })}
     </div>
   );
 }

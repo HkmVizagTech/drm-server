@@ -2309,3 +2309,85 @@ SELECT p.id,
   FROM people p
  WHERE btrim(COALESCE(p.name_alt, '')) <> ''
 ON CONFLICT (person_id, name_key) DO NOTHING;
+
+
+-- ===========================================================================
+-- WHAT THE DONOR TOLD THE SITE'S FORM
+--
+-- Both donation sites ask for an occasion (Birthday, Anniversary...), the day
+-- it falls on, who it is "on the name of", and the donor's date of birth. DRM
+-- kept none of it, so a donor who filled all of that in arrived here as a
+-- name, a number and an amount. The occasion and its day are kept on the
+-- donation; the date of birth goes to people.date_of_birth.
+-- ===========================================================================
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS occasion VARCHAR(80);
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS seva_date DATE;
+CREATE INDEX IF NOT EXISTS idx_donations_seva_date ON donations(person_id) WHERE seva_date IS NOT NULL;
+
+
+-- ===========================================================================
+-- SANKALPAM: WHERE A DONOR CAME FROM, AND THE CALLS TO ASK FOR THEIR DAYS
+--
+-- source on a donor: 'sheet' (the office's Special Puja Dates upload),
+-- 'donors' (added from DRM's own donors who gave above an amount) or 'manual'.
+-- Everything already here when this column arrived came from the sheet.
+--
+-- origin on a day: 'sheet', 'manual', or 'site' - a day the donor gave on a
+-- donation form, added automatically and kept up to date by every sync.
+--
+-- sankalpam_calls: a donor with no days (or no gotram) is rung to ask. Each
+-- attempt is kept, so the list can say "rung 3 times, no answer" and bring
+-- them back on the day they asked to be called.
+-- ===========================================================================
+ALTER TABLE sankalpam_donors ADD COLUMN IF NOT EXISTS source VARCHAR(12);
+UPDATE sankalpam_donors SET source = 'sheet' WHERE source IS NULL;
+ALTER TABLE sankalpam_donors ALTER COLUMN source SET DEFAULT 'manual';
+CREATE INDEX IF NOT EXISTS idx_sankalpam_donors_person ON sankalpam_donors(person_id) WHERE person_id IS NOT NULL;
+
+ALTER TABLE sankalpam_dates ADD COLUMN IF NOT EXISTS origin VARCHAR(12);
+UPDATE sankalpam_dates SET origin = 'sheet' WHERE origin IS NULL;
+ALTER TABLE sankalpam_dates ALTER COLUMN origin SET DEFAULT 'manual';
+
+CREATE TABLE IF NOT EXISTS sankalpam_calls (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  donor_id UUID NOT NULL REFERENCES sankalpam_donors(id) ON DELETE CASCADE,
+  -- no_answer | busy | call_back | got_details | not_interested | wrong_number
+  outcome VARCHAR(20) NOT NULL,
+  note TEXT,
+  next_call_at TIMESTAMPTZ,
+  called_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  called_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sankalpam_calls_donor ON sankalpam_calls(donor_id, called_at DESC);
+
+
+-- ===========================================================================
+-- NOTIFICATIONS: NEARLY GAVE AND SANKALPAM
+--
+-- One feed for the bell, shared by the admin and the callers:
+--   nearly_gave  a payment failed (raised within minutes), or a donation was
+--                started and not finished after 15 minutes
+--   sankalpam    the morning's list (videos today and tomorrow, calls due),
+--                and a special day a donor has just given on a site's form
+-- ref_key makes each event raise exactly once, however often the jobs run.
+-- "Read" is a single timestamp per person: everything newer is unread.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS drm_notifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind VARCHAR(20) NOT NULL,
+  title VARCHAR(200) NOT NULL,
+  body TEXT,
+  link VARCHAR(200),
+  phone VARCHAR(10),
+  ref_key VARCHAR(120) UNIQUE NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_drm_notifications_created ON drm_notifications(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS drm_notification_seen (
+  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- When the bell was told about an unfinished donation, so it is told once.
+ALTER TABLE abandoned_attempts ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;

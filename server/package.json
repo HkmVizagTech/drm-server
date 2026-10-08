@@ -22,7 +22,9 @@
     "test:sankalpam": "tsx scripts/test-sankalpam.ts",
     "test:names": "tsx scripts/test-donor-names.ts",
     "test:backfill": "tsx scripts/test-names-backfill.ts",
-    "test:webhook": "tsx scripts/test-webhook-sync.ts"
+    "test:webhook": "tsx scripts/test-webhook-sync.ts",
+    "test:sankalpdonors": "tsx scripts/test-sankalp-donors.ts",
+    "test:notifications": "tsx scripts/test-notifications.ts"
   },
   "keywords": [],
   "author": "",

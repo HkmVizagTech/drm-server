@@ -24,6 +24,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react";
 import { apiClient } from "@/lib/api";
 import type { SankalpSummary } from "@/lib/sankalpam";
+import { chime, unlockChimeOnFirstTouch } from "@/lib/chime";
 
 export interface ReminderAlert {
   id: string;
@@ -48,6 +49,22 @@ export interface ConversionAlert {
   source_site: string | null;
 }
 
+/** One entry in the bell's feed: nearly gave and Sankalpam, as they happen. */
+export interface DrmNotification {
+  id: string;
+  kind: "nearly_gave" | "sankalpam";
+  title: string;
+  body: string | null;
+  link: string | null;
+  phone: string | null;
+  created_at: string;
+  /** Nearly gave: they have donated since, so there is nobody to ring. */
+  paid_since?: boolean;
+  lead_id?: string | null;
+  /** Nearly gave: the unfinished donation, to make them a lead when Call is pressed. */
+  attempt_id?: string | null;
+}
+
 interface Counts {
   missed: number;
   now: number;
@@ -65,6 +82,13 @@ interface Ctx {
   dueCount: number;
   /** Sankalpam videos to send today, missed, and coming tomorrow. Null when this person has no Sankalpam. */
   sankalpam: SankalpSummary | null;
+  /** The bell's feed, newest first, and how many this person has not seen. */
+  notifications: DrmNotification[];
+  unread: number;
+  markNotificationsSeen: () => Promise<void>;
+  /** Ids of feed entries popped up on screen, newest first, until closed. */
+  popups: string[];
+  dismissPopup: (id: string) => void;
   dismissAlert: (id: string) => void;
   dismissConversions: (ids?: string[]) => Promise<void>;
   refresh: () => Promise<void>;
@@ -78,6 +102,11 @@ const CallingAlertsContext = createContext<Ctx>({
   counts: EMPTY_COUNTS,
   dueCount: 0,
   sankalpam: null,
+  notifications: [],
+  unread: 0,
+  markNotificationsSeen: async () => undefined,
+  popups: [],
+  dismissPopup: () => undefined,
   dismissAlert: () => undefined,
   dismissConversions: async () => undefined,
   refresh: async () => undefined,
@@ -85,16 +114,23 @@ const CallingAlertsContext = createContext<Ctx>({
 
 export const useCallingAlerts = () => useContext(CallingAlertsContext);
 
-// A minute. Short enough that a fifteen-minutes-before alert is never more than
-// a minute late; long enough that a full day at the desk is under 500 requests,
-// and the query usually writes nothing at all.
-const POLL_MS = 60_000;
+// Half a minute. A failed payment reaches the bell within a minute of the site
+// reporting it, and a full day at the desk is still under 1,000 small requests.
+const POLL_MS = 30_000;
+/** On opening DRM, unread entries this recent still pop up. */
+const POP_ON_OPEN_MS = 30 * 60_000;
 
 export function CallingAlertsProvider({ children }: { children: ReactNode }) {
   const [alerts, setAlerts] = useState<ReminderAlert[]>([]);
   const [conversions, setConversions] = useState<ConversionAlert[]>([]);
   const [counts, setCounts] = useState<Counts>(EMPTY_COUNTS);
   const [sankalpam, setSankalpam] = useState<SankalpSummary | null>(null);
+  const [notifications, setNotifications] = useState<DrmNotification[]>([]);
+  const [unread, setUnread] = useState(0);
+  const [popups, setPopups] = useState<string[]>([]);
+  // Ids already shown, so a desktop alert fires only for something new - not
+  // for the whole feed on the first load after opening DRM.
+  const known = useRef<Set<string> | null>(null);
   const signedIn = useRef(true);
 
   const refresh = useCallback(async () => {
@@ -107,6 +143,32 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
         notifySankalpamOnceADay(s);
       })
       .catch(() => setSankalpam(null));
+    void apiClient
+      .get<{ notifications: DrmNotification[]; unread: number; seen_at?: string | null }>("/api/notifications")
+      .then((r) => {
+        setNotifications(r.notifications);
+        setUnread(r.unread);
+        const first = known.current === null;
+        const seenIds = known.current ?? new Set<string>();
+        const seenAt = r.seen_at ? new Date(r.seen_at).getTime() : 0;
+        const fresh: DrmNotification[] = [];
+        for (const n of r.notifications) {
+          if (seenIds.has(n.id)) continue;
+          seenIds.add(n.id);
+          const at = new Date(n.created_at).getTime();
+          // New since the last poll - or, on opening DRM, unread and recent,
+          // so a payment that failed while the tab was closed still pops up.
+          if (!first || (at > seenAt && Date.now() - at < POP_ON_OPEN_MS)) fresh.push(n);
+        }
+        known.current = seenIds;
+        if (fresh.length) {
+          setPopups((p) => [...fresh.map((n) => n.id), ...p.filter((id) => !fresh.some((n) => n.id === id))].slice(0, 4));
+          chime(fresh.some((n) => n.kind === "nearly_gave") ? "urgent" : "info");
+          // A desktop notification as well when DRM is in a background tab.
+          if (typeof document !== "undefined" && document.hidden) fresh.forEach(desktopAlert);
+        }
+      })
+      .catch(() => undefined);
     try {
       const [a, board, conv] = await Promise.all([
         apiClient.get<{ alerts: ReminderAlert[] }>("/api/crm/reminders/alerts"),
@@ -122,6 +184,7 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
         // each offset over exactly once, so anything that arrives is new by
         // definition.
         setAlerts((prev) => [...a.alerts, ...prev].slice(0, 20));
+        chime("urgent");
         if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
           for (const al of a.alerts) {
             new Notification(al.lead_name ? `Reminder: ${al.lead_name}` : "Reminder", {
@@ -138,6 +201,8 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
       signedIn.current = false;
     }
   }, []);
+
+  useEffect(() => unlockChimeOnFirstTouch(), []);
 
   useEffect(() => {
     void refresh();
@@ -169,9 +234,34 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
 
   const dueCount = counts.missed + counts.now + counts.today;
 
+  const dismissPopup = useCallback((id: string) => setPopups((p) => p.filter((x) => x !== id)), []);
+
+  const markNotificationsSeen = useCallback(async () => {
+    setUnread(0);
+    try {
+      await apiClient.post("/api/notifications/seen", {});
+    } catch {
+      /* the count comes back on the next poll, which is the right failure */
+    }
+  }, []);
+
   return (
     <CallingAlertsContext.Provider
-      value={{ alerts, conversions, counts, dueCount, sankalpam, dismissAlert, dismissConversions, refresh }}
+      value={{
+        alerts,
+        conversions,
+        counts,
+        dueCount,
+        sankalpam,
+        notifications,
+        unread,
+        markNotificationsSeen,
+        popups,
+        dismissPopup,
+        dismissAlert,
+        dismissConversions,
+        refresh,
+      }}
     >
       {children}
     </CallingAlertsContext.Provider>
@@ -200,4 +290,18 @@ function notifySankalpamOnceADay(s: SankalpSummary) {
     s.tomorrow ? `${s.tomorrow} tomorrow` : null,
   ].filter(Boolean);
   new Notification("Sankalpam", { body: parts.join(" · "), tag: `sankalpam-${day}` });
+}
+
+/** A desktop notification for a new entry in the feed, when the browser allows it. */
+function desktopAlert(n: DrmNotification) {
+  if (typeof window === "undefined" || !("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    const note = new Notification(n.title, { body: n.body ?? undefined, tag: n.id });
+    note.onclick = () => {
+      window.focus();
+      if (n.link) window.location.href = n.link;
+    };
+  } catch {
+    /* some browsers refuse outside a service worker; the bell still shows it */
+  }
 }

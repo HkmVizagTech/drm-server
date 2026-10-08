@@ -25,6 +25,7 @@ export interface Occurrence {
   preacher_name: string | null;
   patron_number: string | null;
   person_id: string | null;
+  source?: SankalpSource | null;
   status: SankalpStatus;
   note: string | null;
   done_at: string | null;
@@ -39,6 +40,8 @@ export interface SankalpDate {
   orig_year: number | null;
   notes?: string | null;
   active?: boolean;
+  /** 'site': taken from what the donor filled in on a donation form. */
+  origin?: "sheet" | "manual" | "site" | null;
 }
 
 export interface SankalpDonor {
@@ -56,7 +59,37 @@ export interface SankalpDonor {
   person_id: string | null;
   active: boolean;
   dates: SankalpDate[];
+  source: SankalpSource;
+  /** What they have given, for a donor DRM knows. */
+  total_given?: string | number | null;
+  call_count?: number;
+  last_call_at?: string | null;
+  last_call_outcome?: CallOutcome | null;
+  last_call_note?: string | null;
+  last_caller_name?: string | null;
+  next_call_at?: string | null;
 }
+
+/** Where a donor came from - kept apart by a switch and a colour. */
+export type SankalpSource = "sheet" | "donors" | "manual";
+
+export const SOURCE: Record<SankalpSource, { label: string; short: string; chip: string; dot: string }> = {
+  sheet: { label: "Uploaded sheet", short: "Sheet", chip: "bg-violet-50 text-violet-700 ring-violet-200", dot: "bg-violet-400" },
+  donors: { label: "From donations", short: "Donor", chip: "bg-emerald-50 text-emerald-700 ring-emerald-200", dot: "bg-emerald-500" },
+  manual: { label: "Added by hand", short: "Added", chip: "bg-sky-50 text-sky-700 ring-sky-200", dot: "bg-sky-400" },
+};
+
+export type CallOutcome = "no_answer" | "busy" | "call_back" | "got_details" | "verified" | "not_interested" | "wrong_number";
+
+export const OUTCOME_WORDS: Record<CallOutcome, string> = {
+  no_answer: "No answer",
+  busy: "Busy",
+  call_back: "Call back",
+  got_details: "Got the details",
+  verified: "Details correct",
+  not_interested: "Not interested",
+  wrong_number: "Wrong number",
+};
 
 export interface SankalpSummary {
   today: number;

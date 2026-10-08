@@ -6,6 +6,7 @@
 import { clockTime, relativeDate } from "@/lib/format";
 import { KIND, MONTHS, dayKind, sameName, type Occurrence, type SankalpStatus } from "@/lib/sankalpam";
 import { Badge, Button, DropdownMenu, Icon } from "@/components/ui";
+import { SourceChip } from "./source-chip";
 
 export function DateTile({ day, month, kind }: { day: number; month: number; kind: ReturnType<typeof dayKind> }) {
   return (
@@ -67,6 +68,7 @@ export function SankalpRow({
             <Icon name={KIND[kind].icon} size={11} />
             {KIND[kind].label}
           </span>
+          <SourceChip source={o.source} />
           {lateBy && <Badge tone="danger">{lateBy}</Badge>}
         </div>
         <p className="mt-0.5 text-sm text-ink-soft">

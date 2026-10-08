@@ -30,12 +30,12 @@
 // them and pressing one button replaces twenty "Add as lead" clicks and then
 // hunting for the same twenty people on another screen.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { callHref, formatPhone, runHref, startRun } from "@/lib/calling";
-import { currency, number, relativeDate } from "@/lib/format";
+import { clockTime, currency, dateTime, istDateKey, istToday, istDayPlus, number, relativeDate } from "@/lib/format";
 import {
   Alert,
   Badge,
@@ -75,6 +75,8 @@ interface Row {
   /** How many times they tried within the period and sites being viewed. */
   attempts_in_view: number;
   gave_anyway?: boolean;
+  /** Rung since they tried - with gave_anyway, they paid after the call. */
+  called_since?: boolean;
   lead_id?: string | null;
   lead_status?: string | null;
   assigned_to_name?: string | null;
@@ -83,6 +85,10 @@ interface Row {
   lead_assigned_to?: string | null;
   lead_last_outcome?: string | null;
   lead_last_contacted_at?: string | null;
+  /** Every call to them, the ones nobody answered, and the ones where they rang back. */
+  lead_call_attempts?: number | null;
+  lead_calls_missed?: number | null;
+  lead_calls_in?: number | null;
   set_aside_at?: string | null;
   /** False when the lead is with somebody who does not make calls (an admin). */
   lead_owner_calls?: boolean | null;
@@ -305,7 +311,7 @@ export default function PendingPaymentsPage() {
    */
   const parked = (r: Row) => isOthers(r) && r.lead_owner_calls === false;
   /** Can this person be rung from here, by whoever is looking? */
-  const canCall = (r: Row) => !r.lead_do_not_call && (!isOthers(r) || parked(r) || elevated);
+  const canCall = (r: Row) => !r.gave_anyway && !r.lead_do_not_call && (!isOthers(r) || parked(r) || elevated);
   // A row that cannot be called is not offered for ticking either.
   const canPick = (r: Row) => view === "open" && canCall(r);
   const pickable = rows.filter(canPick);
@@ -552,11 +558,30 @@ export default function PendingPaymentsPage() {
 
   /* ------------------------------------------------------ row pieces */
 
+  // Newest or oldest first: the list reads as days, each under its own
+  // heading, so "who tried yesterday" is one glance. Sorted by amount or by
+  // tries, days would be scattered, so each row says its own date instead.
+  const byDay = sort === "recent" || sort === "oldest";
+  const dayCounts = new Map<string, number>();
+  for (const r of rows) {
+    const k = istDateKey(r.attempted_at);
+    dayCounts.set(k, (dayCounts.get(k) ?? 0) + 1);
+  }
+  function dayHeading(k: string) {
+    const d = new Date(`${k}T12:00:00+05:30`);
+    const words = d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: "Asia/Kolkata" });
+    const rel = k === istToday() ? "Today · " : k === istDayPlus(-1) ? "Yesterday · " : "";
+    return `${rel}${words}`;
+  }
+
   /** One line under the name: what happened, in plain words. */
   function story(r: Row) {
     const word = STATUS_WORDS[r.status]?.label ?? r.status;
+    // The exact moment they tried. Under a day heading the time is enough;
+    // sorted by amount or tries, the day is said too.
+    const when = byDay ? `at ${clockTime(r.attempted_at)}` : `on ${dateTime(r.attempted_at)}`;
     const bits = [
-      `${word} ${relativeDate(r.attempted_at).toLowerCase()}`,
+      `${word} ${when}`,
       r.attempts_in_view > 1 ? `tried ${number(r.attempts_in_view)} times` : null,
       r.purpose || null,
       SITE_LABELS[r.source_site] ?? r.source_site,
@@ -570,7 +595,20 @@ export default function PendingPaymentsPage() {
     if (!r.lead_last_outcome && !r.lead_last_contacted_at) return null;
     return `Last call: ${r.lead_last_outcome ? outcomeLabel(r.lead_last_outcome) : "—"}${
       r.lead_last_contacted_at ? ` · ${relativeDate(r.lead_last_contacted_at).toLowerCase()}` : ""
-    }`;
+    }${callCounts(r)}`;
+  }
+
+  /** " · 4 calls (3 not answered, they rang back once)" */
+  function callCounts(r: Row) {
+    const n = Number(r.lead_call_attempts ?? 0);
+    if (!n) return "";
+    const missed = Number(r.lead_calls_missed ?? 0);
+    const back = Number(r.lead_calls_in ?? 0);
+    const extra = [
+      missed ? `${missed} not answered` : null,
+      back ? `they rang back ${back === 1 ? "once" : `${back} times`}` : null,
+    ].filter(Boolean);
+    return ` · ${n} call${n === 1 ? "" : "s"}${extra.length ? ` (${extra.join(", ")})` : ""}`;
   }
 
   /** Call, and everything else behind "⋯". One button to look for, not five. */
@@ -582,6 +620,8 @@ export default function PendingPaymentsPage() {
         </Button>
       );
     }
+    // Paid after the call: kept on the list so the call that did it is seen.
+    if (r.gave_anyway) return <Badge tone="good" icon="check">Donated after the call</Badge>;
     if (r.lead_do_not_call) return <Badge tone="danger" icon="xCircle">Do not call</Badge>;
     if (!canCall(r)) {
       // Another caller's lead. Only possible with more than one caller.
@@ -866,7 +906,9 @@ export default function PendingPaymentsPage() {
         ) : !rows.length ? (
           <Card padded={false}>{emptyState}</Card>
         ) : (
-          rows.map((r) => {
+          rows.map((r, i) => {
+            const day = istDateKey(r.attempted_at);
+            const newDay = byDay && (i === 0 || istDateKey(rows[i - 1].attempted_at) !== day);
             const on = picked.has(r.id) || (allMatching && canPick(r));
             const last = lastCall(r);
             // The same colours as search and Leads: rung before or not.
@@ -876,11 +918,19 @@ export default function PendingPaymentsPage() {
               last_outcome_label: r.lead_last_outcome ? outcomeLabel(r.lead_last_outcome) : null,
             });
             return (
+              <Fragment key={r.id}>
+              {newDay && (
+                <h3 className="flex items-baseline justify-between px-1 pt-3 text-sm font-semibold text-ink first:pt-0">
+                  <span>{dayHeading(day)}</span>
+                  <span className="text-xs font-normal text-ink-muted">
+                    {number(dayCounts.get(day) ?? 0)} {plural(dayCounts.get(day) ?? 0, "person", "people")}
+                  </span>
+                </h3>
+              )}
               <Card
-                key={r.id}
                 padded={false}
                 tone={on ? "brand" : "default"}
-                className={`border-l-[3px] px-3 py-3 sm:px-4 ${CALL_EDGE[cs.tone]}`}
+                className={`border-l-[3px] px-3 py-3 sm:px-4 ${CALL_EDGE[cs.tone]} ${r.gave_anyway ? "bg-good-wash/60" : ""}`}
               >
                 <div className="flex items-start gap-3">
                   <span className="mt-0.5 w-5 flex-none">
@@ -909,6 +959,7 @@ export default function PendingPaymentsPage() {
                   </div>
                 </div>
               </Card>
+              </Fragment>
             );
           })
         )}

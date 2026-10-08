@@ -12,6 +12,7 @@ import { useAuth } from "@/lib/auth-context";
 import { toast } from "@/components/toast";
 import { DAYS_IN, MONTHS_LONG, OCCASIONS, type SankalpDate, type SankalpDonor } from "@/lib/sankalpam";
 import { Alert, Button, Field, Icon, Input, Modal, Select, Skeleton, Textarea, Toggle } from "@/components/ui";
+import { SankalpCallPanel } from "./call-tools";
 
 interface Form {
   donor_name: string;
@@ -231,6 +232,15 @@ export function DonorDialog({
         </div>
       ) : (
         <div className="space-y-5">
+          {/* Anyone on the list can be rung - to ask, update or check. */}
+          {id && (
+            <SankalpCallPanel
+              donorId={id}
+              donorName={f.donor_name}
+              phone={f.phone || f.alt_phone}
+              onUpdateDetails={() => document.getElementById("sk-name")?.focus()}
+            />
+          )}
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Donor Name" htmlFor="sk-name" required>
               <Input id="sk-name" value={f.donor_name} onChange={(e) => set({ donor_name: e.target.value })} />
@@ -264,7 +274,11 @@ export function DonorDialog({
             <ul className="space-y-2.5">
               {f.dates.map((d) => (
                 <li key={d.key} className="grid grid-cols-[1fr_auto] gap-2 sm:grid-cols-[minmax(0,1fr)_5rem_8.5rem_5.5rem_auto] sm:items-end">
-                  <Field label="Occasion" htmlFor={`sk-occ-${d.key}`} className="col-span-2 sm:col-span-1">
+                  <Field
+                    label={d.origin === "site" ? "Occasion · from their donation form" : "Occasion"}
+                    htmlFor={`sk-occ-${d.key}`}
+                    className="col-span-2 sm:col-span-1"
+                  >
                     <Input
                       id={`sk-occ-${d.key}`}
                       list="sk-occasions"

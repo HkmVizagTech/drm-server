@@ -17,6 +17,7 @@ import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import { parseWorkbook, detectColumns, cellText, normalizePhone, isDialable, buildWorkbook } from '../utils/spreadsheet';
 import { sendExport } from '../utils/export';
+import { refreshSankalpFromPerson } from '../services/sankalpDays';
 
 const router = Router();
 router.use(authenticate, authorize('admin', 'caller'));
@@ -114,7 +115,7 @@ const OCCURRENCES = `
   )
   SELECT occ.date_id, occ.donor_id, occ.occasion, occ.month, occ.day, occ.orig_year, occ.date_notes, occ.year,
          to_char(occ.due_on, 'YYYY-MM-DD') AS due_on, to_char(occ.added_on, 'YYYY-MM-DD') AS added_on,
-         dn.donor_name, dn.sevak_name, dn.phone, dn.alt_phone, dn.preacher, dn.patron_number, dn.person_id,
+         dn.donor_name, dn.sevak_name, dn.phone, dn.alt_phone, dn.preacher, dn.patron_number, dn.person_id, dn.source,
          pr.name AS preacher_name,
          COALESCE(s.status, 'todo') AS status, s.note, s.done_at, u.name AS done_by_name
     FROM occ
@@ -170,18 +171,49 @@ router.get('/board', async (req, res) => {
 });
 
 /** GET /sankalpam/summary - the numbers for the sidebar badge and the reminder strip. */
+/**
+ * The day's numbers: videos to send today, missed, coming tomorrow, and the
+ * calls due to ask donors for their days. Used by the badge, the reminder
+ * strip and the morning notification.
+ */
+export async function sankalpCounts() {
+  const date = await istToday();
+  const today = date;
+  const { rows } = await pool.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE x.due_on < $3 AND x.due_on >= x.added_on AND x.status IN ('todo','ready'))::int AS missed,
+       COUNT(*) FILTER (WHERE x.due_on = $3 AND x.status IN ('todo','ready'))::int AS today,
+       COUNT(*) FILTER (WHERE x.due_on = $4)::int AS tomorrow
+     FROM (${OCCURRENCES}) x`,
+    [shift(today, -14), shift(today, 1), today, shift(today, 1)]
+  );
+  // Donors still without a day, with a number to ring: callbacks that are
+  // due, and those nobody has rung yet.
+  const calls = (
+    await pool.query(
+      `SELECT COUNT(*) FILTER (WHERE lc.next_call_at IS NOT NULL AND lc.next_call_at <= NOW())::int AS calls_due,
+              COUNT(*) FILTER (WHERE lc.id IS NULL)::int AS never_rung
+         FROM sankalpam_donors dn
+         LEFT JOIN LATERAL (SELECT id, next_call_at FROM sankalpam_calls c WHERE c.donor_id = dn.id
+                             ORDER BY c.called_at DESC LIMIT 1) lc ON TRUE
+        WHERE dn.active AND dn.phone IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM sankalpam_dates d WHERE d.donor_id = dn.id AND d.active)`
+    )
+  ).rows[0];
+  return {
+    date,
+    today: rows[0].today as number,
+    missed: rows[0].missed as number,
+    tomorrow: rows[0].tomorrow as number,
+    calls_due: calls.calls_due as number,
+    never_rung: calls.never_rung as number,
+  };
+}
+
+/** GET /sankalpam/summary - the numbers for the sidebar badge and the reminder strip. */
 router.get('/summary', async (_req, res) => {
   try {
-    const today = await istToday();
-    const { rows } = await pool.query(
-      `SELECT
-         COUNT(*) FILTER (WHERE x.due_on < $3 AND x.due_on >= x.added_on AND x.status IN ('todo','ready'))::int AS missed,
-         COUNT(*) FILTER (WHERE x.due_on = $3 AND x.status IN ('todo','ready'))::int AS today,
-         COUNT(*) FILTER (WHERE x.due_on = $4)::int AS tomorrow
-       FROM (${OCCURRENCES}) x`,
-      [shift(today, -14), shift(today, 1), today, shift(today, 1)]
-    );
-    res.json({ today, ...rows[0] });
+    res.json(await sankalpCounts());
   } catch (err) {
     console.error('sankalpam.summary error:', err);
     res.status(500).json({ error: 'Could not load.' });
@@ -259,13 +291,29 @@ async function setStatus(items: { date_id: string; year: number }[], body: any, 
 
 const DONOR_FIELDS = `
   dn.id, dn.patron_number, dn.donor_name, dn.sevak_name, dn.phone, dn.alt_phone, dn.preacher, dn.gotram, dn.address,
-  dn.notes, dn.person_id, dn.active, dn.created_at, pr.name AS preacher_name,
+  dn.notes, dn.person_id, dn.active, dn.created_at, pr.name AS preacher_name, dn.source,
+  -- What they have given, for a donor DRM knows - the reason a donor added
+  -- "from donations" is on the list at all.
+  (SELECT COALESCE(SUM(dd.amount), 0) FROM donations dd WHERE dd.person_id = dn.person_id) AS total_given,
+  -- The calls made to ask for their details.
+  (SELECT COUNT(*)::int FROM sankalpam_calls c WHERE c.donor_id = dn.id) AS call_count,
+  lc.called_at AS last_call_at, lc.outcome AS last_call_outcome, lc.note AS last_call_note,
+  lc.next_call_at, lcu.name AS last_caller_name,
   COALESCE((SELECT json_agg(json_build_object('id', d.id, 'occasion', d.occasion, 'month', d.month, 'day', d.day,
-                                              'orig_year', d.orig_year, 'notes', d.notes, 'active', d.active)
+                                              'orig_year', d.orig_year, 'notes', d.notes, 'active', d.active,
+                                              'origin', d.origin)
                             ORDER BY d.month, d.day)
               FROM sankalpam_dates d WHERE d.donor_id = dn.id), '[]'::json) AS dates`;
 
-/** GET /sankalpam/donors?search=&preacher=&month=&limit= */
+/** The latest call to a donor, joined beside DONOR_FIELDS. */
+const DONOR_JOINS = `
+  LEFT JOIN preachers pr ON upper(pr.code) = upper(dn.preacher)
+  LEFT JOIN LATERAL (SELECT * FROM sankalpam_calls c WHERE c.donor_id = dn.id ORDER BY c.called_at DESC LIMIT 1) lc ON TRUE
+  LEFT JOIN users lcu ON lcu.id = lc.called_by`;
+
+const CHECKED = `EXISTS (SELECT 1 FROM sankalpam_calls cc WHERE cc.donor_id = dn.id AND cc.outcome IN ('got_details', 'verified') AND cc.called_at > NOW() - INTERVAL '1 year')`;
+
+/** GET /sankalpam/donors?search=&preacher=&month=&need=days|gotram|check&limit= */
 router.get('/donors', async (req, res) => {
   const q = req.query as Record<string, unknown>;
   const where: string[] = [];
@@ -296,13 +344,39 @@ router.get('/donors', async (req, res) => {
     where.push(`EXISTS (SELECT 1 FROM sankalpam_dates d WHERE d.donor_id = dn.id AND d.month = $${values.length} AND d.active)`);
   }
   if (q.show !== 'all') where.push('dn.active');
+  // Where they came from: the office's sheet, DRM's own donors, or by hand.
+  const source = String(q.source ?? '');
+  if (['sheet', 'donors', 'manual'].includes(source)) {
+    values.push(source);
+    where.push(`dn.source = $${values.length}`);
+  }
+  // Who still needs a call to ask: no special day yet, or no gotram.
+  if (q.need === 'days') {
+    where.push(`NOT EXISTS (SELECT 1 FROM sankalpam_dates d WHERE d.donor_id = dn.id AND d.active)`);
+  } else if (q.need === 'gotram') {
+    where.push(`NULLIF(trim(COALESCE(dn.gotram, '')), '') IS NULL`);
+  } else if (q.need === 'check') {
+    // Everyone, to ring and check their details once a year. A donor leaves
+    // this list for a year once a call confirms or updates their details.
+    where.push(`dn.active AND NOT ${CHECKED}`);
+  }
+  // The calling order for that list: a callback that is due, then nobody
+  // rung yet, then the longest since the last try. A callback booked for
+  // later sinks to the bottom until its day.
+  const order =
+    q.need === 'days' || q.need === 'gotram' || q.need === 'check'
+      ? `ORDER BY (lc.next_call_at IS NOT NULL AND lc.next_call_at <= NOW()) DESC,
+                  (lc.called_at IS NULL) DESC,
+                  (lc.next_call_at IS NOT NULL AND lc.next_call_at > NOW()) ASC,
+                  lc.called_at ASC NULLS FIRST, dn.donor_name`
+      : `ORDER BY dn.patron_number NULLS LAST, dn.donor_name`;
   const limit = Math.min(500, Math.max(1, Number(q.limit) || 100));
   const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
   try {
     const [rows, total, preachers] = await Promise.all([
       pool.query(
-        `SELECT ${DONOR_FIELDS} FROM sankalpam_donors dn LEFT JOIN preachers pr ON upper(pr.code) = upper(dn.preacher)
-          ${w} ORDER BY dn.patron_number NULLS LAST, dn.donor_name LIMIT ${limit}`,
+        `SELECT ${DONOR_FIELDS} FROM sankalpam_donors dn ${DONOR_JOINS}
+          ${w} ${order} LIMIT ${limit}`,
         values
       ),
       pool.query(
@@ -315,11 +389,24 @@ router.get('/donors', async (req, res) => {
         `SELECT DISTINCT upper(preacher) AS code FROM sankalpam_donors WHERE preacher IS NOT NULL ORDER BY 1`
       ),
     ]);
+    // How many sit in each list, for the counts on the switch and the tab.
+    const counts = (
+      await pool.query(
+        `SELECT COUNT(*) FILTER (WHERE source = 'sheet')::int AS sheet,
+                COUNT(*) FILTER (WHERE source = 'donors')::int AS donors,
+                COUNT(*) FILTER (WHERE source = 'manual')::int AS manual,
+                COUNT(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM sankalpam_dates d WHERE d.donor_id = dn.id AND d.active))::int AS need_days,
+                COUNT(*) FILTER (WHERE NULLIF(trim(COALESCE(dn.gotram, '')), '') IS NULL)::int AS need_gotram,
+                COUNT(*) FILTER (WHERE NOT ${CHECKED})::int AS need_check
+           FROM sankalpam_donors dn WHERE dn.active`
+      )
+    ).rows[0];
     res.json({
       donors: rows.rows,
       total: total.rows[0].donors,
       dates: total.rows[0].dates,
       preachers: preachers.rows.map((r) => r.code),
+      counts,
     });
   } catch (err) {
     console.error('sankalpam.donors error:', err);
@@ -330,7 +417,7 @@ router.get('/donors', async (req, res) => {
 router.get('/donors/:id', async (req, res) => {
   try {
     const r = await pool.query(
-      `SELECT ${DONOR_FIELDS} FROM sankalpam_donors dn LEFT JOIN preachers pr ON upper(pr.code) = upper(dn.preacher)
+      `SELECT ${DONOR_FIELDS} FROM sankalpam_donors dn ${DONOR_JOINS}
         WHERE dn.id = $1`,
       [req.params.id]
     );
@@ -420,6 +507,9 @@ router.post('/donors', async (req, res) => {
     );
     const id = ins.rows[0].id;
     await writeDates(client, id, dates, false);
+    // A donor DRM already knows: add the days they gave on the sites.
+    const pid = (await client.query(`SELECT person_id FROM sankalpam_donors WHERE id = $1`, [id])).rows[0]?.person_id;
+    if (pid) await refreshSankalpFromPerson(client, pid, { quiet: true });
     await client.query('COMMIT');
     res.status(201).json({ id });
   } catch (err) {
@@ -754,8 +844,8 @@ router.post('/import', async (req, res) => {
         if (apply) {
           donorId = (
             await client.query(
-              `INSERT INTO sankalpam_donors (patron_number, donor_name, sevak_name, phone, alt_phone, preacher, gotram, address, notes, person_id, created_by)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+              `INSERT INTO sankalpam_donors (patron_number, donor_name, sevak_name, phone, alt_phone, preacher, gotram, address, notes, person_id, created_by, source)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'sheet') RETURNING id`,
               [d.patron, d.donor_name, d.sevak_name, d.phone, d.alt_phone, d.preacher, d.gotram, d.address, d.notes,
                await personFor(client, d.phone), req.user?.userId ?? null]
             )
@@ -778,8 +868,8 @@ router.post('/import', async (req, res) => {
         out.dates_new++;
         if (apply && donorId) {
           await client.query(
-            `INSERT INTO sankalpam_dates (donor_id, occasion, month, day, orig_year, notes)
-             VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
+            `INSERT INTO sankalpam_dates (donor_id, occasion, month, day, orig_year, notes, origin)
+             VALUES ($1,$2,$3,$4,$5,$6,'sheet') ON CONFLICT DO NOTHING`,
             [donorId, day.occasion, day.month, day.day, day.year, day.notes]
           );
         }
@@ -844,6 +934,254 @@ router.get(['/export.csv', '/export.xlsx'], async (req, res) => {
   } catch (err) {
     console.error('sankalpam.export error:', err);
     res.status(500).json({ error: 'Could not export.' });
+  }
+});
+
+/* ---------------------------------------------------------------- calls */
+
+// got_details: they gave something new; verified: everything we hold is right.
+const OUTCOMES = ['no_answer', 'busy', 'call_back', 'got_details', 'verified', 'not_interested', 'wrong_number'];
+
+/**
+ * POST /sankalpam/donors/:id/calls { outcome, note?, next_call_at? }
+ *
+ * A call to ask a donor for their special days or gotram. Kept per call, so
+ * the list can say how many times they were rung and what came of it. An
+ * unanswered call books the next try two days on unless a day was chosen.
+ */
+router.post('/donors/:id/calls', async (req, res) => {
+  const outcome = String(req.body?.outcome ?? '');
+  if (!OUTCOMES.includes(outcome)) return res.status(400).json({ error: 'Pick what happened.' });
+  const asked = req.body?.next_call_at ? new Date(String(req.body.next_call_at)) : null;
+  const next =
+    asked && !Number.isNaN(asked.getTime())
+      ? asked.toISOString()
+      : outcome === 'no_answer' || outcome === 'busy'
+      ? new Date(Date.now() + 2 * 86400000).toISOString()
+      : null;
+  try {
+    const r = await pool.query(
+      `INSERT INTO sankalpam_calls (donor_id, outcome, note, next_call_at, called_by)
+       SELECT $1, $2, $3, $4::timestamptz, $5 WHERE EXISTS (SELECT 1 FROM sankalpam_donors WHERE id = $1)
+       RETURNING id, called_at, next_call_at`,
+      [req.params.id, outcome, str(req.body?.note, 500), next, req.user?.userId ?? null]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Not found.' });
+    // "Wrong number" and "not interested" stop the reminders for them; the
+    // donor stays on record and can be switched back on.
+    if (outcome === 'wrong_number' || outcome === 'not_interested') {
+      await pool.query(`UPDATE sankalpam_donors SET active = FALSE, updated_at = NOW() WHERE id = $1`, [req.params.id]);
+    }
+    res.status(201).json(r.rows[0]);
+  } catch (err) {
+    console.error('sankalpam.logCall error:', err);
+    res.status(500).json({ error: 'Could not save. Try again.' });
+  }
+});
+
+/** GET /sankalpam/donors/:id/calls - every call to this donor, newest first. */
+router.get('/donors/:id/calls', async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT c.id, c.outcome, c.note, c.next_call_at, c.called_at, u.name AS called_by_name
+         FROM sankalpam_calls c LEFT JOIN users u ON u.id = c.called_by
+        WHERE c.donor_id = $1 ORDER BY c.called_at DESC LIMIT 50`,
+      [req.params.id]
+    );
+    res.json({ calls: r.rows });
+  } catch (err) {
+    console.error('sankalpam.calls error:', err);
+    res.status(500).json({ error: 'Could not load.' });
+  }
+});
+
+/* ------------------------------------------------- one person, from People */
+
+/** GET /sankalpam/by-person/:personId - is this person on the Sankalpam list? */
+router.get('/by-person/:personId', async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT dn.id, dn.active,
+              (SELECT COUNT(*)::int FROM sankalpam_dates d WHERE d.donor_id = dn.id AND d.active) AS days
+         FROM sankalpam_donors dn
+         JOIN people p ON p.id = $1
+        WHERE dn.person_id = p.id
+           OR dn.phone = right(regexp_replace(p.phone, '\\D', '', 'g'), 10)
+           OR dn.alt_phone = right(regexp_replace(p.phone, '\\D', '', 'g'), 10)
+        ORDER BY (dn.person_id = p.id) DESC NULLS LAST LIMIT 1`,
+      [req.params.personId]
+    );
+    res.json({ donor: r.rows[0] ?? null });
+  } catch (err) {
+    console.error('sankalpam.byPerson error:', err);
+    res.status(500).json({ error: 'Could not load.' });
+  }
+});
+
+/**
+ * POST /sankalpam/from-person/:personId - put one person on the list, whatever
+ * they have given. Comes with every day DRM knows for them; with none, they
+ * land on "Need details" to be rung. Already there: nothing is added twice,
+ * and the answer points at the existing entry.
+ */
+router.post('/from-person/:personId', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const p = (
+      await client.query(
+        `SELECT p.id, p.name, right(regexp_replace(p.phone, '\\D', '', 'g'), 10) AS phone,
+                COALESCE(p.prasadam_address, p.address) AS address,
+                EXISTS (SELECT 1 FROM donations d WHERE d.person_id = p.id) AS has_given
+           FROM people p WHERE p.id = $1`,
+        [req.params.personId]
+      )
+    ).rows[0];
+    if (!p) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Person not found.' });
+    }
+    const there = (
+      await client.query(
+        `SELECT id FROM sankalpam_donors WHERE person_id = $1 OR phone = $2 OR alt_phone = $2 LIMIT 1`,
+        [p.id, p.phone]
+      )
+    ).rows[0];
+    if (there) {
+      await client.query(`UPDATE sankalpam_donors SET person_id = COALESCE(person_id, $2), active = TRUE WHERE id = $1`, [there.id, p.id]);
+      const days = await refreshSankalpFromPerson(client, p.id, { quiet: true });
+      await client.query('COMMIT');
+      return res.json({ id: there.id, existing: true, days });
+    }
+    const id = (
+      await client.query(
+        `INSERT INTO sankalpam_donors (donor_name, phone, address, person_id, source, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [
+          tidyName(p.name) ?? 'Donor',
+          /^[6-9]\d{9}$/.test(p.phone) ? p.phone : null,
+          p.address,
+          p.id,
+          // A donor DRM knows is "from donations"; somebody who has never
+          // given (a volunteer, say) was added by hand.
+          p.has_given ? 'donors' : 'manual',
+          req.user?.userId ?? null,
+        ]
+      )
+    ).rows[0].id;
+    const days = await refreshSankalpFromPerson(client, p.id, { quiet: true });
+    await client.query('COMMIT');
+    res.status(201).json({ id, existing: false, days });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    console.error('sankalpam.fromPerson error:', err);
+    res.status(500).json({ error: 'Could not add. Try again.' });
+  } finally {
+    client.release();
+  }
+});
+
+/* ------------------------------------------------- from DRM's own donors */
+
+/**
+ * Donors who have given at least `min` - in total, or in one donation - and
+ * where they stand with Sankalpam.
+ */
+function candidateQuery(q: Record<string, unknown>) {
+  const min = Math.max(1, Math.min(10_000_000, Number(q.min) || 5000));
+  const single = q.basis === 'single';
+  const site = ['hkmv', 'annadan'].includes(String(q.site)) ? String(q.site) : null;
+  const sql = `
+    WITH giving AS (
+      SELECT d.person_id, SUM(d.amount) AS total, MAX(d.amount) AS biggest, COUNT(*)::int AS donations,
+             MAX(d.created_at) AS last_at
+        FROM donations d
+       WHERE ($2::text IS NULL OR d.source_site = $2)
+       GROUP BY d.person_id
+    )
+    SELECT p.id AS person_id, p.name, right(regexp_replace(p.phone, '\\D', '', 'g'), 10) AS phone,
+           g.total, g.biggest, g.donations, g.last_at,
+           sd.id AS sankalp_id,
+           (p.date_of_birth IS NOT NULL OR p.anniversary_date IS NOT NULL
+            OR EXISTS (SELECT 1 FROM donations x WHERE x.person_id = p.id AND x.seva_date IS NOT NULL AND x.occasion IS NOT NULL)) AS has_days
+      FROM giving g
+      JOIN people p ON p.id = g.person_id
+      LEFT JOIN LATERAL (
+        SELECT s.id FROM sankalpam_donors s
+         WHERE s.person_id = p.id
+            OR s.phone = right(regexp_replace(p.phone, '\\D', '', 'g'), 10)
+            OR s.alt_phone = right(regexp_replace(p.phone, '\\D', '', 'g'), 10)
+         LIMIT 1
+      ) sd ON TRUE
+     WHERE ${single ? 'g.biggest' : 'g.total'} >= $1
+     ORDER BY g.total DESC`;
+  return { sql, values: [min, site] };
+}
+
+/** GET /sankalpam/candidates?min=5000&basis=total|single&site= - what "Add donors" would add. */
+router.get('/candidates', async (req, res) => {
+  try {
+    const { sql, values } = candidateQuery(req.query as Record<string, unknown>);
+    const { rows } = await pool.query(sql, values);
+    const toAdd = rows.filter((r) => !r.sankalp_id);
+    res.json({
+      qualifying: rows.length,
+      already: rows.length - toAdd.length,
+      to_add: toAdd.length,
+      with_days: toAdd.filter((r) => r.has_days).length,
+      sample: toAdd.slice(0, 40),
+    });
+  } catch (err) {
+    console.error('sankalpam.candidates error:', err);
+    res.status(500).json({ error: 'Could not load.' });
+  }
+});
+
+/**
+ * POST /sankalpam/add-donors { min, basis, site }
+ *
+ * Adds every qualifying donor not on the list yet, with whatever special days
+ * DRM already knows for them (their birthday from the site's form, the day a
+ * seva was booked for). The rest arrive with no days, on the "Need details"
+ * list, to be rung. A donor already on the list (from the sheet, say) is
+ * linked and gets any known day it is missing; nothing of theirs is changed.
+ * Safe to run again: it only ever adds who is new.
+ */
+router.post('/add-donors', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { sql, values } = candidateQuery(req.body ?? {});
+    await client.query('BEGIN');
+    const { rows } = await client.query(sql, values);
+    let added = 0;
+    let linked = 0;
+    let days = 0;
+    for (const r of rows) {
+      if (r.sankalp_id) {
+        const n = await refreshSankalpFromPerson(client, r.person_id, { quiet: true });
+        if (n) linked++;
+        days += n;
+        continue;
+      }
+      const p = (
+        await client.query(`SELECT name, COALESCE(prasadam_address, address) AS address FROM people WHERE id = $1`, [r.person_id])
+      ).rows[0];
+      await client.query(
+        `INSERT INTO sankalpam_donors (donor_name, phone, address, person_id, source, created_by)
+         VALUES ($1, $2, $3, $4, 'donors', $5)`,
+        [tidyName(p?.name ?? r.name) ?? 'Donor', /^[6-9]\d{9}$/.test(r.phone) ? r.phone : null, p?.address ?? null, r.person_id, req.user?.userId ?? null]
+      );
+      added++;
+      days += await refreshSankalpFromPerson(client, r.person_id, { quiet: true });
+    }
+    await client.query('COMMIT');
+    res.json({ added, linked, days });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    console.error('sankalpam.addDonors error:', err);
+    res.status(500).json({ error: 'Could not add. Try again.' });
+  } finally {
+    client.release();
   }
 });
 

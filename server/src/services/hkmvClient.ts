@@ -118,6 +118,14 @@ export interface HkmvDonation {
   // which keeps the old behaviour (UPI, website).
   paymentMode?: string | null;
   offline?: boolean | null;
+  // What the donor told the form: the occasion, the day it falls on, who it
+  // is on the name of, and their own date of birth. Absent from older site
+  // deployments. Feeds people.date_of_birth and the Sankalpam list.
+  occasion?: string | null;
+  sevaDate?: string | null;
+  sevakName?: string | null;
+  sevakMobile?: string | null;
+  dob?: string | null;
   prasadam?: HkmvPrasadam | null;
 }
 
@@ -141,6 +149,8 @@ export interface HkmvDonorSnapshot {
     mobile: string;
     email?: string | null;
     panNumber?: string | null;
+    /** The donor's own date of birth, as the site's form took it. */
+    dob?: string | null;
     savedAddress?: { street?: string; city?: string; state?: string; pincode?: string; country?: string } | null;
     donorSince: string;
     sourceSite?: SiteKey | null;
@@ -908,4 +918,23 @@ export async function updateDonorProfile(
     message: typeof body?.message === 'string' ? body.message : null,
     donationId: typeof body?.donationId === 'string' ? body.donationId : null,
   };
+}
+
+/**
+ * A calendar day from whatever a site's form stored: "2026-10-15",
+ * "2026-10-15T00:00:00.000Z", "15-10-1990", "15/10/1990". YYYY-MM-DD, or null
+ * when it is not a real day. Read as written - never through a Date in the
+ * server's zone, which is how a birthday moves by one.
+ */
+export function siteDay(v: unknown): string | null {
+  const s = String(v ?? '').trim();
+  if (!s) return null;
+  let y: number, m: number, d: number;
+  let r = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (r) [y, m, d] = [+r[1], +r[2], +r[3]];
+  else if ((r = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/))) [y, m, d] = [+r[3], +r[2], +r[1]];
+  else return null;
+  const days = [31, (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0 ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (y < 1900 || y > 2100 || m < 1 || m > 12 || d < 1 || d > days[m - 1]) return null;
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }

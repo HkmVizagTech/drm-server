@@ -23,11 +23,13 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { apiClient } from "@/lib/api";
-import { currency } from "@/lib/format";
+import { clockTime, currency, relativeDate } from "@/lib/format";
 import { callHref, formatPhone } from "@/lib/calling";
 import { Badge, Button, Icon, IconButton, buttonClass } from "@/components/ui";
 import { toast } from "./toast";
-import { useCallingAlerts } from "./calling-alerts";
+import { useCallingAlerts, type DrmNotification } from "./calling-alerts";
+import { NearlyGaveCallButton } from "./notification-popups";
+import { setSoundOn, soundOn } from "@/lib/chime";
 
 // The cadence - a minute - lives with the timer that uses it, in
 // calling-alerts.tsx. A second POLL_MS was declared here and read by nothing,
@@ -49,8 +51,13 @@ export function ReminderBell() {
   // The poll lives in CallingAlertsProvider, once for the whole app. Three
   // components need this information and three timers would race each other for
   // the same alerts, since fetching one is what marks it delivered.
-  const { alerts, conversions, dueCount, dismissAlert, dismissConversions, refresh } = useCallingAlerts();
+  const { alerts, conversions, dueCount, dismissAlert, dismissConversions, refresh, notifications, unread, markNotificationsSeen } =
+    useCallingAlerts();
   const [open, setOpen] = useState(false);
+  // Two lists behind one bell: what just happened (nearly gave, Sankalpam)
+  // and the donors' own promises (reminders). Opens on whichever has news.
+  const [pane, setPane] = useState<"updates" | "reminders">("updates");
+  const badge = dueCount + unread;
   // Read once, lazily. Only ever drawn inside the open panel, which is never
   // part of the server's HTML, so reading the browser here cannot make the
   // first render disagree with it.
@@ -60,6 +67,8 @@ export function ReminderBell() {
       : "unsupported"
   );
   const panelRef = useRef<HTMLDivElement>(null);
+  // Only read inside the open panel, never in the server's HTML.
+  const [sound, setSound] = useState(soundOn);
   // Where a "Call" from here should come back to once the outcome is logged.
   const pathname = usePathname();
 
@@ -67,7 +76,10 @@ export function ReminderBell() {
   // that the caller does not have to go looking for it.
   const seen = useRef(0);
   useEffect(() => {
-    if (alerts.length > seen.current) setOpen(true);
+    if (alerts.length > seen.current) {
+      setOpen(true);
+      setPane("reminders");
+    }
     seen.current = alerts.length;
   }, [alerts.length]);
 
@@ -101,14 +113,18 @@ export function ReminderBell() {
       <span className="relative block">
         <IconButton
           name="bell"
-          label={dueCount ? `${dueCount} reminders due` : "Reminders"}
-          onClick={() => setOpen((v) => !v)}
+          label={badge ? `Notifications, ${badge} new` : "Notifications"}
+          onClick={() => {
+            const next = !open;
+            setOpen(next);
+            if (next) setPane(unread || !(alerts.length || conversions.length) ? "updates" : "reminders");
+          }}
           aria-expanded={open}
           aria-haspopup="true"
         />
-        {dueCount > 0 && (
+        {badge > 0 && (
           <span className="pointer-events-none absolute -right-0.5 -top-0.5 grid h-[1.1rem] min-w-[1.1rem] place-items-center rounded-pill bg-danger px-1 text-2xs font-semibold tabular-nums text-white ring-2 ring-surface">
-            {dueCount > 99 ? "99+" : dueCount}
+            {badge > 99 ? "99+" : badge}
           </span>
         )}
       </span>
@@ -118,18 +134,46 @@ export function ReminderBell() {
           aria-label="Reminders"
           className="fade-rise absolute right-0 z-50 mt-2 w-[22rem] max-w-[calc(100vw-2rem)] rounded-control border border-line-strong bg-surface shadow-float"
         >
-          <div className="flex items-center justify-between border-b border-line-soft px-4 py-3">
-            <p className="text-sm font-semibold text-ink">Reminders</p>
+          <div className="flex items-center gap-1 border-b border-line-soft px-2 py-2">
+            {(
+              [
+                { key: "updates", label: "Updates", n: unread },
+                { key: "reminders", label: "Reminders", n: dueCount },
+              ] as const
+            ).map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setPane(t.key)}
+                className={`inline-flex items-center gap-1.5 rounded-control px-3 py-1.5 text-sm font-medium ${
+                  pane === t.key ? "bg-brand-50 text-brand-800" : "text-ink-muted hover:bg-sunken"
+                }`}
+              >
+                {t.label}
+                {t.n > 0 && (
+                  <span className="rounded-pill bg-danger px-1.5 text-2xs font-semibold tabular-nums text-white">{t.n > 99 ? "99+" : t.n}</span>
+                )}
+              </button>
+            ))}
             <Link
-              href="/calling/reminders"
+              href={pane === "updates" ? "/calling/pending" : "/calling/reminders"}
               onClick={() => setOpen(false)}
-              className="text-xs text-brand-700 hover:underline"
+              className="ml-auto px-2 text-xs text-brand-700 hover:underline"
             >
-              See all
+              {pane === "updates" ? "Nearly gave" : "See all"}
             </Link>
           </div>
 
-          <div className="scroll-slim max-h-96 overflow-y-auto">
+          {pane === "updates" && (
+            <Updates
+              items={notifications}
+              unread={unread}
+              onSeen={markNotificationsSeen}
+              onGo={() => setOpen(false)}
+            />
+          )}
+
+          <div className={`scroll-slim max-h-96 overflow-y-auto ${pane === "updates" ? "hidden" : ""}`}>
             {/* A lead that has donated goes above the reminders. It is the one
                 piece of news that changes what a caller does next — including
                 not ringing someone who has already given. */}
@@ -226,8 +270,8 @@ export function ReminderBell() {
             )}
           </div>
 
-          {canNotify === "default" && (
-            <div className="border-t border-line-soft px-4 py-3">
+          <div className="flex items-center justify-between gap-3 border-t border-line-soft px-4 py-2.5">
+            {canNotify === "default" ? (
               <button
                 onClick={() =>
                   Notification.requestPermission().then((p) => setCanNotify(p as "granted" | "denied" | "default"))
@@ -236,10 +280,90 @@ export function ReminderBell() {
               >
                 Turn on desktop alerts
               </button>
-            </div>
-          )}
+            ) : (
+              <span />
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setSoundOn(!sound);
+                setSound(!sound);
+              }}
+              className="inline-flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink"
+            >
+              <Icon name="bell" size={13} />
+              Sound {sound ? "on" : "off"}
+            </button>
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * What just happened: a payment that failed, a donation left unfinished, the
+ * morning's Sankalpam list, a special day a donor gave on a site's form. Marked
+ * read when shown; new ones are tinted until then.
+ */
+function Updates({
+  items,
+  unread,
+  onSeen,
+  onGo,
+}: {
+  items: DrmNotification[];
+  unread: number;
+  onSeen: () => Promise<void>;
+  onGo: () => void;
+}) {
+  // Which were new when the panel opened - kept so they stay tinted while
+  // being read, even though opening the panel marks them seen.
+  const [fresh] = useState(() => new Set(items.slice(0, unread).map((n) => n.id)));
+  useEffect(() => {
+    if (unread > 0) void onSeen();
+  }, [unread, onSeen]);
+
+  if (!items.length) {
+    return <p className="px-4 py-6 text-center text-sm text-ink-muted">Nothing new. Failed payments and Sankalpam days show here.</p>;
+  }
+  return (
+    <ul className="scroll-slim max-h-96 divide-y divide-line-soft overflow-y-auto">
+      {items.map((n) => {
+        const ng = n.kind === "nearly_gave";
+        return (
+          <li key={n.id} className={`px-4 py-3 ${fresh.has(n.id) ? "bg-brand-50/70" : ""}`}>
+            <div className="flex items-start gap-2.5">
+              <span
+                className={`mt-0.5 grid h-7 w-7 flex-none place-items-center rounded-control ${
+                  ng ? "bg-warn-wash text-warn" : "bg-amber-100 text-amber-800"
+                }`}
+              >
+                <Icon name={ng ? "inbox" : "sparkle"} size={14} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-ink">{n.title}</p>
+                {n.body && <p className="mt-0.5 text-xs text-ink-muted">{n.body}</p>}
+                <p className="mt-0.5 text-2xs text-ink-faint">{relativeDate(n.created_at)} · {clockTime(n.created_at)}</p>
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  {ng && n.paid_since ? (
+                    <Badge tone="good" dot>
+                      Donated since
+                    </Badge>
+                  ) : ng ? (
+                    <NearlyGaveCallButton n={n} onGo={onGo} />
+                  ) : null}
+                  {n.link && (
+                    <Link href={n.link} onClick={onGo} className={buttonClass("secondary", "xs")}>
+                      Open
+                    </Link>
+                  )}
+                </div>
+              </div>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
   );
 }

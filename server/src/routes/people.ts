@@ -13,6 +13,7 @@ import {
   EXPORT_ROW_CAP,
   type ExportFormat,
 } from '../utils/export';
+import { refreshSankalpFromPerson } from '../services/sankalpDays';
 
 const router = Router();
 router.use(authenticate);
@@ -526,6 +527,11 @@ router.put('/:id', async (req, res) => {
     // has already happened here. Outcome lands in push_status.
     void pushProfileToSites(result.rows[0]).catch((e) =>
       console.error('people.push error:', e)
+    );
+
+    // A birthday or anniversary typed here reaches their Sankalpam entry.
+    await refreshSankalpFromPerson(pool, String(req.params.id)).catch((e) =>
+      console.error('people.sankalp error:', (e as Error).message)
     );
 
     res.json(result.rows[0]);

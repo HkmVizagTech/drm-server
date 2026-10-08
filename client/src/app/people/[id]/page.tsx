@@ -11,6 +11,7 @@
 
 import { use, useEffect, useState, FormEvent } from "react";
 import { apiClient } from "@/lib/api";
+import { SankalpamPersonButton } from "@/components/sankalpam/person-button";
 import {
   Alert,
   Badge,
@@ -335,6 +336,7 @@ export default function PersonProfilePage({ params }: PageProps<"/people/[id]">)
             <LinkButton href="/people" icon="arrowLeft" variant="ghost">
               Back to people
             </LinkButton>
+            <SankalpamPersonButton personId={id} />
             <Button variant="secondary" icon="refresh" loading={syncing} onClick={syncFromHkmv}>
               Refresh from HKMV
             </Button>
