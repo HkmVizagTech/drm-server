@@ -25,10 +25,21 @@
 //   inline  - desks: a bar directly under the outcome buttons, where the
 //             eye already is.
 
-import { currency, dateTime, istInputToISO, istInstant, shortDate } from "@/lib/format";
+import { useEffect } from "react";
+import { currency, dateTime, istDayPlus, istInputToISO, istInstant, shortDate } from "@/lib/format";
 import { Button, Icon, Input } from "@/components/ui";
 import { isClosingOutcome, isDonatedOutcome, type Disposition } from "@/lib/calling";
 import type { CallForm } from "./outcome-panel";
+
+/** "When will they donate?" - the days people actually say on the phone. */
+const LATER_WHEN: { label: string; days: number; time: string }[] = [
+  { label: "This evening", days: 0, time: "18:00" },
+  { label: "Tomorrow", days: 1, time: "10:00" },
+  { label: "In 3 days", days: 3, time: "10:00" },
+  { label: "Next week", days: 7, time: "10:00" },
+  { label: "In 2 weeks", days: 14, time: "10:00" },
+  { label: "Next month", days: 30, time: "10:00" },
+];
 
 export function ConfirmLog({
   outcome,
@@ -61,6 +72,19 @@ export function ConfirmLog({
   const closing = isClosingOutcome(outcome);
   const donated = isDonatedOutcome(outcome);
   const qr = outcome.slug === "will_pay_qr";
+  // "Will donate later": they mean it, just not today. Ask when and how much
+  // right here, so it becomes a promise that rings on the day.
+  const later = outcome.slug === "will_donate";
+  // A follow-up day already picked below the outcomes is the day they said:
+  // carried into the promise, so the two never disagree.
+  const pickedDay = form.followUp ?? (form.customDate ? istInstant(form.customDate, "10:00").toISOString() : null);
+  useEffect(() => {
+    if (later && pickedDay && !form.remWhen) {
+      form.setRemWhen(new Date(new Date(pickedDay).getTime() + 5.5 * 3600_000).toISOString().slice(0, 16));
+    }
+    // Once, as the confirm opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // What will ride along with the outcome, in words.
   const extras: string[] = [];
@@ -69,7 +93,7 @@ export function ConfirmLog({
   else if (form.customDate) extras.push(`Call back ${shortDate(istInstant(form.customDate, "10:00").toISOString())}`);
   if (form.remWhen) {
     extras.push(
-      `Promise: ${form.remOccasion.trim() || "Reminder"} · ${dateTime(istInputToISO(form.remWhen))}${
+      `${later ? "Will donate" : `Promise: ${form.remOccasion.trim() || "Reminder"}`} · ${dateTime(istInputToISO(form.remWhen))}${
         form.remAmount ? ` · ${currency(Number(form.remAmount))}` : ""
       }`
     );
@@ -77,7 +101,8 @@ export function ConfirmLog({
   if (form.duration) extras.push(`About ${form.duration} min`);
   const note = form.note.trim();
 
-  const missingCallback = outcome.wants_follow_up && !form.followUp && !form.customDate && !closing;
+  // A promise date is also the day they are rung again.
+  const missingCallback = outcome.wants_follow_up && !form.followUp && !form.customDate && !form.remWhen && !closing;
 
   const box =
     layout === "sheet"
@@ -134,6 +159,55 @@ export function ConfirmLog({
               <span className="text-2xs text-ink-muted">
                 {expectedAmount ? `Blank uses ${currency(Number(expectedAmount))}` : "Optional"}
               </span>
+            )}
+          </div>
+        )}
+
+        {later && (
+          <div className="mt-2.5 space-y-2">
+            <p className="text-xs font-medium text-ink-soft">When will they donate?</p>
+            <div className="flex flex-wrap gap-1.5">
+              {LATER_WHEN.map((w) => {
+                const v = `${istDayPlus(w.days)}T${w.time}`;
+                const on = form.remWhen === v;
+                return (
+                  <button
+                    key={w.label}
+                    type="button"
+                    onClick={() => form.setRemWhen(on ? "" : v)}
+                    className={`inline-flex min-h-9 items-center rounded-control border px-2.5 text-xs transition-colors ${
+                      on
+                        ? "border-brand-600 bg-brand-100 font-medium text-brand-800"
+                        : "border-line-strong bg-surface text-ink-soft hover:border-brand-400"
+                    }`}
+                  >
+                    {w.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="w-48">
+                <Input
+                  type="datetime-local"
+                  value={form.remWhen}
+                  onChange={(e) => form.setRemWhen(e.target.value)}
+                  aria-label="Day they will donate"
+                />
+              </div>
+              <div className="w-32">
+                <Input
+                  value={form.remAmount}
+                  onChange={(e) => form.setRemAmount(e.target.value.replace(/\D/g, ""))}
+                  placeholder={expectedAmount ? `₹${Math.round(Number(expectedAmount))}` : "Amount ₹"}
+                  inputMode="numeric"
+                  aria-label="Amount they will donate"
+                  className="tabular-nums"
+                />
+              </div>
+            </div>
+            {!form.remWhen && (
+              <p className="text-2xs text-ink-muted">Pick a day and DRM reminds you to ring them then. Without one they are tried again in a few days.</p>
             )}
           </div>
         )}

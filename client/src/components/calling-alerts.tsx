@@ -127,7 +127,29 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
   const [sankalpam, setSankalpam] = useState<SankalpSummary | null>(null);
   const [notifications, setNotifications] = useState<DrmNotification[]>([]);
   const [unread, setUnread] = useState(0);
-  const [popups, setPopups] = useState<string[]>([]);
+  // Cards still open carry over to the next page (each page mounts this
+  // afresh); closed ones do not come back.
+  const [popups, setPopupsState] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      return JSON.parse(sessionStorage.getItem(OPEN_KEY) ?? "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
+  // Saved straight away, not inside a state updater: a click that closes a
+  // card and moves page at once unmounts this before an updater would run.
+  const popupsRef = useRef(popups);
+  const setPopups = useCallback((fn: (p: string[]) => string[]) => {
+    const next = fn(popupsRef.current);
+    popupsRef.current = next;
+    try {
+      sessionStorage.setItem(OPEN_KEY, JSON.stringify(next));
+    } catch {
+      /* per page only */
+    }
+    setPopupsState(next);
+  }, []);
   // Ids already shown, so a desktop alert fires only for something new - not
   // for the whole feed on the first load after opening DRM.
   const known = useRef<Set<string> | null>(null);
@@ -152,15 +174,21 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
         const seenIds = known.current ?? new Set<string>();
         const seenAt = r.seen_at ? new Date(r.seen_at).getTime() : 0;
         const fresh: DrmNotification[] = [];
+        // Each page is its own mount of this provider, so "already popped up"
+        // is kept for the browser tab: moving to another page must not pop
+        // (and chime) the same ones again.
+        const popped = readPopped();
         for (const n of r.notifications) {
           if (seenIds.has(n.id)) continue;
           seenIds.add(n.id);
+          if (popped.has(n.id)) continue;
           const at = new Date(n.created_at).getTime();
           // New since the last poll - or, on opening DRM, unread and recent,
           // so a payment that failed while the tab was closed still pops up.
           if (!first || (at > seenAt && Date.now() - at < POP_ON_OPEN_MS)) fresh.push(n);
         }
         known.current = seenIds;
+        if (fresh.length) writePopped(popped, fresh.map((n) => n.id));
         if (fresh.length) {
           setPopups((p) => [...fresh.map((n) => n.id), ...p.filter((id) => !fresh.some((n) => n.id === id))].slice(0, 4));
           chime(fresh.some((n) => n.kind === "nearly_gave") ? "urgent" : "info");
@@ -200,7 +228,7 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
       // progress, and the next one is a minute away.
       signedIn.current = false;
     }
-  }, []);
+  }, [setPopups]);
 
   useEffect(() => unlockChimeOnFirstTouch(), []);
 
@@ -234,7 +262,7 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
 
   const dueCount = counts.missed + counts.now + counts.today;
 
-  const dismissPopup = useCallback((id: string) => setPopups((p) => p.filter((x) => x !== id)), []);
+  const dismissPopup = useCallback((id: string) => setPopups((p) => p.filter((x) => x !== id)), [setPopups]);
 
   const markNotificationsSeen = useCallback(async () => {
     setUnread(0);
@@ -266,6 +294,25 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
       {children}
     </CallingAlertsContext.Provider>
   );
+}
+
+const POPPED_KEY = "drm-popped";
+const OPEN_KEY = "drm-open-popups";
+
+function readPopped(): Set<string> {
+  try {
+    return new Set(JSON.parse(sessionStorage.getItem(POPPED_KEY) ?? "[]") as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
+function writePopped(had: Set<string>, ids: string[]) {
+  try {
+    sessionStorage.setItem(POPPED_KEY, JSON.stringify([...ids, ...had].slice(0, 200)));
+  } catch {
+    /* only means one may pop up again after moving page */
+  }
 }
 
 /**

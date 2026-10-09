@@ -23,6 +23,7 @@ import pool from '../db/pool';
 import { fetchAbandonedPage, isSiteConfigured, type AbandonedDonation, type SiteKey } from './hkmvClient';
 import { notify } from './notifications';
 import { gaveSinceSql } from './gaveSince';
+import { FROM_DONATIONS_PAGE } from '../routes/crmLists';
 
 const SITES: SiteKey[] = ['hkmv', 'annadan'];
 const SITE_LABEL: Record<string, string> = { hkmv: 'harekrishnavizag.org', annadan: 'annadan' };
@@ -73,7 +74,15 @@ export async function announceNearlyGave(): Promise<number> {
        SELECT a.*
          FROM abandoned_attempts a
         WHERE a.notified_at IS NULL
-          AND a.dismissed_at IS NULL
+          -- The same people the Nearly gave screen shows, and no others: the
+          -- bell must never announce somebody the list then leaves out.
+          -- Not set aside (per person, as on the screen) ...
+          AND NOT EXISTS (
+            SELECT 1 FROM abandoned_attempts sa
+             WHERE sa.phone = a.phone AND sa.dismissed_at IS NOT NULL AND a.attempted_at <= sa.dismissed_at)
+          -- ... and not from the main site's /donations page, which has its
+          -- own team and is left off Nearly gave everywhere.
+          AND NOT ${FROM_DONATIONS_PAGE('a')}
           AND a.attempted_at > NOW() - ($1::int * INTERVAL '1 hour')
           AND (a.status = 'failed' OR a.attempted_at <= NOW() - ($2::int * INTERVAL '1 minute'))
           -- Gave since, on either site: not news, and not somebody to ring.

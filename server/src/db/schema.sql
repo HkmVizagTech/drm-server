@@ -2391,3 +2391,37 @@ CREATE TABLE IF NOT EXISTS drm_notification_seen (
 
 -- When the bell was told about an unfinished donation, so it is told once.
 ALTER TABLE abandoned_attempts ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
+
+
+-- ===========================================================================
+-- WHATSAPP THANK-YOU AFTER A CAMPAIGN DONATION (services/waThanks.ts)
+--
+-- First used for Mahalaya Amavasya: everybody who donates on /pitru-paksha
+-- that day is thanked on WhatsApp about two hours later. One row per person
+-- per campaign (page@day), so nobody is messaged twice, and every send and
+-- failure is on record. Settings are in crm_settings under 'wa_thanks'.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS wa_thanks_sends (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  campaign VARCHAR(80) NOT NULL,
+  donation_id UUID REFERENCES donations(id) ON DELETE SET NULL,
+  person_id UUID REFERENCES people(id) ON DELETE SET NULL,
+  phone VARCHAR(10) NOT NULL,
+  name VARCHAR(255),
+  amount NUMERIC(12, 2),
+  donated_at TIMESTAMPTZ,
+  -- When it is due. NULL for a donation too late in the day to thank.
+  send_at TIMESTAMPTZ,
+  -- waiting | sending | sent | failed | skipped
+  status VARCHAR(12) NOT NULL DEFAULT 'waiting',
+  attempts INT NOT NULL DEFAULT 0,
+  message_id VARCHAR(100),
+  error TEXT,
+  sent_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (campaign, phone)
+);
+CREATE INDEX IF NOT EXISTS idx_wa_thanks_due ON wa_thanks_sends(campaign, status, send_at);
+-- Which seva on the page the donation was for, and the words used for {{2}}.
+ALTER TABLE wa_thanks_sends ADD COLUMN IF NOT EXISTS seva VARCHAR(120);
+ALTER TABLE wa_thanks_sends ADD COLUMN IF NOT EXISTS seva_text VARCHAR(120);

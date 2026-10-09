@@ -640,7 +640,9 @@ function CallScreen({
   const pick = useCallback(
     (d: Disposition) => {
       if (!lead || saving) return;
-      if (!askFirst) {
+      // "Will donate later" always asks when, even with "Ask before logging"
+      // off - a promise without a day is one nobody is reminded of.
+      if (!askFirst && d.slug !== "will_donate") {
         void logCall(d);
         return;
       }

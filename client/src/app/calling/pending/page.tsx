@@ -58,6 +58,8 @@ import { toast } from "@/components/toast";
 import { SelectAllBanner, SelectionBar } from "@/components/bulk/selection-bar";
 import { LinkDonationDialog } from "@/components/calling/link-donation";
 import { CALL_EDGE, CallStateChip, callState } from "@/components/calling/call-state";
+import { useCallingAlerts } from "@/components/calling-alerts";
+import { CallFilterChips, type CallFilter } from "@/components/calling/call-filter";
 
 interface Row {
   id: string;
@@ -101,6 +103,8 @@ interface Answer {
   gave_anyway: number;
   already_leads: number;
   value_at_stake: number;
+  /** How many behind each quick call filter (All, Not called today, ...). */
+  call_counts?: { all: number; not_today: number; today: number; no_answer: number };
   /** False when the table is showing only the first 500 of a longer list. */
   complete: boolean;
   /** Per site: when it was last asked, what went wrong, whether it is being asked now. */
@@ -203,6 +207,7 @@ export default function PendingPaymentsPage() {
   const [maxAmount, setMaxAmount] = useState("");
   const [status, setStatus] = useState("");
   const [sort, setSort] = useState("recent");
+  const [called, setCalled] = useState<CallFilter>("");
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -242,8 +247,9 @@ export default function PendingPaymentsPage() {
     if (status) q.set("status", status);
     if (debounced.trim()) q.set("search", debounced.trim());
     if (view === "set_aside") q.set("set_aside", "true");
+    if (called) q.set("called", called);
     return q;
-  }, [days, site, minAmount, maxAmount, status, sort, debounced, view]);
+  }, [days, site, minAmount, maxAmount, status, sort, debounced, view, called]);
 
   // Loading is DERIVED: the screen is loading whenever the answer on it was
   // fetched for different filters than the ones now chosen. Holding it as a
@@ -279,6 +285,25 @@ export default function PendingPaymentsPage() {
 
   /** Re-read what is on screen, quietly - no skeleton for a refresh. */
   const reload = useCallback(() => load(latest.current), [load]);
+
+  // Kept live. The list used to load once and sit there, so a payment that
+  // failed while it was open rang the bell but never appeared here until the
+  // page was reloaded. Now it re-reads the moment the bell hears of a new
+  // one, and every minute anyway while the tab is in front.
+  const { notifications } = useCallingAlerts();
+  const newestNearlyGave = notifications.find((n) => n.kind === "nearly_gave")?.id ?? "";
+  const lastHeard = useRef(newestNearlyGave);
+  useEffect(() => {
+    if (newestNearlyGave === lastHeard.current) return;
+    lastHeard.current = newestNearlyGave;
+    void reload();
+  }, [newestNearlyGave, reload]);
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!document.hidden) void reload();
+    }, 60_000);
+    return () => clearInterval(t);
+  }, [reload]);
 
   /* --------------------------------------------------------- selection */
 
@@ -673,7 +698,13 @@ export default function PendingPaymentsPage() {
       <EmptyState
         title="No one to call"
         message={
-          data?.gave_anyway
+          called === "today"
+            ? "Nobody has been called today yet."
+            : called === "not_today"
+            ? "Everyone has been called today."
+            : called === "no_answer"
+            ? "No one whose last call went unanswered."
+            : data?.gave_anyway
             ? `All ${number(data.gave_anyway)} have given since.`
             : "No unfinished donations in this period."
         }
@@ -851,6 +882,10 @@ export default function PendingPaymentsPage() {
           </p>
         )}
       </div>
+
+      {view === "open" && (
+        <CallFilterChips className="mb-3" value={called} onChange={setCalled} counts={data?.call_counts} />
+      )}
 
       {data && (
         <p className={`mb-3 flex flex-wrap items-center gap-x-2 text-xs ${siteTrouble.length ? "text-warn" : "text-ink-muted"}`}>

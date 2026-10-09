@@ -28,7 +28,7 @@ import { callHref, formatPhone } from "@/lib/calling";
 import { Badge, Button, Icon, IconButton, buttonClass } from "@/components/ui";
 import { toast } from "./toast";
 import { useCallingAlerts, type DrmNotification } from "./calling-alerts";
-import { NearlyGaveCallButton } from "./notification-popups";
+import { NearlyGaveActions } from "./notification-popups";
 import { setSoundOn, soundOn } from "@/lib/chime";
 
 // The cadence - a minute - lives with the timer that uses it, in
@@ -351,9 +351,9 @@ function Updates({
                       Donated since
                     </Badge>
                   ) : ng ? (
-                    <NearlyGaveCallButton n={n} onGo={onGo} />
+                    <NearlyGaveActions n={n} onGo={onGo} />
                   ) : null}
-                  {n.link && (
+                  {!ng && n.link && (
                     <Link href={n.link} onClick={onGo} className={buttonClass("secondary", "xs")}>
                       Open
                     </Link>

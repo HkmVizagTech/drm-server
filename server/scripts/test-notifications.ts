@@ -147,6 +147,11 @@ async function main() {
   r = await req('POST', '/api/notifications/seen', ana, {});
   r = await req('GET', '/api/notifications', ana);
   check('read once seen', r.body.unread === 0, r.body.unread);
+  // One raised for the /donations page before that rule existed: hidden from the bell.
+  const dp = (await pool.query(`SELECT id FROM abandoned_attempts WHERE external_id = 'dp-1'`)).rows[0].id;
+  await pool.query(`INSERT INTO drm_notifications (kind, title, phone, ref_key) VALUES ('nearly_gave', 'Payment failed · Donations Page', '9000000009', $1)`, ['ng:' + dp]);
+  r = await req('GET', '/api/notifications', ana);
+  check('an old /donations page one is not shown or counted', !r.body.notifications.some((x: any) => /Donations Page/.test(x.title)) && r.body.unread === 0, r.body);
   r = await req('GET', '/api/notifications', acc);
   check('not for an accountant', r.status === 403);
 
@@ -204,7 +209,7 @@ async function main() {
   const phones = (r.body.rows ?? []).map((x: any) => x.phone);
   check('a failed payment is on the list at once', phones.includes('9000000001'), phones);
   // Everyone the bell announced is on the list (or marked donated there).
-  const announced = (await pool.query(`SELECT DISTINCT phone FROM drm_notifications WHERE kind = 'nearly_gave'`)).rows.map((x) => x.phone);
+  const announced = (await pool.query(`SELECT DISTINCT phone FROM drm_notifications WHERE kind = 'nearly_gave' AND phone <> '9000000009'`)).rows.map((x) => x.phone);
   const all = (await req('GET', '/api/crm/leads/abandoned?days=7&include_settled=true', ana)).body.rows.map((x: any) => x.phone);
   check('everyone the bell announced is on Nearly gave', announced.every((p) => all.includes(p)), { announced, all });
   check('one pending 6 minutes is on it', phones.includes('9000000002'), phones);
@@ -214,6 +219,42 @@ async function main() {
   await attempt('9000000008', 'pending', 2, 'Just Started');
   r = await req('GET', '/api/crm/leads/abandoned?days=7', ana);
   check('one pending 2 minutes is not on it yet', !(r.body.rows ?? []).some((x: any) => x.phone === '9000000008'));
+
+  console.log('\n6b. the quick call filter');
+  // Walked Away (9000000003) was rung 10 minutes ago. Give Ramesh a lead whose
+  // last call yesterday went unanswered.
+  const rl = (await pool.query(`INSERT INTO leads (phone, name, status, last_contacted_at) VALUES ('9000000007', 'Ramesh', 'contacted', NOW() - INTERVAL '1 day') RETURNING id`)).rows[0].id;
+  await pool.query(`INSERT INTO lead_activities (lead_id, kind, connected, occurred_at) VALUES ($1, 'call', FALSE, NOW() - INTERVAL '1 day')`, [rl]);
+  const view = async (called: string) =>
+    (await req('GET', `/api/crm/leads/abandoned?days=7${called ? `&called=${called}` : ''}`, ana)).body;
+  const everyone = await view('');
+  const calledToday = await view('today');
+  const notToday = await view('not_today');
+  const noAnswer = await view('no_answer');
+  const ph = (b: any) => b.rows.map((x: any) => x.phone).sort();
+  check('called today: only the one rung today', JSON.stringify(ph(calledToday)) === JSON.stringify(['9000000003']), ph(calledToday));
+  check('not called today: everyone else, rung before or never', ph(notToday).includes('9000000007') && ph(notToday).includes('9000000001') && !ph(notToday).includes('9000000003'), ph(notToday));
+  check('not answered: the one whose last call went unanswered', JSON.stringify(ph(noAnswer)) === JSON.stringify(['9000000007']), ph(noAnswer));
+  check('the counts on the buttons stay the same whichever is picked', JSON.stringify(everyone.call_counts) === JSON.stringify(noAnswer.call_counts) && everyone.call_counts.no_answer === 1, { a: everyone.call_counts, b: noAnswer.call_counts });
+  const leadsToday = (await req('GET', '/api/crm/leads?called=not_today', ana)).body;
+  const leadsNoAns = (await req('GET', '/api/crm/leads?called=no_answer', ana)).body;
+  const lp = (b: any) => (b.leads ?? b.rows ?? []).map((x: any) => x.phone);
+  check('Leads: not called today', lp(leadsToday).includes('9000000007') && !lp(leadsToday).includes('9000000003'), lp(leadsToday));
+  check('Leads: not answered', JSON.stringify(lp(leadsNoAns)) === JSON.stringify(['9000000007']), lp(leadsNoAns));
+
+  console.log('\n6c. Call and Open on a notification');
+  const feed = (await req('GET', '/api/notifications', ana)).body.notifications;
+  const ff2 = feed.find((x: any) => x.title.includes('Failed Fast'));
+  check('not a lead yet', !ff2.lead_id, ff2);
+  r = await req('POST', `/api/notifications/${ff2.id}/lead`, ana, {});
+  check('made a lead, the caller\'s own', r.status === 200 && r.body.lead_id && r.body.created === true, r.body);
+  const made = (await pool.query(`SELECT assigned_to, phone FROM leads WHERE id = $1`, [r.body.lead_id])).rows[0];
+  check('for that number, with Ana', made?.phone === '9000000001' && made.assigned_to === ANA, made);
+  const again = await req('POST', `/api/notifications/${ff2.id}/lead`, ana, {});
+  check('pressing again opens the same lead', again.body.lead_id === r.body.lead_id, again.body);
+  const wa2 = feed.find((x: any) => x.title.includes('Walked Away'));
+  r = await req('POST', `/api/notifications/${wa2.id}/lead`, ana, {});
+  check('one who already has a lead opens it', r.body.lead_id === (await pool.query(`SELECT id FROM leads WHERE phone = '9000000003'`)).rows[0].id, r.body);
 
   console.log('\n7. ringing anyone on Sankalpam to check their details');
   r = await req('GET', '/api/sankalpam/donors?need=check', ana);

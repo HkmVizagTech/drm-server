@@ -125,6 +125,7 @@ export const navGroups: NavGroup[] = [
     items: [
       { href: "/team", label: "Team", icon: "shield" },
       { href: "/calling/settings", label: "Calling setup", icon: "settings" },
+      { href: "/whatsapp-thanks", label: "WhatsApp thanks", icon: "message" },
     ],
   },
 ];

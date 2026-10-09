@@ -545,6 +545,7 @@ function buildLeadFilters(q: Record<string, unknown>, startIdx = 1): Filters {
     else if (c === 'today') conditions.push(`l.last_contacted_at >= date_trunc('day', NOW())`);
     else if (c === 'week') conditions.push(`l.last_contacted_at >= NOW() - INTERVAL '7 days'`);
     else if (c === 'called') conditions.push(`l.last_contacted_at IS NOT NULL`);
+    else if (c === 'not_today' || c === 'no_answer') conditions.push(callFilterSql(c, 'l')!);
   }
   if (q.called_by && /^[0-9a-f-]{36}$/i.test(String(q.called_by))) {
     conditions.push(`EXISTS (SELECT 1 FROM lead_activities ca WHERE ca.lead_id = l.id AND ca.kind = 'call' AND ca.user_id = $${i++}::uuid)`);
@@ -858,6 +859,26 @@ const ABANDONED_STALE_MINUTES = 30;
  */
 const MAX_ABANDONED_PAGES = 40;
 
+/**
+ * "Was their last call unanswered?" for a lead aliased `ld` - the latest call
+ * logged to them did not connect. Shared by Leads and Nearly gave.
+ */
+const LAST_CALL_UNANSWERED = (ld: string) => `(SELECT lc.connected IS FALSE FROM lead_activities lc
+   WHERE lc.lead_id = ${ld}.id AND lc.kind = 'call' ORDER BY lc.occurred_at DESC LIMIT 1)`;
+
+/**
+ * The caller's quick filter, the same words on Leads and Nearly gave:
+ * called today, not called today (including never), or last call not answered.
+ * `ld` is the lead's alias; somebody with no lead has never been called.
+ */
+function callFilterSql(called: unknown, ld: string): string | null {
+  const c = String(called ?? '');
+  if (c === 'today') return `${ld}.last_contacted_at >= date_trunc('day', NOW())`;
+  if (c === 'not_today') return `(${ld}.last_contacted_at IS NULL OR ${ld}.last_contacted_at < date_trunc('day', NOW()))`;
+  if (c === 'no_answer') return `${LAST_CALL_UNANSWERED(ld)} IS TRUE`;
+  return null;
+}
+
 /** Clip to a column width. The sites' free text overruns these regularly. */
 const cut = (v: unknown, n: number): string | null => {
   const t = String(v ?? '').trim();
@@ -946,6 +967,9 @@ function buildAbandonedQuery(
     narrow.push(`l.status = ANY($${i++}::text[])`);
     values.push(String(q.status).split(',').filter(Boolean));
   }
+  // Called today / not called today / last call not answered.
+  const callWhere = callFilterSql(q.called, 'ld');
+  if (callWhere) narrow.push(callWhere);
   if (q.search) {
     narrow.push(`(l.name ILIKE $${i} OR l.phone ILIKE $${i} OR l.email ILIKE $${i})`);
     values.push(`%${String(q.search).trim()}%`);
@@ -1005,6 +1029,9 @@ function buildAbandonedQuery(
              -- list, marked as donated, so the call that did it is seen;
              -- somebody who paid before anyone rang just drops off.
              (ld.last_contacted_at IS NOT NULL AND ld.last_contacted_at >= l.attempted_at) AS called_since,
+             -- For the quick filter's counts.
+             COALESCE(ld.last_contacted_at >= date_trunc('day', NOW()), FALSE) AS called_today,
+             COALESCE(${LAST_CALL_UNANSWERED('ld')}, FALSE) AS last_unanswered,
              ld.id AS lead_id,
              ld.status AS lead_status,
              -- So the screen can say "do not call" and hide the Call button,
@@ -1116,7 +1143,10 @@ router.get('/leads/abandoned', async (req, res) => {
     const built = buildAbandonedQuery(q, wanted, viewDays);
     const { base, values, order } = built;
 
-    const [page, totals] = await Promise.all([
+    // How many sit behind each quick filter - worked out without that filter,
+    // so the numbers on the buttons do not change as you switch between them.
+    const unfiltered = buildAbandonedQuery({ ...q, called: undefined }, wanted, viewDays);
+    const [page, totals, callCounts] = await Promise.all([
       pool.query(
         `${base}
          SELECT * FROM resolved l
@@ -1136,6 +1166,15 @@ router.get('/leads/abandoned', async (req, res) => {
            FROM resolved`,
         values
       ),
+      pool.query(
+        `${unfiltered.base}
+         SELECT COUNT(*) FILTER (WHERE NOT gave_anyway)::int AS "all",
+                COUNT(*) FILTER (WHERE NOT gave_anyway AND NOT called_today)::int AS not_today,
+                COUNT(*) FILTER (WHERE NOT gave_anyway AND called_today)::int AS today,
+                COUNT(*) FILTER (WHERE NOT gave_anyway AND last_unanswered)::int AS no_answer
+           FROM resolved`,
+        unfiltered.values
+      ),
     ]);
 
     const t = totals.rows[0];
@@ -1150,6 +1189,7 @@ router.get('/leads/abandoned', async (req, res) => {
       gave_anyway: t.gave_anyway,
       // Paid after a caller rang them: still shown, marked as donated.
       paid_after_call: t.paid_after_call,
+      call_counts: callCounts.rows[0],
       already_leads: t.already_leads,
       // What walked away, over everybody still worth ringing - not over the
       // page. This is the number that decides whether the list is worth a
@@ -1219,6 +1259,7 @@ async function exportAbandonedFile(
         status: 'Payment status',
         search: 'Search',
         include_settled: 'Including those who gave anyway',
+        called: 'Calls',
         sort: 'Sorted by',
       }),
       columns: [

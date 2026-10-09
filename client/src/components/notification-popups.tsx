@@ -9,68 +9,60 @@
 // even when DRM is not the tab in front.
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { clockTime } from "@/lib/format";
 import { callHref, formatPhone } from "@/lib/calling";
-import { Badge, Button, Icon, buttonClass } from "@/components/ui";
+import { Badge, Button, Icon } from "@/components/ui";
 import { toast } from "./toast";
 import { useCallingAlerts, type DrmNotification } from "./calling-alerts";
 
 /**
- * Call from a Nearly gave notification, through the call screen so the call is
- * logged and counted. Somebody not yet a lead is made one first (yours), the
- * same as pressing Call on the Nearly gave screen.
+ * Call and Open on a Nearly gave notification.
+ *
+ * Both go through the person's lead: Call opens the call screen (so the call
+ * is logged and counted), Open opens their lead page. Somebody who is not a
+ * lead yet is made one first - the server does that, so the buttons work even
+ * when the bell does not know their lead yet. Before, Call fell back to a
+ * phone link (which does nothing on a computer) and Open went to the Nearly
+ * gave list, which is no help when you are already on it.
  */
-export function NearlyGaveCallButton({ n, onGo }: { n: DrmNotification; onGo?: () => void }) {
+export function NearlyGaveActions({ n, onGo }: { n: DrmNotification; onGo?: () => void }) {
   const router = useRouter();
-  const [busy, setBusy] = useState(false);
-  const label = `Call ${n.phone ? formatPhone(n.phone) : ""}`;
-  if (n.lead_id) {
-    return (
-      <Link href={callHref(n.lead_id, "/calling/pending")} onClick={onGo} className={buttonClass("primary", "xs")}>
-        <Icon name="phone" size={13} />
-        {label}
-      </Link>
-    );
-  }
-  if (!n.attempt_id) {
-    return n.phone ? (
-      <a href={`tel:+91${n.phone}`} onClick={onGo} className={buttonClass("primary", "xs")}>
-        <Icon name="phone" size={13} />
-        {label}
-      </a>
-    ) : null;
-  }
-  return (
-    <Button
-      size="xs"
-      icon="phone"
-      loading={busy}
-      onClick={async () => {
-        setBusy(true);
-        try {
-          const r = await apiClient.post<{ lead_ids: string[]; gave_anyway: number; do_not_call: number }>(
-            "/api/crm/leads/abandoned/adopt-bulk",
-            { ids: [n.attempt_id], filters: {}, assign: "me" }
-          );
-          const id = r.lead_ids[0];
-          if (!id) {
-            toast.warn(r.gave_anyway ? "They have donated since - no call needed." : "They cannot be called from here.");
-            return;
-          }
+  const [busy, setBusy] = useState<"call" | "open" | null>(null);
+
+  async function go(what: "call" | "open") {
+    setBusy(what);
+    try {
+      let id = n.lead_id ?? null;
+      if (!id) {
+        const r = await apiClient.post<{ lead_id?: string; paid?: boolean }>(`/api/notifications/${n.id}/lead`, {});
+        if (r.paid) {
+          toast("They have donated since - no call needed.");
           onGo?.();
-          router.push(callHref(id, "/calling/pending"));
-        } catch (e) {
-          toast.error("Could not start the call. Try again.", e instanceof Error ? e.message : undefined);
-        } finally {
-          setBusy(false);
+          return;
         }
-      }}
-    >
-      {label}
-    </Button>
+        id = r.lead_id ?? null;
+      }
+      if (!id) throw new Error("Could not find them.");
+      onGo?.();
+      router.push(what === "call" ? callHref(id, "/calling/pending") : `/leads/${id}`);
+    } catch (e) {
+      toast.error(what === "call" ? "Could not start the call." : "Could not open them.", e instanceof Error ? e.message : undefined);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <>
+      <Button size="xs" icon="phone" loading={busy === "call"} disabled={!!busy} onClick={() => void go("call")}>
+        Call {n.phone ? formatPhone(n.phone) : ""}
+      </Button>
+      <Button size="xs" variant="secondary" loading={busy === "open"} disabled={!!busy} onClick={() => void go("open")}>
+        Open
+      </Button>
+    </>
   );
 }
 
@@ -116,6 +108,11 @@ export function NotificationPopups() {
 }
 
 function PopupCard({ n, onClose }: { n: DrmNotification; onClose: () => void }) {
+  const router = useRouter();
+  const go = (href: string) => {
+    onClose();
+    router.push(href);
+  };
   const ng = n.kind === "nearly_gave";
   const failed = ng && /^Payment failed/.test(n.title);
   return (
@@ -143,13 +140,12 @@ function PopupCard({ n, onClose }: { n: DrmNotification; onClose: () => void }) 
                 Donated since - no call needed
               </Badge>
             ) : ng ? (
-              <NearlyGaveCallButton n={n} onGo={onClose} />
-            ) : null}
-            {n.link && (
-              <Link href={n.link} onClick={onClose} className={buttonClass("secondary", "xs")}>
+              <NearlyGaveActions n={n} onGo={onClose} />
+            ) : n.link ? (
+              <Button size="xs" variant="secondary" onClick={() => go(n.link!)}>
                 Open
-              </Link>
-            )}
+              </Button>
+            ) : null}
           </div>
         </div>
         <button

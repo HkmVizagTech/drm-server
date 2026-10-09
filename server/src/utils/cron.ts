@@ -3,6 +3,7 @@ import pool from '../db/pool';
 import { APP_TIMEZONE } from '../bootTimezone';
 import { pollNearlyGave } from '../services/nearlyGaveWatch';
 import { notify } from '../services/notifications';
+import { thanksTick } from '../services/waThanks';
 import type { AbandonedDonation, SiteKey } from '../services/hkmvClient';
 
 // WHAT WAS WRONG WITH THIS JOB, because it ran wrong for a long time and the
@@ -83,6 +84,20 @@ export function scheduleBirthdayAnniversaryCheck() {
  * Nearly gave: ask the sites every minute and announce what has just failed,
  * or been left pending for 5 minutes. Sankalpam: the morning's list at 6:45 IST.
  */
+/**
+ * WhatsApp thanks after a campaign donation (services/waThanks.ts): every two
+ * minutes. Does nothing unless switched on in DRM.
+ */
+export function scheduleWhatsAppThanks() {
+  cron.schedule('*/2 * * * *', () => {
+    void thanksTick()
+      .then((r) => {
+        if (r.queued || r.sent || r.failed || r.skipped) console.log('[wa-thanks]', JSON.stringify(r));
+      })
+      .catch((e) => console.error('[CRON] wa thanks:', (e as Error).message));
+  }, { timezone: APP_TIMEZONE });
+}
+
 export function scheduleNotifications(store: (site: SiteKey, d: AbandonedDonation) => Promise<boolean>) {
   const opts = { timezone: APP_TIMEZONE };
   cron.schedule('* * * * *', () => {

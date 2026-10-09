@@ -71,6 +71,7 @@ import { toast } from "@/components/toast";
 import { SelectAllBanner, SelectionBar } from "@/components/bulk/selection-bar";
 import { AddToListDialog, BulkActionDialog } from "@/components/bulk/lead-bulk-dialogs";
 import { readSpreadsheet, SPREADSHEET_ACCEPT, type ParsedSheet } from "@/lib/spreadsheet";
+import { CallFilterChips, type CallFilter } from "@/components/calling/call-filter";
 
 /* -------------------------------------------------------------------- types */
 
@@ -612,7 +613,9 @@ function Leads() {
               options={[
                 { value: "", label: "Any" },
                 { value: "never", label: "Not called yet" },
+                { value: "not_today", label: "Not called today" },
                 { value: "today", label: "Called today" },
+                { value: "no_answer", label: "Not answered" },
                 { value: "week", label: "Called this week" },
                 { value: "me", label: "Called by me" },
               ]}
@@ -673,6 +676,14 @@ function Leads() {
           </Field>
         </div>
       </Toolbar>
+
+      {/* The caller's one-tap filter, always in view. The same choice as the
+          "Calls" dropdown above, so they never disagree. */}
+      <CallFilterChips
+        className="mb-4"
+        value={(["not_today", "today", "no_answer"].includes(calledFilter) ? calledFilter : "") as CallFilter}
+        onChange={(v) => setParams({ called: v || null, called_by: null })}
+      />
 
       {/* What a tile on the overview opened - said in words, removable. */}
       {(fromOverview.added[0] || fromOverview.added[1] || fromOverview.converted[0] || fromOverview.converted[1] || fromOverview.open) && (
