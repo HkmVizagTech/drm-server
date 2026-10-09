@@ -1025,9 +1025,8 @@ function buildAbandonedQuery(
              -- Did they give anyway? Same mobile, a lead marked as donated,
              -- or the same name within a day - see services/gaveSince.ts.
              ${gaveSinceSql('l')} AS gave_anyway,
-             -- Rung since they tried. Somebody who then paid stays on the
-             -- list, marked as donated, so the call that did it is seen;
-             -- somebody who paid before anyone rang just drops off.
+             -- Rung since they tried (kept for the export and the counts;
+             -- anyone who has paid leaves the list, called or not).
              (ld.last_contacted_at IS NOT NULL AND ld.last_contacted_at >= l.attempted_at) AS called_since,
              -- For the quick filter's counts.
              COALESCE(ld.last_contacted_at >= date_trunc('day', NOW()), FALSE) AS called_today,
@@ -1150,7 +1149,7 @@ router.get('/leads/abandoned', async (req, res) => {
       pool.query(
         `${base}
          SELECT * FROM resolved l
-          ${req.query.include_settled === 'true' ? '' : 'WHERE NOT gave_anyway OR called_since'}
+          ${req.query.include_settled === 'true' ? '' : 'WHERE NOT gave_anyway'}
           ORDER BY ${order}
           LIMIT 500`,
         values
@@ -1183,11 +1182,11 @@ router.get('/leads/abandoned', async (req, res) => {
       rows: page.rows,
       // Compared against the real total, not the page length: at exactly 500
       // the old form said "showing the first 500 of 500".
-      complete: page.rows.length >= (req.query.include_settled === 'true' ? t.total : t.open + t.paid_after_call),
+      complete: page.rows.length >= (req.query.include_settled === 'true' ? t.total : t.open),
       total: t.total,
       open: t.open,
       gave_anyway: t.gave_anyway,
-      // Paid after a caller rang them: still shown, marked as donated.
+      // Paid after a caller rang them (they leave the list like anyone who paid).
       paid_after_call: t.paid_after_call,
       call_counts: callCounts.rows[0],
       already_leads: t.already_leads,

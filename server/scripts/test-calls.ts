@@ -158,10 +158,8 @@ async function main() {
   const credit = await pool.query(`SELECT user_id, amount FROM caller_credits WHERE donation_id = $1 AND status = 'active'`, [gift]);
   check('Ana is credited', credit.rows[0]?.user_id === ANA && Number(credit.rows[0]?.amount) === 2500, credit.rows);
   const pendingAfter = await req('GET', '/api/crm/leads/abandoned?days=30', ana);
-  // She was rung before she paid, so she stays on the list marked as donated
-  // after the call (somebody who pays before any call just drops off).
-  const asha2 = pendingAfter.body.rows?.find((r: any) => r.phone === '9811111101');
-  check('she is marked donated on Nearly gave, not one to ring', asha2?.gave_anyway === true && pendingAfter.body.open === 0, asha2);
+  // Paid, so she leaves Nearly gave (called or not).
+  check('she leaves Nearly gave', !pendingAfter.body.rows?.some((r: any) => r.phone === '9811111101'), pendingAfter.body.rows);
   const twice = await req('POST', `/api/crm/leads/${bala}/link-donation`, bhavin, { donation_id: gift });
   check('the same donation cannot be linked to a second lead', twice.status === 409, twice.body);
 

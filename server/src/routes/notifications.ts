@@ -13,13 +13,17 @@ const ATTEMPT_JOIN = `LEFT JOIN abandoned_attempts a
 /** Never the main site's /donations page - not this team's to chase, even if raised before that rule. */
 const NOT_DONATIONS_PAGE = `NOT (a.id IS NOT NULL AND ${FROM_DONATIONS_PAGE('a')})`;
 
+/** A nearly-gave notification whose donor has since paid. */
+const PAID = `(a.id IS NOT NULL AND ${gaveSinceSql('a')})`;
+
 const router = Router();
 router.use(authenticate, authorize('admin', 'caller'));
 
 /**
  * GET /notifications - the newest first, with how many are unread for this
- * person. A nearly-gave entry says whether they have donated since, so the
- * bell never sends somebody to ring a donor who already paid.
+ * person. A nearly-gave entry vanishes the moment they have paid - the same
+ * rule as the Nearly gave screen - so the bell never shows a donor who
+ * already gave, and never counts one in the badge.
  */
 router.get('/', async (req, res) => {
   const me = req.user?.userId ?? null;
@@ -39,6 +43,7 @@ router.get('/', async (req, res) => {
            LEFT JOIN leads l ON l.phone = n.phone
           WHERE n.created_at > NOW() - INTERVAL '14 days'
             AND ${NOT_DONATIONS_PAGE}
+            AND NOT ${PAID}
           ORDER BY n.created_at DESC
           LIMIT ${limit}`
       ),
@@ -47,7 +52,8 @@ router.get('/', async (req, res) => {
            ${ATTEMPT_JOIN}
           WHERE n.created_at > COALESCE($1::timestamptz, NOW() - INTERVAL '2 days')
             AND n.created_at > NOW() - INTERVAL '14 days'
-            AND ${NOT_DONATIONS_PAGE}`,
+            AND ${NOT_DONATIONS_PAGE}
+            AND NOT ${PAID}`,
         [seen]
       ),
     ]);

@@ -1,7 +1,10 @@
 // "Have they paid since?" - one rule for every Nearly gave screen, the bell and
 // the notifications, so they can never disagree about who still needs a call.
 //
-// An unfinished attempt counts as settled when, at or after the attempt:
+// An unfinished attempt counts as settled when:
+//   0. that very attempt was paid - the site keeps one record per donation, so
+//      a pending payment that completes arrives in DRM under the same id;
+// or, at or after the attempt:
 //   1. a donation came in from the same mobile number, on either site or in DRM;
 //   2. their lead was marked as donated (a caller linked a payment made from
 //      another number - "my son paid from his phone");
@@ -16,11 +19,12 @@ export const nameKey = (expr: string) => `lower(regexp_replace(COALESCE(${expr},
 
 /**
  * SQL that is TRUE when the attempt `a` has been paid since. `a` must have
- * phone, name, amount and attempted_at columns.
+ * external_id, phone, name, amount and attempted_at columns (an abandoned_attempts row).
  */
 export function gaveSinceSql(a: string): string {
   return `(
-    EXISTS (
+    EXISTS (SELECT 1 FROM donations gx WHERE gx.external_ref = ${a}.external_id)
+    OR EXISTS (
       SELECT 1 FROM people gp JOIN donations gd ON gd.person_id = gp.id
        WHERE right(regexp_replace(gp.phone, '\\D', '', 'g'), 10) = ${a}.phone
          AND gd.created_at >= ${a}.attempted_at)
