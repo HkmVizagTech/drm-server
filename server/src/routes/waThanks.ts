@@ -104,7 +104,13 @@ router.post('/test', async (req, res) => {
     const asked = String(req.body?.seva ?? '').toLowerCase();
     const choice = s.sevas.find((x) => x.name.toLowerCase() === asked) ?? s.sevas.find((x) => x.on) ?? s.sevas[0];
     if (!choice) return res.status(400).json({ error: 'Add a seva first.' });
-    const r = await sendThanks(s, phone, String(req.body?.name ?? '').trim() || 'Devotee', choice.text);
+    const r = await sendThanks(s, {
+      phone,
+      name: String(req.body?.name ?? '').trim() || 'Devotee',
+      amount: Number(req.body?.amount) > 0 ? Number(req.body.amount) : 1100,
+      sevaText: choice.text,
+      sevaName: choice.name,
+    });
     if (!r.ok) return res.status(502).json({ error: r.error });
     res.json({ ok: true, message_id: r.messageId, seva: choice.name });
   } catch (err) {

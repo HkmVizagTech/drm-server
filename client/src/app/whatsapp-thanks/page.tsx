@@ -21,6 +21,8 @@ import {
   Field,
   Input,
   PageHeader,
+  Select,
+  Textarea,
   Skeleton,
   StatTile,
   TableShell,
@@ -42,7 +44,20 @@ interface Settings {
   template_id: string;
   header_image: string;
   sevas: SevaChoice[];
+  params: ParamKind[];
+  occasion_text: string;
+  body: string;
 }
+
+type ParamKind = "name" | "amount" | "seva" | "seva_name" | "occasion";
+
+const PARAM_LABELS: Record<ParamKind, string> = {
+  name: "Donor's name",
+  amount: "Amount donated (digits, e.g. 2000)",
+  seva: "Seva words (from the seva list)",
+  seva_name: "Seva name as on the page",
+  occasion: "Occasion words",
+};
 
 interface SevaChoice {
   name: string;
@@ -81,15 +96,13 @@ const STATUS: Record<Row["status"], { label: string; tone: "neutral" | "good" | 
   skipped: { label: "Not sent", tone: "neutral" },
 };
 
-const MESSAGE = (name: string, seva: string) => `Hare Krishna ${name} 🙏
-
-On this sacred occasion of Mahalaya Amavasya, special prayers were offered today, seeking the blessings for the peace and spiritual well-being of your departed ancestors.
-
-We are grateful for your offering towards ${seva} on this auspicious occasion.
-
-May Lord Krishna bless you and your family with peace, devotion, and spiritual well-being.
-
-Hare Krishna 🙏`;
+/** The template text with {{1}}, {{2}}... filled in with sample values, for the preview. */
+function fillPreview(body: string, params: ParamKind[], v: Record<ParamKind, string>): string {
+  return body.replace(/\{\{(\d+)\}\}/g, (m, n: string) => {
+    const kind = params[Number(n) - 1];
+    return kind ? v[kind] || "…" : m;
+  });
+}
 
 export default function WhatsAppThanksPage() {
   const { user } = useAuth();
@@ -225,7 +238,7 @@ export default function WhatsAppThanksPage() {
 
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
             <Card>
-              <CardHeader title="Message" icon="message" subtitle="The template must be approved in Gupshup with an image header, {{1}} and {{2}}." />
+              <CardHeader title="Message" icon="message" subtitle="The template approved in Gupshup, its image and what fills each {{number}}." />
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="Gupshup template id" htmlFor="wt-template" className="sm:col-span-2">
                   <Input
@@ -243,6 +256,41 @@ export default function WhatsAppThanksPage() {
                     onChange={(e) => set({ header_image: e.target.value.trim() })}
                     placeholder="https://…/amavasya.jpg"
                   />
+                </Field>
+                <div className="rounded-card bg-sunken/60 p-3 sm:col-span-2">
+                  <p className="mb-2 text-sm font-semibold text-ink">What fills each variable</p>
+                  <ul className="space-y-2">
+                    {form.params.map((k, i) => (
+                      <li key={i} className="grid grid-cols-[3.5rem_minmax(0,1fr)] items-center gap-2">
+                        <span className="font-mono text-sm text-ink-soft">{`{{${i + 1}}}`}</span>
+                        <Select
+                          value={k}
+                          onChange={(v) => set({ params: form.params.map((x, j) => (j === i ? (v as ParamKind) : x)) })}
+                          options={(Object.keys(PARAM_LABELS) as ParamKind[]).map((x) => ({ value: x, label: PARAM_LABELS[x] }))}
+                          ariaLabel={`What fills {{${i + 1}}}`}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button size="xs" variant="secondary" icon="plus" disabled={form.params.length >= 10} onClick={() => set({ params: [...form.params, "name"] })}>
+                      Add {`{{${form.params.length + 1}}}`}
+                    </Button>
+                    <Button size="xs" variant="ghost" icon="trash" disabled={form.params.length <= 1} onClick={() => set({ params: form.params.slice(0, -1) })}>
+                      Remove {`{{${form.params.length}}}`}
+                    </Button>
+                  </div>
+                  {form.params.includes("occasion") && (
+                    <Field label="Occasion words" htmlFor="wt-occasion" className="mt-3">
+                      <Input id="wt-occasion" value={form.occasion_text} onChange={(e) => set({ occasion_text: e.target.value })} />
+                    </Field>
+                  )}
+                  <p className="mt-2 text-xs text-ink-muted">
+                    Must match the approved template exactly - the same number of variables, in the same order - or Gupshup refuses the message.
+                  </p>
+                </div>
+                <Field label="Template text (for the preview only)" htmlFor="wt-body" className="sm:col-span-2">
+                  <Textarea id="wt-body" rows={6} value={form.body} onChange={(e) => set({ body: e.target.value })} />
                 </Field>
                 <Field label="Campaign page" htmlFor="wt-page">
                   <Input id="wt-page" value={form.page} onChange={(e) => set({ page: e.target.value })} />
@@ -311,7 +359,13 @@ export default function WhatsAppThanksPage() {
                   <p className="rounded-card bg-sunken p-3 text-sm text-ink-muted">{shown.name} donors get no message - it is switched off.</p>
                 ) : (
                   <div className="whitespace-pre-line rounded-card bg-[#e7f7e4] p-3 text-sm leading-relaxed text-ink">
-                    {MESSAGE("chaitanya", shown?.text || "…")}
+                    {fillPreview(form.body, form.params, {
+                      name: "chaitanya",
+                      amount: "2000",
+                      seva: shown?.text ?? "",
+                      seva_name: shown?.name ?? "",
+                      occasion: form.occasion_text,
+                    })}
                   </div>
                 )}
               </Card>
@@ -375,9 +429,9 @@ export default function WhatsAppThanksPage() {
                     <Input
                       value={x.text}
                       onChange={(e) => setSeva(i, { text: e.target.value })}
-                      aria-label={`Words for {{2}} for ${x.name}`}
+                      aria-label={`Seva words for ${x.name}`}
                       disabled={!x.on}
-                      placeholder="What fills {{2}}"
+                      placeholder="Seva words, e.g. Pitru paksha Annadan seva"
                     />
                     <div className="flex items-center gap-2">
                       <Toggle on={x.on} onChange={(on) => setSeva(i, { on })} label={`Thank ${x.name} donors`} />

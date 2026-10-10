@@ -49,14 +49,35 @@ export interface ThanksSettings {
   template_id: string;
   /** A public JPG or PNG link for the template's image header. Empty: no header. */
   header_image: string;
-  /** Per seva on the page: whether it is thanked, and what fills {{2}}. */
+  /** Per seva on the page: whether it is thanked, and its words for the "seva" variable. */
   sevas: SevaChoice[];
+  /**
+   * What fills {{1}}, {{2}}, ... in the approved template, in order. Kept as a
+   * setting because the template's wording changes: a new variable is a change
+   * on the screen, not in code.
+   */
+  params: ParamKind[];
+  /** The words for the "occasion" variable, e.g. "Mahalaya Amavasya". */
+  occasion_text: string;
+  /** The template's text with {{1}}... - only for the preview on the screen. */
+  body: string;
 }
+
+/**
+ * What a template variable can hold:
+ *   name      the donor's name, as on the donation
+ *   amount    what they donated, digits only ("2000") - the template has the ₹
+ *   seva      the seva's words from the seva list ("Pitru paksha Annadan seva")
+ *   seva_name the seva as the page names it ("Annadana Seva")
+ *   occasion  the occasion words ("Mahalaya Amavasya")
+ */
+export type ParamKind = 'name' | 'amount' | 'seva' | 'seva_name' | 'occasion';
+export const PARAM_KINDS: ParamKind[] = ['name', 'amount', 'seva', 'seva_name', 'occasion'];
 
 export interface SevaChoice {
   /** The seva as the page names it - what DRM holds for the donation. */
   name: string;
-  /** What fills {{2}} for a donation to this seva. */
+  /** The words for the "seva" variable for a donation to this seva. */
   text: string;
   on: boolean;
 }
@@ -70,6 +91,21 @@ export const DEFAULT_THANKS: ThanksSettings = {
   stop_at: '22:00',
   template_id: '',
   header_image: '',
+  // The approved template: name, amount, seva, occasion.
+  params: ['name', 'amount', 'seva', 'occasion'],
+  occasion_text: 'Mahalaya Amavasya',
+  body: [
+    'Hare Krishna {{1}} 🙏',
+    '',
+    'We have received your donation of ₹{{2}} towards {{3}} for {{4}}.',
+    '',
+    'On this sacred occasion, special prayers were offered at Hare Krishna Vaikuntham, Visakhapatnam, for the peace and spiritual well-being of your departed ancestors.',
+    '',
+    'Thank you for your contribution towards this seva.',
+    '',
+    'Hare Krishna 🙏',
+    'Hare Krishna Vaikuntham',
+  ].join('\n'),
   // The five sevas on harekrishnavizag.org/pitru-paksha, by their names there.
   sevas: [
     { name: 'Annadana Seva', text: 'Pitru paksha Annadan seva', on: true },
@@ -86,6 +122,7 @@ export async function readThanksSettings(): Promise<ThanksSettings> {
   const r = await pool.query(`SELECT value FROM crm_settings WHERE key = $1`, [KEY]);
   const stored = (r.rows[0]?.value ?? {}) as Partial<ThanksSettings> & { seva_text?: string };
   const out = { ...DEFAULT_THANKS, ...stored };
+  if (!Array.isArray(stored.params) || !stored.params.length) out.params = [...DEFAULT_THANKS.params];
   // Saved before sevas were separate: one wording for everyone.
   if (!Array.isArray(stored.sevas)) out.sevas = DEFAULT_THANKS.sevas.map((x) => ({ ...x }));
   delete (out as { seva_text?: string }).seva_text;
@@ -147,6 +184,15 @@ export function cleanThanksSettings(input: Record<string, unknown>, current: Tha
     }
     next.sevas = list;
   }
+  if ('params' in input) {
+    if (!Array.isArray(input.params) || !input.params.length || input.params.length > 10) return 'Set what fills each {{number}} in the template.';
+    const list = (input.params as unknown[]).map(String);
+    if (list.some((k) => !PARAM_KINDS.includes(k as ParamKind))) return 'A template variable is set to something DRM does not know.';
+    next.params = list as ParamKind[];
+  }
+  if ('occasion_text' in input) next.occasion_text = String(input.occasion_text ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (next.params.includes('occasion') && !next.occasion_text) return 'Enter the words for the occasion, e.g. Mahalaya Amavasya.';
+  if ('body' in input) next.body = String(input.body ?? '').slice(0, 1024);
   if (next.enabled && !next.template_id) return 'Add the Gupshup template id before switching it on.';
   if (next.enabled && !next.sevas.some((x) => x.on)) return 'Pick at least one seva to thank.';
   return next;
@@ -252,25 +298,56 @@ export interface GupshupResult {
   error?: string;
 }
 
+/** One donor's values, for filling the template. */
+export interface ThanksFor {
+  phone: string;
+  name: string | null;
+  amount: number | string | null;
+  /** The seva's words from the seva list. */
+  sevaText: string;
+  /** The seva as the page names it. */
+  sevaName: string | null;
+}
+
+/** "2000", "2000.50" - the template carries the ₹. */
+export function amountWords(v: number | string | null): string {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+/** The template's variables, in the order the settings give. */
+export function templateParams(s: ThanksSettings, d: Omit<ThanksFor, 'phone'>): string[] {
+  return s.params.map((k) => {
+    switch (k) {
+      case 'name':
+        return greetingName(d.name);
+      case 'amount':
+        return amountWords(d.amount);
+      case 'seva':
+        return d.sevaText;
+      case 'seva_name':
+        return String(d.sevaName ?? '').trim() || d.sevaText;
+      case 'occasion':
+        return s.occasion_text;
+    }
+  });
+}
+
 /** Send the approved template through Gupshup. Never throws. */
-export async function sendThanks(
-  s: ThanksSettings,
-  phone10: string,
-  name: string | null,
-  /** What fills {{2}} - the words for the seva they donated to. */
-  sevaText: string,
-  fetcher: typeof fetch = fetch
-): Promise<GupshupResult> {
+export async function sendThanks(s: ThanksSettings, d: ThanksFor, fetcher: typeof fetch = fetch): Promise<GupshupResult> {
   if (!gupshupConfigured()) return { ok: false, error: 'Gupshup is not set up on the DRM server (GUPSHUP_API_KEY, GUPSHUP_APP_NAME, GUPSHUP_SOURCE_NUMBER).' };
   if (!s.template_id) return { ok: false, error: 'No template id.' };
   const form = new URLSearchParams();
   form.set('channel', 'whatsapp');
   form.set('source', String(process.env.GUPSHUP_SOURCE_NUMBER).replace(/\D/g, ''));
-  form.set('destination', `91${phone10}`);
+  form.set('destination', `91${d.phone}`);
   form.set('src.name', String(process.env.GUPSHUP_APP_NAME));
-  // params are positional: {{1}} the name, {{2}} the seva. The image header is
-  // not a param - it goes in `message`, as Gupshup requires.
-  form.set('template', JSON.stringify({ id: s.template_id, params: [greetingName(name), sevaText] }));
+  // params are positional - {{1}}, {{2}}, ... in the order the settings give.
+  // The image header is not a param; it goes in `message`, as Gupshup requires.
+  const params = templateParams(s, d);
+  if (params.some((p) => !p)) return { ok: false, error: `A template variable would be empty (${s.params[params.findIndex((p) => !p)]}).` };
+  form.set('template', JSON.stringify({ id: s.template_id, params }));
   if (s.header_image) form.set('message', JSON.stringify({ type: 'image', image: { link: s.header_image } }));
   try {
     const res = await fetcher('https://api.gupshup.io/wa/api/v1/template/msg', {
@@ -330,11 +407,15 @@ export async function thanksTick(fetcher: typeof fetch = fetch): Promise<{ queue
         WHERE id IN (SELECT id FROM wa_thanks_sends
                       WHERE campaign = $1 AND status = 'waiting' AND send_at <= NOW()
                       ORDER BY send_at LIMIT 60 FOR UPDATE SKIP LOCKED)
-        RETURNING id, phone, name, seva_text`,
+        RETURNING id, phone, name, seva_text, seva, amount`,
       [key]
     );
     for (const row of due.rows) {
-      const r = await sendThanks(s, row.phone, row.name, row.seva_text, fetcher);
+      const r = await sendThanks(
+        s,
+        { phone: row.phone, name: row.name, amount: row.amount, sevaText: row.seva_text, sevaName: row.seva },
+        fetcher
+      );
       if (r.ok) {
         out.sent++;
         await pool.query(

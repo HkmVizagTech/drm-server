@@ -30,8 +30,8 @@
 // them and pressing one button replaces twenty "Add as lead" clicks and then
 // hunting for the same twenty people on another screen.
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Fragment, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { callHref, formatPhone, runHref, startRun } from "@/lib/calling";
@@ -199,20 +199,89 @@ function summarise(r: AdoptResult, opts: { mine: boolean; owners: string[] }): s
   return parts.join(" · ") || "No one to add";
 }
 
+/* ------------------------------------------------------ kept filters
+
+   The filters live in the page's address (and, for this browser tab, in
+   session storage). A caller who narrows the list, rings somebody and comes
+   back - by the call screen's Back, the browser's back button, or the bell -
+   finds the list exactly as they left it, page included. Before, every one of
+   those journeys reset the filters, and the caller had to build them again
+   between every call. */
+
+const FILTER_KEY = "drm-nearly-gave-filters";
+/** The address keys, and their defaults - a default is left out of the address. */
+const KEPT: Record<string, string> = {
+  view: "open",
+  days: "30",
+  site: "",
+  min: "",
+  max: "",
+  status: "",
+  sort: "uncalled",
+  called: "",
+  from: "",
+  to: "",
+  q: "",
+  page: "1",
+};
+
+/** What the screen opens with: the address if it says anything, else what this tab had last. */
+function readKept(sp: URLSearchParams): Record<string, string> {
+  const fromUrl = Object.keys(KEPT).some((k) => sp.has(k));
+  let saved: Record<string, string> = {};
+  if (fromUrl) {
+    for (const k of Object.keys(KEPT)) if (sp.has(k)) saved[k] = sp.get(k) ?? "";
+  } else {
+    try {
+      saved = JSON.parse(sessionStorage.getItem(FILTER_KEY) ?? "{}") as Record<string, string>;
+    } catch {
+      saved = {};
+    }
+  }
+  return { ...KEPT, ...saved };
+}
+
+/** The address for a set of filters - only what differs from the defaults. */
+function keptQuery(v: Record<string, string>): string {
+  const q = new URLSearchParams();
+  for (const [k, d] of Object.entries(KEPT)) if ((v[k] ?? d) !== d) q.set(k, v[k]);
+  return q.toString();
+}
+
+// useSearchParams needs a Suspense boundary, so the screen is split in two.
 export default function PendingPaymentsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="space-y-3">
+          <Skeleton className="h-20" />
+          <Skeleton className="h-64" />
+        </div>
+      }
+    >
+      <PendingPaymentsScreen />
+    </Suspense>
+  );
+}
+
+function PendingPaymentsScreen() {
   const router = useRouter();
+  const sp = useSearchParams();
+  // Read once, as the screen opens. Only ever rendered in the browser (inside
+  // the Suspense boundary above), so session storage is safe to read here.
+  const [kept] = useState(() => readKept(new URLSearchParams(sp.toString())));
   const { user } = useAuth();
   const elevated = user?.role === "admin" || user?.role === "accountant";
 
   const [data, setData] = useState<Answer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
-  const [view, setView] = useState<View>("open");
-  const [days, setDays] = useState("30");
-  const [site, setSite] = useState("");
-  const [minAmount, setMinAmount] = useState("");
-  const [maxAmount, setMaxAmount] = useState("");
-  const [status, setStatus] = useState("");
+  const [view, setView] = useState<View>(kept.view === "set_aside" ? "set_aside" : "open");
+  const [days, setDays] = useState(kept.days);
+  const [site, setSite] = useState(kept.site);
+  const [minAmount, setMinAmount] = useState(kept.min);
+  const [maxAmount, setMaxAmount] = useState(kept.max);
+  const [status, setStatus] = useState(kept.status);
   /* Not-called-yet first, newest within that - the order a shift starts from.
 
      "Newest first" alone mixes the people a caller spoke to yesterday in among
@@ -222,16 +291,19 @@ export default function PendingPaymentsPage() {
      Related to the `called` quick filter below but not the same question:
      that one hides people, this one orders them. Somebody scanning the whole
      list still wants the untouched ones first. */
-  const [sort, setSort] = useState("uncalled");
-  const [called, setCalled] = useState<CallFilter>("");
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
-  const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const [debounced, setDebounced] = useState("");
+  const [sort, setSort] = useState(kept.sort);
+  const [called, setCalled] = useState<CallFilter>(kept.called as CallFilter);
+  const [fromDate, setFromDate] = useState(kept.from);
+  const [toDate, setToDate] = useState(kept.to);
+  const [page, setPage] = useState(Math.max(1, Number(kept.page) || 1));
+  const [search, setSearch] = useState(kept.q);
+  const [debounced, setDebounced] = useState(kept.q);
   const [busy, setBusy] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [showFilters, setShowFilters] = useState(false);
+  // Open the filter panel straight away when the list came back narrowed.
+  const [showFilters, setShowFilters] = useState(
+    () => !!(kept.site || kept.min || kept.max || kept.status || kept.from || kept.to || kept.days !== KEPT.days)
+  );
   const [assign, setAssign] = useState("me");
   const [bulkBusy, setBulkBusy] = useState<"add" | "call" | null>(null);
   const [callingAll, setCallingAll] = useState(false);
@@ -292,7 +364,42 @@ export default function PendingPaymentsPage() {
   // empty screen that reads as "nobody matched" when the truth is "you are
   // past the end".
   const filterKey = filterParams().toString();
-  useEffect(() => setPage(1), [filterKey]);
+  // Only when the filters CHANGE - not as the screen opens, or a list restored
+  // on page 3 would jump back to page 1.
+  const lastFilterKey = useRef(filterKey);
+  useEffect(() => {
+    if (lastFilterKey.current === filterKey) return;
+    lastFilterKey.current = filterKey;
+    setPage(1);
+  }, [filterKey]);
+
+  // Keep the filters in the address and in this tab, as they change.
+  const keptNow = keptQuery({
+    view,
+    days,
+    site,
+    min: minAmount,
+    max: maxAmount,
+    status,
+    sort,
+    called,
+    from: fromDate,
+    to: toDate,
+    q: debounced.trim(),
+    page: String(page),
+  });
+  /** Where a call from here comes back to: this list, as it is now. */
+  const backHref = keptNow ? `/calling/pending?${keptNow}` : "/calling/pending";
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(FILTER_KEY, JSON.stringify(Object.fromEntries(new URLSearchParams(keptNow))));
+    } catch {
+      /* the address still keeps them */
+    }
+    if (window.location.pathname === "/calling/pending" && window.location.search.replace(/^\?/, "") !== keptNow) {
+      router.replace(backHref, { scroll: false });
+    }
+  }, [keptNow, backHref, router]);
 
   /* Back to the top of the list when the page changes.
 
@@ -517,7 +624,7 @@ export default function PendingPaymentsPage() {
     // Straight to the call screen when the lead is already reachable; added
     // (or taken over, when parked with an admin) first otherwise.
     if (r.lead_id && !(parked(r) && !elevated)) {
-      router.push(callHref(r.lead_id, "/calling/pending"));
+      router.push(callHref(r.lead_id, backHref));
       return;
     }
     setBusy(r.id);
@@ -534,7 +641,7 @@ export default function PendingPaymentsPage() {
         return;
       }
       if (res.created) toast(`${who(r)} is now your lead`);
-      router.push(callHref(id, "/calling/pending"));
+      router.push(callHref(id, backHref));
     } catch (e) {
       toast.error(`Could not call ${who(r)}. Try again.`, e instanceof Error ? e.message : undefined);
     } finally {

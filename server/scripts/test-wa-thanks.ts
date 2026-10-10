@@ -177,8 +177,8 @@ async function main() {
     check('a refused send is failed, with Gupshup\'s reason', after['9100000000']?.status === 'failed' && /not approved/.test(after['9100000000'].error), after['9100000000']);
     const m = sent.find((x) => x.destination === '919100000001')!;
     const tpl = JSON.parse(m.template);
-    check('the template, {{1}} the name and {{2}} the seva', tpl.id === live.template_id && tpl.params[0] === 'Due Donor' && tpl.params[1] === 'Pitru paksha Annadan seva', tpl);
-    check('the image header goes in message, not params', JSON.parse(m.message).image.link === live.header_image && tpl.params.length === 2, m);
+    check('the template: name, amount, seva, occasion', tpl.id === live.template_id && JSON.stringify(tpl.params) === JSON.stringify(['Due Donor', '1116', 'Pitru paksha Annadan seva', 'Mahalaya Amavasya']), tpl);
+    check('the image header goes in message, not params', JSON.parse(m.message).image.link === live.header_image && tpl.params.length === 4, m);
     check('from the Gupshup number and app, with the key', m.source === '917075176108' && m['src.name'] === 'TestApp' && m.apikey === 'test-key' && m.channel === 'whatsapp', m);
     check('the tick counts what it did', t.sent === 1 && t.failed === 1, t);
   }
@@ -214,7 +214,16 @@ async function main() {
   check('the screen shows the day\'s donors by seva', Array.isArray(r.body.by_seva), r.body.by_seva);
   sent.length = 0;
   r = await req('POST', '/api/wa-thanks/test', admin, { phone: '98480 22338', name: 'Test Devotee', seva: 'Gau Seva' });
-  check('a test goes to the number given, with that seva\'s words', r.status === 200 && sent[0]?.destination === '919848022338' && JSON.parse(sent[0].template).params[0] === 'Test Devotee' && JSON.parse(sent[0].template).params[1] === 'Pitru paksha Gau seva', { r: r.body, s: sent[0] });
+  check('a test goes to the number given, with that seva\'s words', r.status === 200 && sent[0]?.destination === '919848022338' && JSON.parse(sent[0].template).params[0] === 'Test Devotee' && JSON.parse(sent[0].template).params[2] === 'Pitru paksha Gau seva', { r: r.body, s: sent[0] });
+  // The template changes again: three variables, the seva by its page name.
+  r = await req('PUT', '/api/wa-thanks', admin, { params: ['name', 'seva_name', 'amount'] });
+  sent.length = 0;
+  await req('POST', '/api/wa-thanks/test', admin, { phone: '9848022338', name: 'Test Devotee', seva: 'Gau Seva', amount: 2500 });
+  check('the variables follow the order set on the screen', JSON.stringify(JSON.parse(sent[0]?.template ?? '{}').params) === JSON.stringify(['Test Devotee', 'Gau Seva', '2500']), sent[0]);
+  r = await req('PUT', '/api/wa-thanks', admin, { params: ['name', 'colour'] });
+  check('an unknown variable is refused', r.status === 400, r.body);
+  r = await req('PUT', '/api/wa-thanks', admin, { occasion_text: '', params: ['name', 'occasion'] });
+  check('the occasion cannot be blank when the template uses it', r.status === 400, r.body);
   r = await req('POST', '/api/wa-thanks/test', admin, { phone: '9848000000' });
   check('a refused test says why', r.status === 502 && /not approved/.test(r.body.error), r.body);
   const failed = (await pool.query(`SELECT id FROM wa_thanks_sends WHERE status = 'failed' LIMIT 1`)).rows[0];
