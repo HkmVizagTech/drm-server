@@ -44,6 +44,7 @@ import {
   Checkbox,
   DropdownMenu,
   EmptyState,
+  Icon,
   Field,
   Input,
   PageHeader,
@@ -105,14 +106,8 @@ interface Answer {
   value_at_stake: number;
   /** How many behind each quick call filter (All, Not called today, ...). */
   call_counts?: { all: number; not_today: number; today: number; no_answer: number };
-  /** False when the list is showing only part of what the filters match. */
+  /** False when the table is showing only the first 500 of a longer list. */
   complete: boolean;
-  /** Which page came back, and how many there are over the whole filter. */
-  page: number;
-  limit: number;
-  total_pages: number;
-  /** Rows the filters match - what the pager counts through. */
-  matching: number;
   /** Per site: when it was last asked, what went wrong, whether it is being asked now. */
   sites: {
     site: string;
@@ -212,20 +207,8 @@ export default function PendingPaymentsPage() {
   const [minAmount, setMinAmount] = useState("");
   const [maxAmount, setMaxAmount] = useState("");
   const [status, setStatus] = useState("");
-  /* Not-called-yet first, newest within that - the order a shift starts from.
-
-     "Newest first" alone mixes the people a caller spoke to yesterday in among
-     the ones nobody has touched, so finding the next real call is done by eye
-     on every page.
-
-     Related to the `called` quick filter below but not the same question:
-     that one hides people, this one orders them. Somebody scanning the whole
-     list still wants the untouched ones first. */
-  const [sort, setSort] = useState("uncalled");
+  const [sort, setSort] = useState("recent");
   const [called, setCalled] = useState<CallFilter>("");
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
-  const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -259,8 +242,6 @@ export default function PendingPaymentsPage() {
    */
   const filterParams = useCallback(() => {
     const q = new URLSearchParams({ days, sort });
-    if (fromDate) q.set("from_date", fromDate);
-    if (toDate) q.set("to_date", toDate);
     if (site) q.set("sites", site);
     if (minAmount) q.set("min_amount", minAmount);
     if (maxAmount) q.set("max_amount", maxAmount);
@@ -269,54 +250,13 @@ export default function PendingPaymentsPage() {
     if (view === "set_aside") q.set("set_aside", "true");
     if (called) q.set("called", called);
     return q;
-  }, [days, site, minAmount, maxAmount, status, sort, debounced, view, called, fromDate, toDate]);
-
-  /* The page number rides OUTSIDE filterParams, deliberately.
-
-     filterParams is also what the download and "add all matching" are built
-     from, and both of those mean every row the filters match - not the twenty
-     currently on screen. Putting the page in there would quietly turn
-     "Download" into "download this page", which is the kind of bug somebody
-     finds out about from a spreadsheet that is missing most of its rows. */
-  const PER_PAGE = 25;
-  const listParams = useCallback(() => {
-    const q = filterParams();
-    q.set("page", String(page));
-    q.set("limit", String(PER_PAGE));
-    return q;
-  }, [filterParams, page]);
-
-  // Any change to the filters puts you back on page 1 - including the quick
-  // call filter. Staying on page 7 of a list that now has two pages shows an
-  // empty screen that reads as "nobody matched" when the truth is "you are
-  // past the end".
-  const filterKey = filterParams().toString();
-  useEffect(() => setPage(1), [filterKey]);
-
-  /* Back to the top of the list when the page changes.
-
-     The pager is at the BOTTOM, so pressing Next without this leaves you
-     looking at the end of the new page - which reads as nothing having
-     happened. scrollIntoView on an anchor rather than window.scrollTo because
-     the shell scrolls <main>, not the window (see dashboard-layout.tsx), so
-     scrolling the window moves nothing at all.
-
-     Skipped on first render, or the screen jumps the moment it opens. */
-  const topRef = useRef<HTMLDivElement>(null);
-  const firstRender = useRef(true);
-  useEffect(() => {
-    if (firstRender.current) {
-      firstRender.current = false;
-      return;
-    }
-    topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [page]);
+  }, [days, site, minAmount, maxAmount, status, sort, debounced, view, called]);
 
   // Loading is DERIVED: the screen is loading whenever the answer on it was
   // fetched for different filters than the ones now chosen. Holding it as a
   // flag meant setting it at the top of every fetch, and a fetch that loses a
   // race to a newer one then cleared it under the newer one's feet.
-  const key = listParams().toString();
+  const key = filterParams().toString();
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const loading = loadedKey !== key;
   const latest = useRef("");
@@ -644,15 +584,24 @@ export default function PendingPaymentsPage() {
 
   /* ------------------------------------------------------ row pieces */
 
-  // Newest or oldest first: the list reads as days, each under its own
-  // heading, so "who tried yesterday" is one glance. Sorted by amount or by
-  // tries, days would be scattered, so each row says its own date instead.
-  const byDay = sort === "recent" || sort === "oldest";
+  // Always read as days: a heading for each date, and that day's people under
+  // it. Newest day first ("Oldest first" turns the days round too); within a
+  // day the chosen order holds - biggest first, most tries, or by time.
+  const byDay = true;
   const dayCounts = new Map<string, number>();
+  const dayAmounts = new Map<string, number>();
   for (const r of rows) {
     const k = istDateKey(r.attempted_at);
     dayCounts.set(k, (dayCounts.get(k) ?? 0) + 1);
+    dayAmounts.set(k, (dayAmounts.get(k) ?? 0) + (Number(r.amount) || 0));
   }
+  const dayKeys = [...dayCounts.keys()].sort((a, b) => (sort === "oldest" ? a.localeCompare(b) : b.localeCompare(a)));
+  const dayRank = new Map(dayKeys.map((k, i) => [k, i]));
+  // A stable sort by day keeps the server's order (the chosen sort) inside each day.
+  const listed = rows
+    .map((r, i) => ({ r, i, d: dayRank.get(istDateKey(r.attempted_at)) ?? 0 }))
+    .sort((x, y) => x.d - y.d || x.i - y.i)
+    .map((x) => x.r);
   function dayHeading(k: string) {
     const d = new Date(`${k}T12:00:00+05:30`);
     const words = d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: "Asia/Kolkata" });
@@ -857,36 +806,11 @@ export default function PendingPaymentsPage() {
                 onChange={setSort}
                 ariaLabel="Sort"
                 options={[
-                  { value: "uncalled", label: "Not called yet, newest" },
                   { value: "recent", label: "Newest first" },
                   { value: "amount", label: "Biggest amount first" },
                   { value: "attempts", label: "Most tries first" },
                   { value: "oldest", label: "Oldest first" },
                 ]}
-              />
-            </Field>
-            {/* An explicit range, for "what happened over Kartik" rather than
-                "the last N days". It NARROWS the period above rather than
-                replacing it: the period also decides how far back the sites
-                are crawled, so a range outside it would ask the database for
-                rows nothing has ever fetched and answer an honest-looking
-                zero. Widen the period first, then pick the dates. */}
-            <Field label="From" className="w-full sm:w-40">
-              <Input
-                type="date"
-                value={fromDate}
-                max={toDate || undefined}
-                onChange={(e) => setFromDate(e.target.value)}
-                aria-label="From date"
-              />
-            </Field>
-            <Field label="To" className="w-full sm:w-40">
-              <Input
-                type="date"
-                value={toDate}
-                min={fromDate || undefined}
-                onChange={(e) => setToDate(e.target.value)}
-                aria-label="To date"
               />
             </Field>
             <Field label="Status" className="w-full sm:w-44">
@@ -1015,15 +939,8 @@ export default function PendingPaymentsPage() {
       )}
 
       {/* One card per person, at every width: name and amount, one line on
-          what happened, Call, and "⋯" for the rest.
-
-          Cards rather than a table on purpose, and it is worth saying why,
-          because a paginated list looks like it wants to be a table: callers
-          dial from their own phones. A table of six columns on a 390px screen
-          is a horizontal scrollbar over the one screen in this product that is
-          used on a phone more than a desktop. The pagination below is what was
-          actually slow; the layout was not. */}
-      <div ref={topRef} className="scroll-mt-20 space-y-2">
+          what happened, Call, and "⋯" for the rest. */}
+      <div className="space-y-2">
         {loading ? (
           Array.from({ length: 5 }).map((_, i) => (
             <Card key={i} padded={false} className="p-4">
@@ -1034,9 +951,9 @@ export default function PendingPaymentsPage() {
         ) : !rows.length ? (
           <Card padded={false}>{emptyState}</Card>
         ) : (
-          rows.map((r, i) => {
+          listed.map((r, i) => {
             const day = istDateKey(r.attempted_at);
-            const newDay = byDay && (i === 0 || istDateKey(rows[i - 1].attempted_at) !== day);
+            const newDay = byDay && (i === 0 || istDateKey(listed[i - 1].attempted_at) !== day);
             const on = picked.has(r.id) || (allMatching && canPick(r));
             const last = lastCall(r);
             // The same colours as search and Leads: rung before or not.
@@ -1048,10 +965,18 @@ export default function PendingPaymentsPage() {
             return (
               <Fragment key={r.id}>
               {newDay && (
-                <h3 className="flex items-baseline justify-between px-1 pt-3 text-sm font-semibold text-ink first:pt-0">
-                  <span>{dayHeading(day)}</span>
+                <h3
+                  className={`sticky top-14 z-10 -mx-1 flex items-center justify-between gap-3 rounded-control border border-line-soft bg-sunken/95 px-3 py-2 text-sm font-semibold text-ink backdrop-blur ${
+                    i === 0 ? "" : "mt-5"
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <Icon name="calendar" size={14} className="text-ink-muted" />
+                    {dayHeading(day)}
+                  </span>
                   <span className="text-xs font-normal text-ink-muted">
                     {number(dayCounts.get(day) ?? 0)} {plural(dayCounts.get(day) ?? 0, "person", "people")}
+                    {dayAmounts.get(day) ? ` · ${currency(dayAmounts.get(day) ?? 0)}` : ""}
                   </span>
                 </h3>
               )}
@@ -1093,58 +1018,10 @@ export default function PendingPaymentsPage() {
         )}
       </div>
 
-      {/* The pager.
-
-          WHY THIS REPLACED "Showing 500 of 199. Use filters to see more."
-          That notice was the old shape of this problem: the endpoint answered
-          with a bare LIMIT 500, so a long list was silently truncated and the
-          only remedy offered was to narrow the filters until it fitted. On a
-          thirty-day view across two sites that meant five hundred rows of
-          joins rebuilt on every keystroke, for a screen nobody scrolls past
-          the first twenty of.
-
-          Rendered only when there IS more than one page: a pager under a list
-          of nine is noise. */}
-      {data && data.total_pages > 1 && !loading && (
-        <nav
-          className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-line-soft pt-3"
-          aria-label="Pages"
-        >
-          <p className="text-sm text-ink-muted" aria-live="polite">
-            {/* The row numbers, not just the page number: "showing 26-50 of
-                199" is the thing somebody reads to know where they are in a
-                shift. Math.min on the upper bound so the last page says
-                "176-199", not "176-200". */}
-            Showing{" "}
-            <strong className="tabular-nums text-ink">
-              {number((data.page - 1) * data.limit + 1)}–
-              {number(Math.min(data.page * data.limit, data.matching))}
-            </strong>{" "}
-            of <strong className="tabular-nums text-ink">{number(data.matching)}</strong>
-          </p>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              icon="chevronLeft"
-              disabled={data.page <= 1}
-              onClick={() => setPage((n) => Math.max(1, n - 1))}
-            >
-              Previous
-            </Button>
-            <span className="px-1 text-sm tabular-nums text-ink-muted">
-              {number(data.page)} / {number(data.total_pages)}
-            </span>
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={data.page >= data.total_pages}
-              onClick={() => setPage((n) => n + 1)}
-            >
-              Next
-            </Button>
-          </div>
-        </nav>
+      {data && !data.complete && !loading && (
+        <Alert tone="warn" className="mt-4">
+          Showing {number(rows.length)} of {number(data.open)}. Use filters to see more.
+        </Alert>
       )}
 
       {linking && (
