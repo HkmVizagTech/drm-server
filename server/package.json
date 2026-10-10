@@ -26,7 +26,8 @@
     "test:sankalpdonors": "tsx scripts/test-sankalp-donors.ts",
     "test:notifications": "tsx scripts/test-notifications.ts",
     "test:wathanks": "tsx scripts/test-wa-thanks.ts",
-    "test:paging": "tsx scripts/test-abandoned-paging.ts"
+    "test:paging": "tsx scripts/test-abandoned-paging.ts",
+    "bench:abandoned": "tsx scripts/bench-abandoned.ts"
   },
   "keywords": [],
   "author": "",

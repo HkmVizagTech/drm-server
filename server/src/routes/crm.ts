@@ -850,6 +850,28 @@ async function syncAbandoned(
 const ABANDONED_STALE_MINUTES = 30;
 
 /**
+ * Should this site be crawled again now?
+ *
+ * Pure, exported and tested, because getting it wrong does not look like a
+ * sync bug - it looks like a slow page. See the long note at the call site.
+ *
+ * The throttle comes FIRST and applies for every reason. A site is re-crawled
+ * at most once per ABANDONED_STALE_MINUTES, whether it is stale in time or
+ * short on reach.
+ */
+export function abandonedSyncIsDue(
+  state: { last_synced_at?: string | Date | null; synced_days?: number | null } | undefined,
+  viewDays: number,
+  now: number = Date.now()
+): boolean {
+  if (!state?.last_synced_at) return true;
+  const since = now - new Date(state.last_synced_at).getTime();
+  if (since < ABANDONED_STALE_MINUTES * 60_000) return false;
+  // Past the window: old in time, or short in reach, both mean crawl.
+  return true;
+}
+
+/**
  * How many pages of 200 to crawl per site.
  *
  * Was ten. A first sync against a site holding 4,800 attempts stored the
@@ -1140,16 +1162,31 @@ router.get('/leads/abandoned', async (req, res) => {
     const viewDays = Math.min(365, Math.max(1, Number(req.query.days) || 30));
     const syncDays = Math.max(90, viewDays);
 
-    const stale = wanted.filter((site) => {
-      const r = byState.get(site);
-      if (!r || !r.last_synced_at) return true;
-      // Old in TIME, or short in REACH. The second half is the one that bit:
-      // a sync for ninety days three minutes ago made a year's view look fresh
-      // while answering it out of a quarter of the data, and pressing "Check
-      // the sites now" only reset the clock on the same ninety days.
-      if ((r.synced_days ?? 0) < viewDays) return true;
-      return Date.now() - new Date(r.last_synced_at).getTime() > ABANDONED_STALE_MINUTES * 60_000;
-    });
+    /* THE THROTTLE APPLIES FIRST, WHATEVER THE REASON FOR BEING STALE.
+
+       This used to read:
+
+           if ((r.synced_days ?? 0) < viewDays) return true;   // reach
+           return <older than 30 minutes>;                     // time
+
+       so a site short on REACH was stale on every single request - the time
+       check below it never ran. Survivable while synced_days is being written.
+       NOT survivable when it is NULL, because `?? 0` then makes every site
+       permanently short of reach.
+
+       And NULL is the normal state after that column was added: synced_days is
+       only written by a SUCCESSFUL sync. A deployment whose last success
+       predates the column - or whose syncs have been failing - has NULL there
+       for ever, so every page load fired a crawl of two Mongo sites, which
+       failed, which left synced_days NULL. A loop with no exit.
+
+       The symptom was not a sync problem, which is why it took so long to
+       find: the list answered in about thirty milliseconds and then spent
+       eight to fifteen seconds queued behind the crawl its own request had
+       just started, waiting for one of the pool's ten connections.
+
+       The rule lives in abandonedSyncIsDue so it can be tested. */
+    const stale = wanted.filter((site) => abandonedSyncIsDue(byState.get(site), viewDays));
 
     // A site DRM has never asked is a different situation from a stale one. A
     // stale copy is yesterday's answer, which is worth showing while today's

@@ -60,8 +60,13 @@ const get = (qs: string): Promise<any> =>
 
 async function seed() {
   await pool.query(`TRUNCATE abandoned_attempts, abandoned_sync_state, leads, person_names, donations, people RESTART IDENTITY CASCADE`);
+  // ON CONFLICT so a second run does not die on the unique email. users is not
+  // truncated above, because wiping it cascades into everything.
   const u = await pool.query(
-    `INSERT INTO users (name, email, password_hash, role) VALUES ('Admin','a@t','x','admin') RETURNING id, role`
+    `INSERT INTO users (name, email, password_hash, role)
+     VALUES ('Admin','paging@test.invalid','x','admin')
+     ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name
+     RETURNING id, role`
   );
   token = generateToken({ userId: u.rows[0].id, role: u.rows[0].role });
 
