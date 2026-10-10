@@ -2425,3 +2425,32 @@ CREATE INDEX IF NOT EXISTS idx_wa_thanks_due ON wa_thanks_sends(campaign, status
 -- Which seva on the page the donation was for, and the words used for {{2}}.
 ALTER TABLE wa_thanks_sends ADD COLUMN IF NOT EXISTS seva VARCHAR(120);
 ALTER TABLE wa_thanks_sends ADD COLUMN IF NOT EXISTS seva_text VARCHAR(120);
+
+
+/* =========================================================================
+   NAME-LOOKUP INDEXES FOR "HAVE THEY PAID SINCE?"
+   =========================================================================
+
+   services/gaveSince.ts settles each abandoned attempt against DRM's own
+   donations, including "the same name gave within a day" - the donor who
+   gave up on one phone and paid from another. That check used to walk every
+   donation made on the attempt's day and run a regular expression over two
+   names for each. On production data (about 2,600 attempts, 8,800 donations)
+   that was roughly fifty thousand lookups to decide two hundred people, and
+   it is why the Nearly gave list took seconds to open - not the query's
+   result size, which is why paginating it changed nothing.
+
+   The check now compares one flattened name to a stored flattened name, which
+   is an equality an index can answer. The expressions below MUST match
+   nameKey() in gaveSince.ts character for character - Postgres uses an
+   expression index only when the query's expression is the same - so change
+   them together or the index sits unused and the list is slow again with no
+   error to say why.
+
+   Both tables are small (thousands of rows), so the build is a blink. They are
+   plain CREATE INDEX rather than CONCURRENTLY because migrate.ts applies this
+   file as one transaction, where CONCURRENTLY is not allowed. */
+CREATE INDEX IF NOT EXISTS idx_donations_given_name_key
+  ON donations ((lower(regexp_replace(COALESCE(given_name, ''), '[^a-zA-Z]', '', 'g'))));
+CREATE INDEX IF NOT EXISTS idx_people_name_key
+  ON people ((lower(regexp_replace(COALESCE(name, ''), '[^a-zA-Z]', '', 'g'))));

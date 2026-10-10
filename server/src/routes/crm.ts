@@ -850,26 +850,61 @@ async function syncAbandoned(
 const ABANDONED_STALE_MINUTES = 30;
 
 /**
- * Should this site be crawled again now?
+ * How long after an ATTEMPT before the list page may start another crawl.
+ *
+ * An attempt, not a success. last_synced_at only moves when a sync works, so a
+ * site that keeps failing never looks recently-checked - and was therefore
+ * crawled again on every single page load, for ever.
+ */
+const ABANDONED_ATTEMPT_COOLDOWN_MINUTES = 10;
+
+export type AbandonedSyncAction = 'await' | 'background' | 'none';
+
+/**
+ * What the list page should do about one site, right now.
+ *
+ *   'await'       block this request until the crawl finishes
+ *   'background'  start a crawl, answer from what is stored
+ *   'none'        leave it alone
  *
  * Pure, exported and tested, because getting it wrong does not look like a
- * sync bug - it looks like a slow page. See the long note at the call site.
+ * sync bug - it looks like a slow page. Twice so far.
  *
- * The throttle comes FIRST and applies for every reason. A site is re-crawled
- * at most once per ABANDONED_STALE_MINUTES, whether it is stale in time or
- * short on reach.
+ * THE THREE RULES, IN ORDER
+ *
+ * 1. A site that was attempted lately is left alone, whatever happened. This
+ *    is what a site that keeps FAILING needs: its last success is old, so
+ *    "stale" is true on every request, and without this each page load starts
+ *    another doomed crawl against the same pool of ten connections.
+ *
+ * 2. Only a site DRM has never tried AT ALL may block a request. "Never
+ *    tried" is no state row, not a null last_synced_at - that column also stays
+ *    null for a site whose every attempt has failed, and treating that as
+ *    "never" made every page load wait for a crawl that then failed again.
+ *    The eight to fifteen seconds on a 3.7 kB response was exactly this.
+ *
+ * 3. Otherwise it is stale only past the stale window, in the background.
  */
-export function abandonedSyncIsDue(
-  state: { last_synced_at?: string | Date | null; synced_days?: number | null } | undefined,
-  viewDays: number,
+export function abandonedSyncAction(
+  state: { last_synced_at?: string | Date | null } | undefined,
+  lastAttemptAt: number | undefined,
   now: number = Date.now()
-): boolean {
-  if (!state?.last_synced_at) return true;
+): AbandonedSyncAction {
+  if (lastAttemptAt && now - lastAttemptAt < ABANDONED_ATTEMPT_COOLDOWN_MINUTES * 60_000) return 'none';
+  if (!state) return 'await';
+  if (!state.last_synced_at) return 'background';
   const since = now - new Date(state.last_synced_at).getTime();
-  if (since < ABANDONED_STALE_MINUTES * 60_000) return false;
-  // Past the window: old in time, or short in reach, both mean crawl.
-  return true;
+  return since < ABANDONED_STALE_MINUTES * 60_000 ? 'none' : 'background';
 }
+
+/**
+ * When this process last started a crawl for each site, from the list page.
+ *
+ * In memory on purpose: it only has to stop one process hammering a failing
+ * site, a restart resetting it costs one crawl, and a column for it would
+ * mean a migration on a live table to solve a throttling problem.
+ */
+const lastAbandonedAttempt = new Map<string, number>();
 
 /**
  * How many pages of 200 to crawl per site.
@@ -916,7 +951,7 @@ const cut = (v: unknown, n: number): string | null => {
  * time somebody adds a condition to one and not the other. The person who
  * downloads a list and acts on it is the one who pays for that.
  */
-function buildAbandonedQuery(
+export function buildAbandonedQuery(
   q: Record<string, unknown>,
   wanted: SiteKey[],
   viewDays: number
@@ -1083,7 +1118,13 @@ function buildAbandonedQuery(
         FROM in_scope a
        ORDER BY a.phone, a.attempted_at DESC
     ),
-    resolved AS (
+    /* MATERIALIZED, so gave_anyway is worked out ONCE per person.
+
+       Referenced once, a CTE is inlined, and Postgres then evaluated the
+       gave-anyway check a second time for each of the rows the page returns -
+       after it had already evaluated it for every row to decide who to hide.
+       On the real data that second pass was about a quarter of the page query. */
+    resolved AS MATERIALIZED (
       SELECT l.*,
              -- Did they give anyway? Same mobile, a lead marked as donated,
              -- or the same name within a day - see services/gaveSince.ts.
@@ -1150,9 +1191,33 @@ router.get('/leads/abandoned', async (req, res) => {
   const sites = (String(req.query.sites ?? '').split(',').filter(Boolean) as SiteKey[]);
   const wanted = sites.length ? sites : (['hkmv', 'annadan'] as SiteKey[]);
 
+  /* WHERE THE TIME GOES, MEASURED RATHER THAN GUESSED.
+
+     This endpoint was blamed, in turn, on returning 500 rows, on a network hop,
+     on a failing site and on a missing index - four explanations, each
+     plausible, three of them wrong. Each phase is now timed and reported in
+     the Server-Timing header, which DevTools shows under a request's Timing
+     tab, and logged when the whole thing is slow.
+
+     The queries run in parallel, so each figure is that query's own latency
+     from the moment it was issued - which includes waiting for a free pool
+     connection. `pool` in the log says whether that wait is the story. */
+  const timings: Record<string, number> = {};
+  const timed = async <T,>(label: string, work: Promise<T>): Promise<T> => {
+    const t0 = performance.now();
+    try {
+      return await work;
+    } finally {
+      timings[label] = Math.round(performance.now() - t0);
+    }
+  };
+  const tStart = performance.now();
+  const poolAtStart = { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount };
+
   try {
-    const state = await pool.query(
-      `SELECT source_site, last_synced_at, last_error, running_since FROM abandoned_sync_state`
+    const state = await timed(
+      'state',
+      pool.query(`SELECT source_site, last_synced_at, last_error, running_since FROM abandoned_sync_state`)
     );
     const byState = new Map(state.rows.map((r) => [r.source_site, r]));
 
@@ -1162,44 +1227,28 @@ router.get('/leads/abandoned', async (req, res) => {
     const viewDays = Math.min(365, Math.max(1, Number(req.query.days) || 30));
     const syncDays = Math.max(90, viewDays);
 
-    /* THE THROTTLE APPLIES FIRST, WHATEVER THE REASON FOR BEING STALE.
+    /* WHAT TO DO ABOUT EACH SITE, DECIDED IN ONE TESTED PLACE.
 
-       This used to read:
+       The list answers in about thirty milliseconds. It took eight to fifteen
+       seconds to arrive because it was waiting on a crawl of the sites that
+       its own request started - and kept starting, because a crawl that FAILS
+       leaves last_synced_at where it was, so the site never looked recently
+       checked. See abandonedSyncAction for the rules.
 
-           if ((r.synced_days ?? 0) < viewDays) return true;   // reach
-           return <older than 30 minutes>;                     // time
+       Reading must not block on somebody else's Mongo when there is anything
+       to read. Only fresh=true (the Refresh button's explicit ask) or a site
+       DRM has never contacted at all may wait. */
+    const now = Date.now();
+    const action = new Map(
+      wanted.map((site) => [site, abandonedSyncAction(byState.get(site), lastAbandonedAttempt.get(site), now)])
+    );
+    const toAwait = wanted.filter((site) => action.get(site) === 'await');
+    const stale = wanted.filter((site) => action.get(site) === 'background');
 
-       so a site short on REACH was stale on every single request - the time
-       check below it never ran. Survivable while synced_days is being written.
-       NOT survivable when it is NULL, because `?? 0` then makes every site
-       permanently short of reach.
-
-       And NULL is the normal state after that column was added: synced_days is
-       only written by a SUCCESSFUL sync. A deployment whose last success
-       predates the column - or whose syncs have been failing - has NULL there
-       for ever, so every page load fired a crawl of two Mongo sites, which
-       failed, which left synced_days NULL. A loop with no exit.
-
-       The symptom was not a sync problem, which is why it took so long to
-       find: the list answered in about thirty milliseconds and then spent
-       eight to fifteen seconds queued behind the crawl its own request had
-       just started, waiting for one of the pool's ten connections.
-
-       The rule lives in abandonedSyncIsDue so it can be tested. */
-    const stale = wanted.filter((site) => abandonedSyncIsDue(byState.get(site), viewDays));
-
-    // A site DRM has never asked is a different situation from a stale one. A
-    // stale copy is yesterday's answer, which is worth showing while today's
-    // is fetched; no copy at all is no answer, and returning a confident zero
-    // while a sync runs in the background is how a screen tells somebody there
-    // is nothing to ring when there are four thousand people.
-    const never = wanted.filter((site) => !byState.get(site)?.last_synced_at);
-
-    // Never awaited unless the caller asked for fresh data, or there is no
-    // data at all. The page is for reading, and reading must not block on
-    // somebody else's Mongo when there is something to read.
-    if (req.query.fresh === 'true' || never.length) {
-      await syncAbandoned(req.query.fresh === 'true' ? wanted : never, { days: syncDays });
+    if (req.query.fresh === 'true' || toAwait.length) {
+      const targets = req.query.fresh === 'true' ? wanted : toAwait;
+      for (const site of targets) lastAbandonedAttempt.set(site, now);
+      await timed('sync_wait', syncAbandoned(targets, { days: syncDays }));
       // Re-read, because the state above was captured before that ran. Without
       // this the one request that definitely has fresh information reports the
       // state from before it - including saying a site is fine when the sync
@@ -1211,6 +1260,7 @@ router.get('/leads/abandoned', async (req, res) => {
       byState.clear();
       for (const row of after.rows) byState.set(row.source_site, row);
     } else if (stale.length) {
+      for (const site of stale) lastAbandonedAttempt.set(site, now);
       void syncAbandoned(stale, { days: syncDays }).catch((e) =>
         console.error('crm.syncAbandoned background error:', (e as Error).message)
       );
@@ -1247,15 +1297,15 @@ router.get('/leads/abandoned', async (req, res) => {
     // filters match, and a count of one page is not a count.
     const unfiltered = buildAbandonedQuery({ ...q, called: undefined }, wanted, viewDays);
     const [page, totals, callCounts] = await Promise.all([
-      pool.query(
+      timed('page', pool.query(
         `${base}
          SELECT * FROM resolved l
           ${req.query.include_settled === 'true' ? '' : 'WHERE NOT gave_anyway'}
           ORDER BY ${order}
           LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
         [...values, perPage, offset]
-      ),
-      pool.query(
+      )),
+      timed('totals', pool.query(
         `${base}
          SELECT COUNT(*)::int AS total,
                 COUNT(*) FILTER (WHERE NOT gave_anyway)::int AS open,
@@ -1265,8 +1315,8 @@ router.get('/leads/abandoned', async (req, res) => {
                 COALESCE(SUM(amount) FILTER (WHERE NOT gave_anyway), 0)::numeric AS value_at_stake
            FROM resolved`,
         values
-      ),
-      pool.query(
+      )),
+      timed('counts', pool.query(
         `${unfiltered.base}
          SELECT COUNT(*) FILTER (WHERE NOT gave_anyway)::int AS "all",
                 COUNT(*) FILTER (WHERE NOT gave_anyway AND NOT called_today)::int AS not_today,
@@ -1274,10 +1324,22 @@ router.get('/leads/abandoned', async (req, res) => {
                 COUNT(*) FILTER (WHERE NOT gave_anyway AND last_unanswered)::int AS no_answer
            FROM resolved`,
         unfiltered.values
-      ),
+      )),
     ]);
 
     const t = totals.rows[0];
+
+    timings.total = Math.round(performance.now() - tStart);
+    res.set(
+      'Server-Timing',
+      Object.entries(timings).map(([k, v]) => `${k};dur=${v}`).join(', ')
+    );
+    if (timings.total > 1000) {
+      console.warn(
+        `[abandoned] slow: ${JSON.stringify(timings)} pool(start)=${JSON.stringify(poolAtStart)} ` +
+        `pool(end)=${JSON.stringify({ total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount })}`
+      );
+    }
 
     // How many rows the filters match, which is what the pager counts through.
     // `open` when settled donors are hidden, `total` when they are shown -

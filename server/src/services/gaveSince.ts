@@ -30,11 +30,34 @@ export function gaveSinceSql(a: string): string {
          AND gd.created_at >= ${a}.attempted_at)
     OR EXISTS (
       SELECT 1 FROM leads gl WHERE gl.phone = ${a}.phone AND gl.converted_at >= ${a}.attempted_at)
-    OR (length(${nameKey(`${a}.name`)}) >= 4 AND EXISTS (
-      SELECT 1 FROM donations gd JOIN people gp ON gp.id = gd.person_id
-       WHERE gd.created_at >= ${a}.attempted_at
-         AND gd.created_at < ${a}.attempted_at + INTERVAL '1 day'
-         AND (${nameKey('gd.given_name')} = ${nameKey(`${a}.name`)} OR ${nameKey('gp.name')} = ${nameKey(`${a}.name`)})
-         AND (position(' ' IN btrim(${a}.name)) > 0 OR gd.amount = ${a}.amount)))
+    /* THE SAME-NAME CHECK, SPLIT SO EACH HALF CAN USE AN INDEX.
+
+       This was one EXISTS joining donations to people with
+         (key(gd.given_name) = key OR key(gp.name) = key)
+       inside a one-day window. An OR across two tables cannot use an index, so
+       for every abandoned attempt Postgres walked every donation made that
+       day - a few hundred - looked each one's donor up and ran a regular
+       expression over two names. On the real data that was about fifty
+       thousand lookups to settle two hundred people, and ninety-seven per cent
+       of the time the Nearly gave list took to open.
+
+       Distributing the OR over two EXISTS is the same condition, and each half
+       is now an equality on an expression that has an index
+       (idx_donations_given_name_key, idx_people_name_key in schema.sql). The
+       first half drops the join to people: donations.person_id is NOT NULL
+       with a foreign key, so that join could never remove a row. */
+    OR (length(${nameKey(`${a}.name`)}) >= 4 AND (
+      EXISTS (
+        SELECT 1 FROM donations gd
+         WHERE ${nameKey('gd.given_name')} = ${nameKey(`${a}.name`)}
+           AND gd.created_at >= ${a}.attempted_at
+           AND gd.created_at < ${a}.attempted_at + INTERVAL '1 day'
+           AND (position(' ' IN btrim(${a}.name)) > 0 OR gd.amount = ${a}.amount))
+      OR EXISTS (
+        SELECT 1 FROM people gp JOIN donations gd ON gd.person_id = gp.id
+         WHERE ${nameKey('gp.name')} = ${nameKey(`${a}.name`)}
+           AND gd.created_at >= ${a}.attempted_at
+           AND gd.created_at < ${a}.attempted_at + INTERVAL '1 day'
+           AND (position(' ' IN btrim(${a}.name)) > 0 OR gd.amount = ${a}.amount))))
   )`;
 }

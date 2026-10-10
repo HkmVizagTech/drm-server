@@ -27,7 +27,10 @@
     "test:notifications": "tsx scripts/test-notifications.ts",
     "test:wathanks": "tsx scripts/test-wa-thanks.ts",
     "test:paging": "tsx scripts/test-abandoned-paging.ts",
-    "bench:abandoned": "tsx scripts/bench-abandoned.ts"
+    "bench:abandoned": "tsx scripts/bench-abandoned.ts",
+    "test:abandonedsync": "tsx scripts/test-abandoned-sync.ts",
+    "test:gavesince": "tsx scripts/test-gave-since.ts",
+    "diagnose:abandoned": "tsx scripts/diagnose-abandoned.ts"
   },
   "keywords": [],
   "author": "",
