@@ -137,7 +137,8 @@ async function main() {
   // Gave to Brick (switched off below) first, then Sadhu Bhojan.
   await donation('9300000004', 'Two Sevas', '2026-10-10 09:00', '/pitru-paksha', 'hkmv', undefined, 'Brick Seva');
   await donation('9300000004', 'Two Sevas', '2026-10-10 11:00', '/pitru-paksha', 'hkmv', undefined, 'Sadhu Bhojan Seva');
-  const precise = { ...s, sevas: s.sevas.map((x) => (x.name === 'Brick Seva' ? { ...x, on: false } : x)) };
+  check('out of the box only Annadana Seva is thanked', s.sevas.filter((x) => x.on).map((x) => x.name).join() === 'Annadana Seva', s.sevas);
+  const precise = { ...s, sevas: s.sevas.map((x) => ({ ...x, on: x.name !== 'Brick Seva' })) };
   await queueThanks(precise);
   const sv = Object.fromEntries((await pool.query(`SELECT phone, seva, seva_text, status, error, send_at FROM wa_thanks_sends`)).rows.map((r) => [r.phone, r]));
   check('Annadana donors are thanked for Annadan seva', sv['9000000001']?.seva_text === 'Pitru paksha Annadan seva', sv['9000000001']);
@@ -184,6 +185,27 @@ async function main() {
   }
   const again = await thanksTick(fakeFetch);
   check('nothing is sent twice', again.sent === 0 && sent.filter((x) => x.destination === '919100000001').length <= 1, again);
+
+  console.log('\n3b. a seva switched off after donors were queued');
+  await pool.query(`TRUNCATE wa_thanks_sends`);
+  await donation('9400000001', 'Gau Later', Math.min(150, minsToday), '/pitru-paksha', 'hkmv', undefined, 'Gau Seva');
+  await donation('9400000002', 'Anna Later', Math.min(150, minsToday), '/pitru-paksha', 'hkmv', undefined, 'Annadana Seva');
+  const allOn = { ...live, sevas: live.sevas.map((x) => ({ ...x, on: true })) };
+  await saveThanksSettings(allOn, ADMIN);
+  await queueThanks(allOn);
+  // Push both into the future so nothing is due yet, then switch Gau off.
+  await pool.query(`UPDATE wa_thanks_sends SET send_at = NOW() + INTERVAL '1 hour'`);
+  const onlyAnna = { ...allOn, sevas: allOn.sevas.map((x) => ({ ...x, on: x.name === 'Annadana Seva', text: x.name === 'Annadana Seva' ? 'Pitru Paksha Annadana' : x.text })) };
+  await saveThanksSettings(onlyAnna, ADMIN);
+  await thanksTick(fakeFetch);
+  const g = Object.fromEntries((await pool.query(`SELECT phone, status, error, seva_text FROM wa_thanks_sends`)).rows.map((r) => [r.phone, r]));
+  check('the Gau Seva donor already queued is not sent once Gau is off', g['9400000001']?.status === 'skipped' && /switched off/.test(g['9400000001'].error), g['9400000001']);
+  check('the Annadana donor still waits, with the new words', g['9400000002']?.status === 'waiting' && g['9400000002'].seva_text === 'Pitru Paksha Annadana', g['9400000002']);
+  await saveThanksSettings(allOn, ADMIN);
+  await thanksTick(fakeFetch);
+  const back = (await pool.query(`SELECT status FROM wa_thanks_sends WHERE phone = '9400000001'`)).rows[0];
+  check('switched back on, they are queued again', ['waiting', 'sent'].includes(back.status), back);
+  await saveThanksSettings(live, ADMIN);
 
   console.log('\n4. switched off');
   await saveThanksSettings({ ...live, enabled: false }, ADMIN);

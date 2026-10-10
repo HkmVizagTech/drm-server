@@ -107,12 +107,13 @@ export const DEFAULT_THANKS: ThanksSettings = {
     'Hare Krishna Vaikuntham',
   ].join('\n'),
   // The five sevas on harekrishnavizag.org/pitru-paksha, by their names there.
+  // Only Annadana is thanked for Mahalaya Amavasya; the others can be switched on.
   sevas: [
     { name: 'Annadana Seva', text: 'Pitru paksha Annadan seva', on: true },
-    { name: 'Sadhu Bhojan Seva', text: 'Pitru paksha Sadhu Bhojan seva', on: true },
-    { name: 'Gau Seva', text: 'Pitru paksha Gau seva', on: true },
-    { name: 'Brick Seva', text: 'Pitru paksha Brick seva', on: true },
-    { name: 'Square Foot Seva', text: 'Pitru paksha Square Foot seva', on: true },
+    { name: 'Sadhu Bhojan Seva', text: 'Pitru paksha Sadhu Bhojan seva', on: false },
+    { name: 'Gau Seva', text: 'Pitru paksha Gau seva', on: false },
+    { name: 'Brick Seva', text: 'Pitru paksha Brick seva', on: false },
+    { name: 'Square Foot Seva', text: 'Pitru paksha Square Foot seva', on: false },
   ],
 };
 
@@ -269,7 +270,8 @@ export async function queueThanks(s: ThanksSettings): Promise<number> {
      INSERT INTO wa_thanks_sends (campaign, donation_id, person_id, phone, name, amount, donated_at, seva, seva_text, send_at, status, error)
      SELECT $1, donation_id, person_id, phone, name, amount, created_at, left(seva, 120), seva_text, send_at,
             CASE WHEN send_at IS NULL THEN 'skipped' ELSE 'waiting' END,
-            CASE WHEN seva_text IS NULL THEN 'Seva not on the list: ' || COALESCE(seva, 'none recorded')
+            CASE WHEN seva_text IS NULL AND lower(btrim(COALESCE(seva, ''))) = ANY($8::text[]) THEN 'Seva switched off: ' || seva
+                 WHEN seva_text IS NULL THEN 'Seva not on the list: ' || COALESCE(seva, 'none recorded')
                  WHEN send_at IS NULL THEN 'Donated too late in the day for the message' END
        FROM timed
      ON CONFLICT (campaign, phone) DO UPDATE SET
@@ -279,7 +281,7 @@ export async function queueThanks(s: ThanksSettings): Promise<number> {
        amount = EXCLUDED.amount, donated_at = EXCLUDED.donated_at, send_at = EXCLUDED.send_at,
        status = EXCLUDED.status, error = EXCLUDED.error
      WHERE wa_thanks_sends.seva_text IS NULL AND wa_thanks_sends.status = 'skipped' AND EXCLUDED.seva_text IS NOT NULL`,
-    [campaignKey(s), pagePattern(s.page), s.day, s.delay_minutes, s.last_send, s.stop_at, JSON.stringify(words)]
+    [campaignKey(s), pagePattern(s.page), s.day, s.delay_minutes, s.last_send, s.stop_at, JSON.stringify(words), s.sevas.map((x) => x.name.toLowerCase())]
   );
   return r.rowCount ?? 0;
 }
@@ -399,6 +401,24 @@ export async function thanksTick(fetcher: typeof fetch = fetch): Promise<{ queue
       [key, s.day, s.stop_at]
     );
     out.skipped = late.rowCount ?? 0;
+
+    // The seva list as it is NOW. Somebody queued while a seva was on, whose
+    // seva has since been switched off, is not sent (and comes back if it is
+    // switched on again); a change to a seva's words reaches those waiting.
+    const words = Object.fromEntries(s.sevas.filter((x) => x.on).map((x) => [x.name.toLowerCase(), x.text]));
+    const off = await pool.query(
+      `UPDATE wa_thanks_sends SET status = 'skipped', seva_text = NULL,
+              error = 'Seva switched off: ' || COALESCE(seva, 'none recorded')
+        WHERE campaign = $1 AND status = 'waiting' AND ($2::jsonb ->> lower(btrim(COALESCE(seva, '')))) IS NULL`,
+      [key, JSON.stringify(words)]
+    );
+    out.skipped += off.rowCount ?? 0;
+    await pool.query(
+      `UPDATE wa_thanks_sends SET seva_text = $2::jsonb ->> lower(btrim(seva))
+        WHERE campaign = $1 AND status = 'waiting'
+          AND seva_text IS DISTINCT FROM ($2::jsonb ->> lower(btrim(seva)))`,
+      [key, JSON.stringify(words)]
+    );
     if (!gupshupConfigured()) return out;
 
     // Claimed before sending, so two DRM instances cannot send the same one.
