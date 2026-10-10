@@ -950,6 +950,29 @@ function buildAbandonedQuery(
   // five minutes, while the donor may still be on the payment page.
   scope.push(`(a.status = 'failed' OR a.attempted_at <= NOW() - INTERVAL '${PENDING_GRACE_MINUTES} minutes')`);
 
+  /* An explicit date range, which NARROWS the `days` window rather than
+     replacing it.
+
+     Both, not one or the other: `days` also decides how far back the sites are
+     crawled, so a range outside it would ask the database for rows nothing has
+     ever fetched and report an honest-looking zero. Picking a range the sync
+     has not reached is a question DRM cannot answer, and the screen widens the
+     period rather than pretending otherwise.
+
+     Resolved in IST because the session is (db/pool.ts) - "15 September" means
+     midnight to midnight in India. The upper bound adds a day rather than
+     using <=, so the whole of the end date is included; a bare <= on a
+     timestamp silently means "up to 00:00 on that morning" and drops the day
+     the person actually chose. */
+  if (q.from_date) {
+    scope.push(`a.attempted_at >= $${i++}::date`);
+    values.push(String(q.from_date));
+  }
+  if (q.to_date) {
+    scope.push(`a.attempted_at < ($${i++}::date + INTERVAL '1 day')`);
+    values.push(String(q.to_date));
+  }
+
   // Guarded against NaN: a non-numeric min_amount used to reach Postgres as
   // 'NaN'::numeric, which sorts above every number, so the endpoint answered
   // 200 with no rows and zero at stake rather than an error.
@@ -980,11 +1003,29 @@ function buildAbandonedQuery(
   // `a.` here referenced the inner alias and failed with "missing FROM-clause
   // entry" - a whitelisted ORDER BY is still SQL that has to parse.
   const SORTS: Record<string, string> = {
+    /* THE ONE A SHIFT ACTUALLY STARTS FROM: nobody has rung them yet, newest
+       first.
+
+       "Recent" alone buries the useful rows. A list sorted purely by when
+       somebody tried mixes the twenty people a caller already spoke to
+       yesterday in among the ones nobody has touched, so the work of finding
+       the next real call is done by eye, on every page, for ever.
+
+       `IS NULL DESC` puts the never-contacted first because in Postgres true
+       sorts after false, so DESC brings true up. Ties fall back to the newest
+       attempt, which is the same order "recent" gives. */
+    uncalled: '(l.lead_last_contacted_at IS NULL) DESC, l.attempted_at DESC',
     recent: 'l.attempted_at DESC',
     oldest: 'l.attempted_at ASC',
     amount: 'l.amount DESC NULLS LAST',
     attempts: 'l.attempts DESC, l.attempted_at DESC',
   };
+  /* Default stays `recent`, NOT `uncalled`.
+
+     This endpoint is read by more than the screen in front of us - the export
+     and "add all matching" build the same query - and silently reordering what
+     a caller downloads is not this change's business. The screen asks for
+     `uncalled` explicitly. */
   const order = SORTS[String(q.sort ?? '')] ?? SORTS.recent;
 
   // One row per person: somebody who tried four times is one phone call.
@@ -1142,8 +1183,31 @@ router.get('/leads/abandoned', async (req, res) => {
     const built = buildAbandonedQuery(q, wanted, viewDays);
     const { base, values, order } = built;
 
+    /* PAGINATION, ADDED WITHOUT CHANGING WHAT AN OLD CALLER GETS.
+
+       This used to be a bare LIMIT 500. On thirty days of two sites that is
+       five hundred rows of joins and EXISTS subqueries assembled on every
+       load, for a screen nobody scrolls past the first twenty of - which is
+       why the list took seconds to open.
+
+       The defaults are chosen so that a request with no page or limit behaves
+       EXACTLY as it did: page 1, limit 500, offset 0. The export and
+       "add all matching" build their queries from the same helper and pass
+       neither, so they are untouched. Only a caller that asks for a page gets
+       one.
+
+       `limit` is clamped rather than trusted: ?limit=100000 would hand back
+       the whole table and undo the point of the change, and ?limit=0 would
+       return an empty page that reads as "nobody to call". */
+    const pageNo = Math.max(1, Number(req.query.page) || 1);
+    const perPage = Math.min(500, Math.max(1, Number(req.query.limit) || 500));
+    const offset = (pageNo - 1) * perPage;
+
     // How many sit behind each quick filter - worked out without that filter,
     // so the numbers on the buttons do not change as you switch between them.
+    //
+    // Deliberately NOT paged: these are counts over everything the other
+    // filters match, and a count of one page is not a count.
     const unfiltered = buildAbandonedQuery({ ...q, called: undefined }, wanted, viewDays);
     const [page, totals, callCounts] = await Promise.all([
       pool.query(
@@ -1151,8 +1215,8 @@ router.get('/leads/abandoned', async (req, res) => {
          SELECT * FROM resolved l
           ${req.query.include_settled === 'true' ? '' : 'WHERE NOT gave_anyway'}
           ORDER BY ${order}
-          LIMIT 500`,
-        values
+          LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+        [...values, perPage, offset]
       ),
       pool.query(
         `${base}
@@ -1178,11 +1242,23 @@ router.get('/leads/abandoned', async (req, res) => {
 
     const t = totals.rows[0];
 
+    // How many rows the filters match, which is what the pager counts through.
+    // `open` when settled donors are hidden, `total` when they are shown -
+    // the same number the list is actually paging over, or the last page is
+    // computed from a count the query never returns.
+    const matching = req.query.include_settled === 'true' ? t.total : t.open;
+
     res.json({
       rows: page.rows,
       // Compared against the real total, not the page length: at exactly 500
       // the old form said "showing the first 500 of 500".
-      complete: page.rows.length >= (req.query.include_settled === 'true' ? t.total : t.open),
+      complete: page.rows.length >= matching,
+      // Pagination. Additive - a client that ignores these reads `rows` as
+      // before, because without a page parameter `rows` IS the old answer.
+      page: pageNo,
+      limit: perPage,
+      total_pages: Math.max(1, Math.ceil(matching / perPage)),
+      matching,
       total: t.total,
       open: t.open,
       gave_anyway: t.gave_anyway,
