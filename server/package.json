@@ -30,7 +30,9 @@
     "bench:abandoned": "tsx scripts/bench-abandoned.ts",
     "test:abandonedsync": "tsx scripts/test-abandoned-sync.ts",
     "test:gavesince": "tsx scripts/test-gave-since.ts",
-    "diagnose:abandoned": "tsx scripts/diagnose-abandoned.ts"
+    "diagnose:abandoned": "tsx scripts/diagnose-abandoned.ts",
+    "test:qrdate": "tsx scripts/test-qr-donation-date.ts",
+    "fix:qrdates": "tsx scripts/fix-qr-donation-dates.ts"
   },
   "keywords": [],
   "author": "",

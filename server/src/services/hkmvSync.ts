@@ -22,6 +22,7 @@ import { hkmvMappers, HkmvDonation, HkmvSubscription, HkmvTransaction, SiteKey, 
 import { refreshSankalpFromPerson } from './sankalpDays';
 import { decideName } from './profileSync';
 import { registerName } from './personNames';
+import { alignQrDonationDate } from './qrDonationDate';
 import { recordCredit } from './credits';
 import { addressValues, fromHkmvSaved } from '../utils/address';
 
@@ -377,11 +378,31 @@ async function upsertDonation(
   const donationId = donationResult.rows[0].id;
   let deliveryUpserted = false;
 
+  /* A donation raised for a QR payment is dated the day the money arrived.
+
+     The main site stamps the donation with the moment the RECEIPT was raised,
+     so without this a payment received on Saturday and receipted on Monday sits
+     in DRM dated Monday. See services/qrDonationDate.ts for the whole story and
+     for how a donation is tied to its payment.
+
+     Before the credit below, so the credit is dated by the corrected day too.
+     In a SAVEPOINT, like the credit: this is a correction to a date, and a
+     failure in it must not abort the donor's whole sync. */
+  let occurredAt: Date = donationResult.rows[0].created_at;
+  try {
+    await client.query('SAVEPOINT qr_date');
+    occurredAt = (await alignQrDonationDate(client, { donationId })) ?? occurredAt;
+    await client.query('RELEASE SAVEPOINT qr_date');
+  } catch (e) {
+    await client.query('ROLLBACK TO SAVEPOINT qr_date').catch(() => undefined);
+    console.error('hkmvSync: could not align a QR donation date (non-fatal):', (e as Error).message);
+  }
+
   await creditAssignedLink(client, {
     donationId,
     personId,
     amount: donationResult.rows[0].amount,
-    occurredAt: donationResult.rows[0].created_at,
+    occurredAt,
     utmCampaign: donationResult.rows[0].utm_campaign,
   });
 

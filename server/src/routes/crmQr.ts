@@ -43,6 +43,7 @@ import { leadMoneyState, leadHasCredit, leadForPayer, leadBefore, restoreLead, r
 
 type Db = { query: PoolClient['query'] };
 import type { PoolClient } from 'pg';
+import { alignQrDonationDate } from '../services/qrDonationDate';
 
 const router = Router();
 
@@ -1182,6 +1183,23 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
        WHERE id = $1`,
       [paymentRowId, result.receiptNumber, result.externalId, site]
     );
+
+    /* If the donation is already in DRM, date it by the payment.
+
+       The site tells DRM about a new donation on its own, and that can land
+       while this request is still waiting for the site's answer - before the
+       line above has recorded which donation this payment became. The sync
+       then cannot tie them together yet, so it is done here, now that the id
+       is stored. When the donation has not arrived, the sync does it instead.
+       Either order ends in the same place; see services/qrDonationDate.ts.
+
+       Non-fatal: the receipt is already issued, and a date correction must not
+       turn a success into a failure the caller would retry. */
+    if (result.externalId) {
+      await alignQrDonationDate(pool, { externalRef: result.externalId }).catch((e) =>
+        console.error('crm.qrReceipt could not align the donation date (non-fatal):', (e as Error).message)
+      );
+    }
   } catch (e) {
     const err = e as Error & { status?: number };
     // A duplicate reference means the receipt already exists on that site,
