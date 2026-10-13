@@ -316,6 +316,27 @@ async function main() {
   check('Leads: "not called yet"', JSON.stringify((s9.body.leads ?? []).map((x: any) => x.name)) === '["Spot Never"]', s9.body.leads?.map((x: any) => x.name));
   check('lead rows carry the last caller', (await req('GET', `/api/crm/leads?search=Spot%20Me`, ana)).body.leads?.[0]?.last_caller_name === 'Ana');
 
+  console.log('\n10. "Will donate later": a day, or only a note');
+  const w1 = (await pool.query(`INSERT INTO leads (phone, name, assigned_to) VALUES ('9866600001','Later Note',$1) RETURNING id`, [ANA])).rows[0].id;
+  const w2 = (await pool.query(`INSERT INTO leads (phone, name, assigned_to) VALUES ('9866600002','Later Day',$1) RETURNING id`, [ANA])).rows[0].id;
+  const w3 = (await pool.query(`INSERT INTO leads (phone, name, assigned_to) VALUES ('9866600003','Later Promise',$1) RETURNING id`, [ANA])).rows[0].id;
+  const w4 = (await pool.query(`INSERT INTO leads (phone, name, assigned_to) VALUES ('9866600004','Later Nothing',$1) RETURNING id`, [ANA])).rows[0].id;
+  await req('POST', `/api/crm/leads/${w1}/call`, ana, { disposition: 'will_donate', note: 'Said he will see, did not commit' });
+  const inThree = new Date(Date.now() + 3 * 86400000).toISOString();
+  await req('POST', `/api/crm/leads/${w2}/call`, ana, { disposition: 'will_donate', next_follow_up_at: inThree, note: 'After salary' });
+  await req('POST', `/api/crm/leads/${w3}/call`, ana, { disposition: 'will_donate', reminder: { due_at: inThree, expected_amount: 1100 } });
+  await req('POST', `/api/crm/leads/${w4}/call`, ana, { disposition: 'will_donate' });
+  const wl = Object.fromEntries((await pool.query(`SELECT name, status, next_follow_up_at, remarks FROM leads WHERE id = ANY($1::uuid[])`, [[w1, w2, w3, w4]])).rows.map((x) => [x.name, x]));
+  check('only a note: no follow-up date, the note kept', wl['Later Note'].next_follow_up_at === null && /did not commit/.test(wl['Later Note'].remarks ?? ''), wl['Later Note']);
+  check('and a closed stage, so the calling queue leaves them alone', wl['Later Note'].status === 'later_no_date', wl['Later Note']);
+  const fu = await req('GET', `/api/crm/leads?due=today&limit=200`, ana);
+  const up = await req('GET', `/api/crm/leads?due=upcoming&limit=200`, ana);
+  const inFollowUps = [...(fu.body.leads ?? []), ...(up.body.leads ?? [])].map((x: any) => x.name);
+  check('not in follow-ups', !inFollowUps.includes('Later Note'), inFollowUps);
+  check('a day picked: followed up on that day', wl['Later Day'].status === 'callback' && Math.abs(new Date(wl['Later Day'].next_follow_up_at).getTime() - new Date(inThree).getTime()) < 60000, wl['Later Day']);
+  check('a promise: followed up on its day', wl['Later Promise'].status === 'callback' && !!wl['Later Promise'].next_follow_up_at, wl['Later Promise']);
+  check('nothing at all (an old screen): tried again as before', wl['Later Nothing'].status === 'callback' && !!wl['Later Nothing'].next_follow_up_at, wl['Later Nothing']);
+
   server.close();
   await pool.end();
   console.log(failures ? `\n${failures} failed` : '\nall passed');

@@ -2454,3 +2454,13 @@ CREATE INDEX IF NOT EXISTS idx_donations_given_name_key
   ON donations ((lower(regexp_replace(COALESCE(given_name, ''), '[^a-zA-Z]', '', 'g'))));
 CREATE INDEX IF NOT EXISTS idx_people_name_key
   ON people ((lower(regexp_replace(COALESCE(name, ''), '[^a-zA-Z]', '', 'g'))));
+
+
+-- ===========================================================================
+-- "Will donate later" with no day, only a note: out of the follow-ups and the
+-- calling queue (closed), but neither donated nor lost - they can be rung
+-- again by hand from Leads. Set by the call screen (routes/crm.ts).
+-- ===========================================================================
+INSERT INTO crm_statuses (slug, label, tone, sort_order, is_won, is_lost, is_open) VALUES
+  ('later_no_date', 'Will donate later - no date', 'slate', 55, FALSE, FALSE, FALSE)
+ON CONFLICT (slug) DO NOTHING;

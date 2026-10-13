@@ -579,6 +579,11 @@ function CallScreen({
   const logCall = useCallback(
     async (d: Disposition, advance?: boolean) => {
       if (!lead || saving) return;
+      // "Will donate later" needs a day or a note - Enter must not slip past it.
+      if (d.slug === "will_donate" && !form.followUp && !form.customDate && !form.remWhen && !form.note.trim()) {
+        toast.warn("Pick when they will donate, or write a note.");
+        return;
+      }
       setSaving(d.slug);
       try {
         const res = await apiClient.post<{ activity: { id: string } }>(`/api/crm/leads/${lead.id}/call`, {

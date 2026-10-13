@@ -27,7 +27,7 @@
 
 import { useEffect } from "react";
 import { currency, dateTime, istDayPlus, istInputToISO, istInstant, shortDate } from "@/lib/format";
-import { Button, Icon, Input } from "@/components/ui";
+import { Button, Icon, Input, Textarea } from "@/components/ui";
 import { isClosingOutcome, isDonatedOutcome, type Disposition } from "@/lib/calling";
 import type { CallForm } from "./outcome-panel";
 
@@ -102,7 +102,13 @@ export function ConfirmLog({
   const note = form.note.trim();
 
   // A promise date is also the day they are rung again.
-  const missingCallback = outcome.wants_follow_up && !form.followUp && !form.customDate && !form.remWhen && !closing;
+  const missingCallback = outcome.wants_follow_up && !form.followUp && !form.customDate && !form.remWhen && !closing && !later;
+  // "Will donate later" needs a day (a callback or the promise) or a note.
+  // With only a note they are NOT followed up: a closed stage, out of the
+  // queue, the note kept on their record.
+  const laterDay = !!(form.followUp || form.customDate || form.remWhen);
+  const laterNote = !!form.note.trim();
+  const laterReady = !later || laterDay || laterNote;
 
   const box =
     layout === "sheet"
@@ -206,9 +212,28 @@ export function ConfirmLog({
                 />
               </div>
             </div>
-            {!form.remWhen && (
-              <p className="text-2xs text-ink-muted">Pick a day and DRM reminds you to ring them then. Without one they are tried again in a few days.</p>
+            {!laterDay && (
+              <div className="pt-1">
+                <label htmlFor="confirm-later-note" className="text-xs font-medium text-ink-soft">
+                  No day given? Write what they said
+                </label>
+                <Textarea
+                  id="confirm-later-note"
+                  rows={2}
+                  value={form.note}
+                  onChange={(e) => form.setNote(e.target.value)}
+                  placeholder="e.g. Said he will see next month, did not commit"
+                  className="mt-1"
+                />
+              </div>
             )}
+            <p className={`text-2xs ${laterReady ? "text-ink-muted" : "font-medium text-warn"}`}>
+              {laterDay
+                ? "DRM reminds you to ring them on that day."
+                : laterNote
+                ? "No day: they will not be in follow-ups or the calling queue. The note stays on their record."
+                : "Pick when they will donate, or write a note, to save."}
+            </p>
           </div>
         )}
 
@@ -234,6 +259,7 @@ export function ConfirmLog({
             size="lg"
             icon="check"
             loading={saving}
+            disabled={!laterReady}
             onClick={() => onConfirm(false)}
           >
             {canAdvance ? "Save, stay" : "Save"}
@@ -246,6 +272,7 @@ export function ConfirmLog({
               size="lg"
               iconRight="arrowRight"
               loading={saving}
+              disabled={!laterReady}
               onClick={() => onConfirm(true)}
               className={layout === "sheet" ? "col-span-2" : ""}
             >

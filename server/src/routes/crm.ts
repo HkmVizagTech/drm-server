@@ -2558,8 +2558,20 @@ async function logCallForLead(
       );
     }
 
-    const nextStatus = str(b.status, 30) ?? d.rows[0].suggests_status ?? lead.rows[0].status;
     const followUp = b.next_follow_up_at === null ? null : asDate(b.next_follow_up_at);
+    /* "WILL DONATE LATER" WITH ONLY A NOTE.
+
+       Said on the phone as often by somebody being polite as by somebody who
+       means it. With a day (a callback or a promise) it is a real follow-up.
+       With only a note - "said he will see", "busy this month" - it is not:
+       the lead leaves the follow-ups AND the calling queue (a closed stage),
+       keeps the note, and can be rung again by hand from Leads. Before, every
+       one of these went to follow-ups two days on, and the follow-up list
+       filled with people nobody needed to chase. */
+    const promised = !!(b.reminder && typeof b.reminder === 'object' && (b.reminder as Record<string, unknown>).due_at);
+    const laterNoteOnly = disposition === 'will_donate' && !followUp && !promised && !!str(b.note, 2000);
+    const nextStatus =
+      str(b.status, 30) ?? (laterNoteOnly ? 'later_no_date' : null) ?? d.rows[0].suggests_status ?? lead.rows[0].status;
 
     // How long before an unanswered lead comes back round. Configurable in
     // Settings because the right gap differs by campaign - a festival appeal
@@ -2611,7 +2623,7 @@ async function logCallForLead(
         disposition,
         str(b.note, 2000),
         followUp,
-        d.rows[0].wants_follow_up === true,
+        d.rows[0].wants_follow_up === true && !laterNoteOnly,
         str(b.follow_up_note, 500),
         disposition === 'do_not_call',
         leadId,
