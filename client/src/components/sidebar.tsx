@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { useCallingAlerts } from "./calling-alerts";
 import { Icon, type IconName } from "./icons";
+import { useInApp } from "@/lib/phone-app";
 
 // Grouped so the nav reads as "what am I looking at" vs "what do I need to do"
 // rather than one undifferentiated list of nine links.
@@ -20,7 +21,8 @@ import { Icon, type IconName } from "./icons";
 // carries no weight of its own, so every renderer chose one. A name resolves
 // to a glyph in components/icons.tsx that is drawn like every other icon in
 // the product.
-export type NavItem = { href: string; label: string; icon: IconName; roles?: string[] };
+// `appOnly` items show only inside the DRM Android app (see lib/phone-app.ts).
+export type NavItem = { href: string; label: string; icon: IconName; roles?: string[]; appOnly?: boolean };
 export type NavGroup = { heading: string; items: NavItem[]; roles?: string[] };
 
 const CALLING_AND_UP = ["admin", "caller"];
@@ -86,6 +88,8 @@ export const navGroups: NavGroup[] = [
       // "What calls have I made, and to whom" - and where a caller goes when
       // somebody rings back, to find them and log what happened.
       { href: "/calling/calls", label: "My calls", icon: "phone" },
+      // The app's own setup: permissions, recordings, last sync. Only in the app.
+      { href: "/calling/phone", label: "This phone", icon: "settings", appOnly: true },
       { href: "/follow-ups", label: "Follow-ups", icon: "clock" },
       // Separate from follow-ups on purpose: a follow-up is the caller's own
       // working note, a reminder is a promise the donor made at a moment they
@@ -125,6 +129,8 @@ export const navGroups: NavGroup[] = [
     items: [
       { href: "/team", label: "Team", icon: "shield" },
       { href: "/calling/settings", label: "Calling setup", icon: "settings" },
+      // Every phone with the app: is it saving calls and recordings?
+      { href: "/calling/phones", label: "Phones", icon: "phone" },
       { href: "/whatsapp-thanks", label: "WhatsApp thanks", icon: "message" },
     ],
   },
@@ -175,9 +181,10 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   // things they need rather than fourteen, nine of which answer 403.
   const role = user?.role ?? "";
   const may = (roles?: string[]) => !roles || !role || roles.includes(role);
+  const app = useInApp();
   const groups = navGroups
     .filter((g) => may(g.roles))
-    .map((g) => ({ ...g, items: g.items.filter((i) => may(i.roles)) }))
+    .map((g) => ({ ...g, items: g.items.filter((i) => may(i.roles) && (!i.appOnly || app)) }))
     .filter((g) => g.items.length > 0);
 
   // ONE ITEM IS ACTIVE, NEVER TWO.

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">DRM</string>
+    <string name="title_activity_main">DRM</string>
+    <string name="package_name">org.harekrishnavizag.drm</string>
+    <string name="custom_url_scheme">org.harekrishnavizag.drm</string>
+</resources>

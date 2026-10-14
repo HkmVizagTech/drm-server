@@ -219,6 +219,8 @@ function MyCalls() {
   const outcomes = outcomesKey.split(",").filter(Boolean);
   const connected = param("connected");
   const direction = param("direction");
+  // nearly_gave | other - the calling overview's split.
+  const kind = param("kind");
   const userId = elevated ? param("user_id") : "";
   const urlSearch = param("search");
   const page = Math.max(1, Number(sp.get("page")) || 1);
@@ -290,11 +292,12 @@ function MyCalls() {
     if (outcomesKey) p.set("disposition", outcomesKey);
     if (connected) p.set("connected", connected);
     if (direction) p.set("direction", direction);
+    if (kind) p.set("kind", kind);
     if (urlSearch) p.set("search", urlSearch);
     if (leadId) p.set("lead_id", leadId);
     if (userId) p.set("user_id", userId);
     return p;
-  }, [range.from, range.to, outcomesKey, connected, direction, urlSearch, leadId, userId]);
+  }, [range.from, range.to, outcomesKey, connected, direction, kind, urlSearch, leadId, userId]);
 
   const query = useCallback(() => {
     const p = filterQuery();
@@ -374,6 +377,7 @@ function MyCalls() {
       disposition: null,
       connected: null,
       direction: null,
+      kind: null,
       search: null,
       user_id: null,
     });
@@ -392,6 +396,7 @@ function MyCalls() {
     outcomes.length ? "o" : "",
     connected,
     direction,
+    kind,
     urlSearch,
     userId,
   ].filter(Boolean).length;
@@ -652,6 +657,18 @@ function MyCalls() {
                 { value: "", label: "Any" },
                 { value: "outbound", label: "I called them" },
                 { value: "inbound", label: "They called me" },
+              ]}
+            />
+          </Field>
+          <Field label="Kind of call" className="w-full sm:w-40">
+            <Select
+              value={kind}
+              onChange={(v) => setParams({ kind: v || null })}
+              ariaLabel="Kind of call"
+              options={[
+                { value: "", label: "Any" },
+                { value: "nearly_gave", label: "Nearly gave" },
+                { value: "other", label: "Other calls" },
               ]}
             />
           </Field>

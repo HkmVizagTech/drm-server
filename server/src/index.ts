@@ -47,9 +47,10 @@ import crmQrRoutes, { webhookRouter as razorpayWebhook } from './routes/crmQr';
 import profilesRoutes from './routes/profiles';
 import filesRoutes from './routes/files';
 import { denyRole, readOnlyFor } from './middleware/auth';
-import { scheduleBirthdayAnniversaryCheck, scheduleNotifications, scheduleWhatsAppThanks } from './utils/cron';
+import { scheduleBirthdayAnniversaryCheck, scheduleNotifications, schedulePhoneCallLinks, scheduleWhatsAppThanks } from './utils/cron';
 import notificationsRoutes from './routes/notifications';
 import waThanksRoutes from './routes/waThanks';
+import phoneAppRoutes from './routes/phoneApp';
 import { storeAbandonedAttempt } from './routes/crm';
 import { runMigrations, setMigrationResult, getMigrationResult } from './db/migrate';
 
@@ -257,6 +258,8 @@ app.use('/api/sankalpam', sankalpamRoutes);
 // The bell: nearly gave and Sankalpam, as they happen.
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/wa-thanks', waThanksRoutes);
+// The Android app: calls and recordings from callers' phones.
+app.use('/api/app', phoneAppRoutes);
 
 // Razorpay's QR payment webhook. Mounted here, ahead of the JWT-protected
 // groups and outside /api/crm, because Razorpay has no token and because a
@@ -367,6 +370,7 @@ async function start(): Promise<void> {
   scheduleBirthdayAnniversaryCheck();
   scheduleNotifications(storeAbandonedAttempt);
   scheduleWhatsAppThanks();
+  schedulePhoneCallLinks();
 
   // Bind explicitly to 0.0.0.0 - Railway's proxy connects to the container over
   // its own network interface, not loopback, so binding to the default host can

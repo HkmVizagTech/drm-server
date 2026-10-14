@@ -111,6 +111,33 @@ interface Dashboard {
     not_credited: number;
     unattributed: number;
   };
+  /**
+   * Nearly gave work against every other call. Each half is a full set of
+   * figures, and the two always add up to the tiles above. A Nearly gave call
+   * is one to somebody who started a donation on a site and did not finish it
+   * in the `days` before the call; its money is what that caller was credited
+   * from people they rang that way.
+   */
+  split: {
+    days: number;
+    nearly_gave: {
+      calls: { made: number; connected: number; connect_rate: number; leads_touched: number };
+      money: { raised: number; credits: number };
+    };
+    other: {
+      calls: { made: number; connected: number; connect_rate: number };
+      money: { raised: number; credits: number };
+    };
+  };
+  /** Per caller, both halves. Empty on a caller's own screen. */
+  by_caller: {
+    id: string;
+    name: string;
+    calls: number;
+    raised: number;
+    nearly_gave: { calls: number; connected: number; raised: number };
+    other: { calls: number; connected: number; raised: number };
+  }[];
   by_qr: {
     id: string;
     qr_id: string;
@@ -407,6 +434,105 @@ function CallingDashboard() {
           href={leadsLink({ due: "overdue" })}
         />
       </div>
+
+      {/* NEARLY GAVE AGAINST EVERYTHING ELSE
+          The two kinds of calling are different work - a warm list of people
+          who nearly gave, and everybody else - so an admin needs to see what
+          each brings in, for the team and for each caller. */}
+      {data?.split && (data.split.nearly_gave.calls.made > 0 || data.split.other.calls.made > 0 || data.money.raised > 0) && (
+        <Card className="mb-6">
+          <CardHeader
+            title="Nearly gave and other calls"
+            icon="inbox"
+            subtitle={`Nearly gave: people who started a donation on the website in the ${data.split.days} days before the call and did not finish`}
+          />
+          <div className="grid gap-3 sm:grid-cols-2">
+            {(
+              [
+                { key: "nearly_gave", label: "Nearly gave", tone: "warn" as const, s: data.split.nearly_gave },
+                { key: "other", label: "Other calls", tone: "neutral" as const, s: data.split.other },
+              ] as const
+            ).map(({ key, label, tone, s }) => (
+              <div key={key} className="rounded-control bg-sunken px-4 py-3">
+                <Badge tone={tone}>{label}</Badge>
+                <dl className="mt-3 grid grid-cols-3 gap-3">
+                  <div>
+                    <dt className="text-2xs font-medium uppercase tracking-wide text-ink-muted">Calls</dt>
+                    <dd className="mt-0.5">
+                      <Link href={callsLink({ kind: key })} className="text-lg font-semibold tabular-nums text-ink hover:text-brand-700">
+                        {number(s.calls.made)}
+                      </Link>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-2xs font-medium uppercase tracking-wide text-ink-muted">Answered</dt>
+                    <dd className="mt-0.5 text-lg font-semibold tabular-nums text-ink">
+                      {s.calls.connect_rate}%
+                      <span className="block text-xs font-normal text-ink-muted">{number(s.calls.connected)} calls</span>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-2xs font-medium uppercase tracking-wide text-ink-muted">Raised</dt>
+                    <dd className="mt-0.5 text-lg font-semibold tabular-nums text-brand-700">
+                      {currency(s.money.raised)}
+                      <span className="block text-xs font-normal text-ink-muted">
+                        {number(s.money.credits)} donation{s.money.credits === 1 ? "" : "s"}
+                      </span>
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            ))}
+          </div>
+
+          {!mine && data.by_caller.length > 0 && (
+            <div className="-mx-5 mt-5 overflow-x-auto border-t border-line-soft">
+              <table className="w-full text-sm">
+                <thead className="bg-sunken text-2xs font-semibold uppercase tracking-[0.06em] text-ink-muted">
+                  <tr>
+                    <th rowSpan={2} className="px-5 py-2 text-left align-bottom">Caller</th>
+                    <th colSpan={3} className="border-l border-line-soft px-3 pt-2 text-center text-warn">Nearly gave</th>
+                    <th colSpan={3} className="border-l border-line-soft px-3 pt-2 text-center">Other calls</th>
+                    <th rowSpan={2} className="border-l border-line-soft px-5 py-2 text-right align-bottom">Total raised</th>
+                  </tr>
+                  <tr>
+                    <th className="border-l border-line-soft px-3 pb-2 text-right">Calls</th>
+                    <th className="px-3 pb-2 text-right">Answered</th>
+                    <th className="px-3 pb-2 text-right">Raised</th>
+                    <th className="border-l border-line-soft px-3 pb-2 text-right">Calls</th>
+                    <th className="px-3 pb-2 text-right">Answered</th>
+                    <th className="px-3 pb-2 text-right">Raised</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line-soft">
+                  {data.by_caller.map((p) => (
+                    <tr key={p.id}>
+                      <td className="px-5 py-2.5 font-medium text-ink">{p.name}</td>
+                      <td className="border-l border-line-soft px-3 py-2.5 text-right tabular-nums">
+                        <Link href={callsLink({ kind: "nearly_gave", user_id: p.id })} className="hover:text-brand-700 hover:underline">
+                          {number(p.nearly_gave.calls)}
+                        </Link>
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-ink-soft">{number(p.nearly_gave.connected)}</td>
+                      <td className="px-3 py-2.5 text-right font-medium tabular-nums text-ink">{currency(p.nearly_gave.raised)}</td>
+                      <td className="border-l border-line-soft px-3 py-2.5 text-right tabular-nums">
+                        <Link href={callsLink({ kind: "other", user_id: p.id })} className="hover:text-brand-700 hover:underline">
+                          {number(p.other.calls)}
+                        </Link>
+                      </td>
+                      <td className="px-3 py-2.5 text-right tabular-nums text-ink-soft">{number(p.other.connected)}</td>
+                      <td className="px-3 py-2.5 text-right font-medium tabular-nums text-ink">{currency(p.other.raised)}</td>
+                      <td className="border-l border-line-soft px-5 py-2.5 text-right font-semibold tabular-nums text-brand-700">
+                        {currency(p.raised)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* WHERE THE MONEY CAME FROM
           One total answers "how much" and nothing else. This answers the

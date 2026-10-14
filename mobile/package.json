@@ -1,0 +1,18 @@
+{
+  "name": "drm-mobile",
+  "private": true,
+  "version": "1.0.0",
+  "description": "The DRM Android app: DRM in a phone shell that dials from the caller's SIM and saves calls and recordings.",
+  "scripts": {
+    "sync": "cap sync android",
+    "apk:debug": "cap sync android && cd android && ./gradlew assembleDebug",
+    "apk:release": "cap sync android && cd android && ./gradlew assembleRelease"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.3",
+    "@capacitor/core": "8.5.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.3"
+  }
+}

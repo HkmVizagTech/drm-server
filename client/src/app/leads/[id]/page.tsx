@@ -36,6 +36,8 @@ import {
   buttonClass,
 } from "@/components/ui";
 import { SendLink } from "@/components/send-link";
+import { PhoneCallsCard } from "@/components/calls/phone-calls-card";
+import { RecordingPlayer } from "@/components/calls/recording-player";
 import { toast } from "@/components/toast";
 import { ContactEditor } from "@/components/calling/contact-editor";
 import { LinkDonationDialog } from "@/components/calling/link-donation";
@@ -378,16 +380,24 @@ export default function LeadDetailPage() {
                       )}
                     </div>
                     {a.note && <p className="mt-0.5 whitespace-pre-line text-sm text-ink-soft">{a.note}</p>}
-                    {a.recording_url && (
-                      <a href={a.recording_url} target="_blank" rel="noreferrer" className="text-xs text-brand-700 hover:underline">
-                        Play recording
-                      </a>
-                    )}
+                    {a.recording_url &&
+                      (a.recording_url.startsWith("/api/app/") ? (
+                        // From the phone app: behind the login, so fetched by the player.
+                        <div className="mt-1">
+                          <RecordingPlayer url={a.recording_url} />
+                        </div>
+                      ) : (
+                        <a href={a.recording_url} target="_blank" rel="noreferrer" className="text-xs text-brand-700 hover:underline">
+                          Play recording
+                        </a>
+                      ))}
                   </li>
                 ))}
               </ol>
             )}
           </Card>
+
+          <PhoneCallsCard leadId={lead.id} />
         </div>
 
         {/* ------------------------------------------------------ the details */}
@@ -1103,7 +1113,8 @@ function RemoveLeadDialog({
 function describe(a: Activity): string {
   if (a.kind === "call") {
     const outcome = a.disposition_label ?? a.disposition ?? "Called";
-    if (a.direction === "inbound") return outcome;
+    // A call-back saved by the phone app has no outcome until somebody logs one.
+    if (a.direction === "inbound") return a.disposition_label ?? a.disposition ?? "They rang back";
     if (a.direction === "missed") return "Missed call from them";
     return outcome;
   }

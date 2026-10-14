@@ -27,6 +27,7 @@ import { markLeadDonated } from './crmQr';
 import { leadScopeFor } from './crm';
 import { FROM_DONATIONS_PAGE } from './crmLists';
 import { sendExport, describeFilters, EXPORT_ROW_CAP, type ExportFormat } from '../utils/export';
+import { NEARLY_GAVE_CALL } from '../services/nearlyGaveCalls';
 
 const router = Router();
 router.use(authenticate);
@@ -77,6 +78,9 @@ function buildCallFilters(q: Record<string, unknown>, user?: { userId?: string; 
   }
   if (q.connected === 'true') conds.push(`a.connected = TRUE`);
   else if (q.connected === 'false') conds.push(`a.connected IS NOT TRUE`);
+  // Nearly gave work, or every other call - the calling overview's split.
+  if (q.kind === 'nearly_gave') conds.push(NEARLY_GAVE_CALL('a'));
+  else if (q.kind === 'other') conds.push(`NOT ${NEARLY_GAVE_CALL('a')}`);
   if (q.direction === 'inbound' || q.direction === 'outbound') {
     conds.push(`COALESCE(a.direction, 'outbound') = ${p(q.direction)}`);
   }

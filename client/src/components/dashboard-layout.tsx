@@ -30,6 +30,7 @@ import { NotificationPopups } from "./notification-popups";
 import { Icon } from "./icons";
 import { GlobalSearch } from "./global-search";
 import { Toaster } from "./toast";
+import { PhoneAppBridge } from "./phone-app-bridge";
 
 function Breadcrumb() {
   const pathname = usePathname();
@@ -179,7 +180,12 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             </div>
           )}
 
-          <div className="mx-auto max-w-[1400px] px-4 pb-8 pt-5 sm:px-6 sm:pt-6">{children}</div>
+          <div className="mx-auto max-w-[1400px] px-4 pb-8 pt-5 sm:px-6 sm:pt-6">
+            {/* Inside the Android app only: links the phone, rings tel: links
+                from the SIM, and asks for permissions. Renders nothing in a browser. */}
+            <PhoneAppBridge />
+            {children}
+          </div>
         </main>
         <Toaster />
       </div>

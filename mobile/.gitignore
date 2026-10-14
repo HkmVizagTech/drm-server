@@ -1,0 +1,6 @@
+node_modules/
+# The signing key and its password. Back these up somewhere safe; never commit them.
+keystore/
+
+# Built apps, shared with callers by hand.
+*.apk

@@ -1,0 +1,14 @@
+{
+  "appId": "org.harekrishnavizag.drm",
+  "appName": "DRM",
+  "webDir": "www",
+  "server": {
+    "url": "https://drm.harekrishnavizag.org",
+    "cleartext": false,
+    "errorPath": "offline.html"
+  },
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  }
+}

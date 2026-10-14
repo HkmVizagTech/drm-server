@@ -4,6 +4,7 @@ import { APP_TIMEZONE } from '../bootTimezone';
 import { pollNearlyGave } from '../services/nearlyGaveWatch';
 import { notify } from '../services/notifications';
 import { thanksTick } from '../services/waThanks';
+import { linkPhoneCalls } from '../services/phoneCalls';
 import type { AbandonedDonation, SiteKey } from '../services/hkmvClient';
 
 // WHAT WAS WRONG WITH THIS JOB, because it ran wrong for a long time and the
@@ -95,6 +96,17 @@ export function scheduleWhatsAppThanks() {
         if (r.queued || r.sent || r.failed || r.skipped) console.log('[wa-thanks]', JSON.stringify(r));
       })
       .catch((e) => console.error('[CRON] wa thanks:', (e as Error).message));
+  }, { timezone: APP_TIMEZONE });
+}
+
+/**
+ * Tie the phone app's calls to the outcomes callers log on the call screen.
+ * The phone often reports a call before the caller has saved its outcome, so
+ * the tie is retried here as well as after each sync. See services/phoneCalls.ts.
+ */
+export function schedulePhoneCallLinks() {
+  cron.schedule('*/3 * * * *', () => {
+    void linkPhoneCalls().catch((e) => console.error('[CRON] phone call links:', (e as Error).message));
   }, { timezone: APP_TIMEZONE });
 }
 

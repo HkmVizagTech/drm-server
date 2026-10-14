@@ -59,6 +59,7 @@ import {
 // See the header of services/credits.ts and of caller_credits in schema.sql.
 import { CREDIT_WINDOW, totalsFor } from '../services/credits';
 
+import { NEARLY_GAVE_CALL, NEARLY_GAVE_CREDIT, NEARLY_GAVE_DAYS } from '../services/nearlyGaveCalls';
 const router = Router();
 router.use(authenticate);
 
@@ -151,7 +152,7 @@ router.get('/dashboard', async (req, res) => {
     // conversion figures below are current rather than a day behind.
     await reconcileConversions();
 
-    const [leads, conv, credits, calls, pipeline, followUps, byStatus, bySource, callers, qr, byQr] = await Promise.all([
+    const [leads, conv, credits, calls, pipeline, followUps, byStatus, bySource, callers, qr, byQr, ngCalls, ngMoney, byCallerCalls, byCallerMoney] = await Promise.all([
       pool.query(
         // WHAT COUNTS AS A CONVERSION, AND WHY THIS CHANGED
         //
@@ -336,6 +337,58 @@ router.get('/dashboard', async (req, res) => {
           ORDER BY raised DESC, q.label`,
         [from, to, me]
       ),
+      // NEARLY GAVE AGAINST EVERYTHING ELSE. The same calls and the same
+      // credits as the totals above, narrowed to Nearly gave work (see
+      // services/nearlyGaveCalls.ts for what counts). "Other" is the total
+      // minus these, so the two halves always add up to the tiles.
+      pool.query(
+        `SELECT COUNT(*)::int AS made,
+                COUNT(*) FILTER (WHERE a.connected)::int AS connected,
+                COUNT(DISTINCT a.lead_id)::int AS leads_touched
+           FROM lead_activities a
+          WHERE a.kind = 'call' AND ${WINDOW('a.occurred_at', 1, 2)}
+            AND ($3::uuid IS NULL OR a.user_id = $3::uuid)
+            AND ${NEARLY_GAVE_CALL('a')}`,
+        [from, to, me]
+      ),
+      pool.query(
+        `SELECT COALESCE(SUM(c.amount), 0)::numeric AS raised, COUNT(*)::int AS credits
+           FROM caller_credits c
+          WHERE ${CREDIT_WINDOW(1, 2)}
+            AND ($3::uuid IS NULL OR c.user_id = $3::uuid)
+            AND ${NEARLY_GAVE_CREDIT}`,
+        [from, to, me]
+      ),
+      // Per caller, for the admin: both halves side by side. Not sent to a
+      // caller, for the same reason as the leaderboard.
+      me
+        ? Promise.resolve({ rows: [] })
+        : pool.query(
+            `SELECT x.user_id, u.name,
+                    COUNT(*)::int AS calls,
+                    COUNT(*) FILTER (WHERE x.connected)::int AS connected,
+                    COUNT(*) FILTER (WHERE x.ng)::int AS ng_calls,
+                    COUNT(*) FILTER (WHERE x.ng AND x.connected)::int AS ng_connected
+               FROM (SELECT a.user_id, a.connected, ${NEARLY_GAVE_CALL('a')} AS ng
+                       FROM lead_activities a
+                      WHERE a.kind = 'call' AND a.user_id IS NOT NULL AND ${WINDOW('a.occurred_at', 1, 2)}) x
+               JOIN users u ON u.id = x.user_id
+              GROUP BY x.user_id, u.name`,
+            [from, to]
+          ),
+      me
+        ? Promise.resolve({ rows: [] })
+        : pool.query(
+            `SELECT x.user_id, u.name,
+                    COALESCE(SUM(x.amount), 0)::numeric AS raised,
+                    COALESCE(SUM(x.amount) FILTER (WHERE x.ng), 0)::numeric AS ng_raised
+               FROM (SELECT c.user_id, c.amount, ${NEARLY_GAVE_CREDIT} AS ng
+                       FROM caller_credits c
+                      WHERE ${CREDIT_WINDOW(1, 2)}) x
+               JOIN users u ON u.id = x.user_id
+              GROUP BY x.user_id, u.name`,
+            [from, to]
+          ),
     ]);
 
     const c = calls.rows[0];
@@ -351,8 +404,61 @@ router.get('/dashboard', async (req, res) => {
     // the difference is named rather than left for a reader to work out.
     const throughQrs = byQr.rows.reduce((t, r) => t + Number(r.raised), 0);
 
+    // The split, each half a complete set of figures. "Other" by subtraction,
+    // so the halves can never add up to something the tiles do not show.
+    const ng = ngCalls.rows[0];
+    const ngRaised = Number(ngMoney.rows[0].raised);
+    const rate = (a: number, b: number) => (b ? Math.round((a / b) * 1000) / 10 : 0);
+    const split = {
+      days: NEARLY_GAVE_DAYS,
+      nearly_gave: {
+        calls: { made: ng.made, connected: ng.connected, connect_rate: rate(ng.connected, ng.made), leads_touched: ng.leads_touched },
+        money: { raised: ngRaised, credits: ngMoney.rows[0].credits },
+      },
+      other: {
+        calls: {
+          made: c.made - ng.made,
+          connected: c.connected - ng.connected,
+          connect_rate: rate(c.connected - ng.connected, c.made - ng.made),
+        },
+        money: {
+          raised: Math.round((money.raised - ngRaised) * 100) / 100,
+          credits: money.credits - ngMoney.rows[0].credits,
+        },
+      },
+    };
+    const people = new Map<string, Record<string, number | string>>();
+    const person = (id: string, name: string) => {
+      if (!people.has(id)) {
+        people.set(id, { id, name, calls: 0, connected: 0, ng_calls: 0, ng_connected: 0, raised: 0, ng_raised: 0 });
+      }
+      return people.get(id)!;
+    };
+    for (const r of byCallerCalls.rows) Object.assign(person(r.user_id, r.name), {
+      calls: r.calls, connected: r.connected, ng_calls: r.ng_calls, ng_connected: r.ng_connected,
+    });
+    for (const r of byCallerMoney.rows) Object.assign(person(r.user_id, r.name), {
+      raised: Number(r.raised), ng_raised: Number(r.ng_raised),
+    });
+    const byCaller = [...people.values()]
+      .map((p) => ({
+        id: p.id as string,
+        name: p.name as string,
+        nearly_gave: { calls: p.ng_calls as number, connected: p.ng_connected as number, raised: p.ng_raised as number },
+        other: {
+          calls: (p.calls as number) - (p.ng_calls as number),
+          connected: (p.connected as number) - (p.ng_connected as number),
+          raised: Math.round(((p.raised as number) - (p.ng_raised as number)) * 100) / 100,
+        },
+        raised: p.raised as number,
+        calls: p.calls as number,
+      }))
+      .sort((a, b) => b.raised - a.raised || b.calls - a.calls);
+
     res.json({
       range: { from, to, label },
+      split,
+      by_caller: byCaller,
       // The screen says whose figures these are rather than leaving the reader
       // to assume. A caller reading temple-wide totals as their own, or the
       // reverse, is the failure this one field prevents.

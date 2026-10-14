@@ -2464,3 +2464,87 @@ CREATE INDEX IF NOT EXISTS idx_people_name_key
 INSERT INTO crm_statuses (slug, label, tone, sort_order, is_won, is_lost, is_open) VALUES
   ('later_no_date', 'Will donate later - no date', 'slate', 55, FALSE, FALSE, FALSE)
 ON CONFLICT (slug) DO NOTHING;
+
+
+-- ===========================================================================
+-- THE PHONE APP: calls and recordings from the callers' own phones.
+--
+-- The Android app dials from the caller's SIM, reads the phone's call log
+-- after each call, and uploads the recording the phone's own dialer made.
+-- Only calls to and from numbers DRM already knows are sent - the caller's
+-- personal calls never leave the phone. See routes/phoneApp.ts.
+-- ===========================================================================
+
+-- One row per phone the app is installed on. The app signs its background
+-- syncs with its own key (stored hashed), not the 24-hour login token, so a
+-- callback at 9 pm is still recorded when nobody has opened DRM since morning.
+CREATE TABLE IF NOT EXISTS app_devices (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- The app's own id for this installation. Reinstalling makes a new one.
+  install_id VARCHAR(64) UNIQUE NOT NULL,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key_hash VARCHAR(64) NOT NULL,
+  manufacturer VARCHAR(60),
+  model VARCHAR(80),
+  android_version VARCHAR(20),
+  app_version VARCHAR(20),
+  -- The phone's dialer app. com.google.android.dialer keeps its recordings
+  -- to itself, so on those phones no recording can ever be found.
+  dialer VARCHAR(120),
+  -- What the phone last reported it is allowed to do.
+  status JSONB NOT NULL DEFAULT '{}'::jsonb,
+  -- Where the last recording was found ("Recordings/Call").
+  recordings_folder VARCHAR(200),
+  last_sync_at TIMESTAMPTZ,
+  last_error TEXT,
+  revoked_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_app_devices_user ON app_devices(user_id);
+
+-- Every call the phone app saw, to or from a DRM number: the ones the caller
+-- made, the donors who rang back, and the call-backs nobody picked up.
+--
+-- A call the caller also logged on the call screen is tied to that call's
+-- lead_activities row (activity_id), which then shows the measured talk time
+-- and the recording. A call-back gets a lead_activities row of its own
+-- (direction inbound or missed), so it is counted wherever calls are.
+CREATE TABLE IF NOT EXISTS phone_calls (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  device_id UUID NOT NULL REFERENCES app_devices(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  -- The phone's call-log id and time, so a sync that runs twice saves once.
+  call_key VARCHAR(80) NOT NULL,
+  -- outbound | inbound | missed (they rang and nobody answered)
+  direction VARCHAR(10) NOT NULL,
+  phone VARCHAR(10) NOT NULL,
+  lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+  activity_id UUID REFERENCES lead_activities(id) ON DELETE SET NULL,
+  started_at TIMESTAMPTZ NOT NULL,
+  duration_seconds INT NOT NULL DEFAULT 0,
+  sim VARCHAR(60),
+  -- Dialled with DRM's Call button in the app (as opposed to the phone's own dialer).
+  from_app BOOLEAN NOT NULL DEFAULT FALSE,
+  -- waiting | uploaded | none (looked, not found) | not_needed (nobody spoke)
+  recording_status VARCHAR(12) NOT NULL DEFAULT 'waiting',
+  recording_key VARCHAR(300),
+  recording_type VARCHAR(80),
+  recording_bytes INT,
+  recording_name VARCHAR(200),
+  recording_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (device_id, call_key)
+);
+CREATE INDEX IF NOT EXISTS idx_phone_calls_lead ON phone_calls(lead_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_phone_calls_user ON phone_calls(user_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_phone_calls_unlinked ON phone_calls(started_at) WHERE activity_id IS NULL;
+
+-- Who listened to which recording, and when. Recordings are donors' voices.
+CREATE TABLE IF NOT EXISTS recording_listens (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  call_id UUID NOT NULL REFERENCES phone_calls(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  listened_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_recording_listens_call ON recording_listens(call_id, listened_at DESC);
