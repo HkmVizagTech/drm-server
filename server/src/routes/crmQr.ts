@@ -44,6 +44,7 @@ import { leadMoneyState, leadHasCredit, leadForPayer, leadBefore, restoreLead, r
 type Db = { query: PoolClient['query'] };
 import type { PoolClient } from 'pg';
 import { alignQrDonationDate } from '../services/qrDonationDate';
+import { greetName } from '../utils/greetName';
 
 const router = Router();
 
@@ -355,7 +356,9 @@ const shareQrToLead: RequestHandler = async (req, res) => {
     // The message. The QR image URL goes in as a link rather than an
     // attachment because click-to-chat cannot attach a file - WhatsApp will
     // preview it, and the donor can long-press to save it.
-    const name = l.name ? ` ${String(l.name).split(' ')[0]}` : '';
+    // Initials dropped: "D chaitanya" is greeted as Chaitanya, not "D".
+    const greet = greetName(l.name as string | null);
+    const name = greet ? ` ${greet}` : '';
     const forWhat = q.purpose ? ` for ${q.purpose}` : '';
     const amountLine = amount ? `\nAmount: ₹${Number(amount).toLocaleString('en-IN')}` : '';
     const message =

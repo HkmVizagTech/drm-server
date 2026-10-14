@@ -27,6 +27,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiClient } from "@/lib/api";
 import { Alert, Button, Card, Checkbox, Field, Input, Select, Textarea } from "@/components/ui";
+import { greetName } from "@/lib/greet-name";
 
 export interface SavedLink {
   id: string;
@@ -86,7 +87,7 @@ export function SendLink({
   // same way the server will fill them. Shown rather than described, because
   // "{name}" in a box is not something a caller can check at a glance.
   const preview = (link?.message ?? "Hare Krishna {name}, here is the link: {link}")
-    .replace(/\{name\}/g, leadName?.trim() || "ji")
+    .replace(/\{name\}/g, greetName(leadName) || "ji")
     .replace(/\{seva\}/g, link?.seva_name ?? "seva")
     .replace(/\{caller\}/g, "")
     .replace(

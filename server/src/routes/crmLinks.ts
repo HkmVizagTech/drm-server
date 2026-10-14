@@ -42,6 +42,7 @@ import { Router } from 'express';
 import { randomBytes } from 'crypto';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
+import { greetName } from '../utils/greetName';
 
 const router = Router();
 router.use(authenticate);
@@ -439,7 +440,8 @@ router.post('/leads/:id/send-link', async (req, res) => {
       'Hare Krishna {name}, here is the link: {link}';
 
     const message = fill(rawMessage, {
-      name: (L.name as string | null)?.trim() || 'ji',
+      // Initials dropped: "D chaitanya" is greeted as Chaitanya, not "D".
+      name: greetName(L.name as string | null) || 'ji',
       link: url,
       seva: (link?.seva_name as string | undefined) ?? 'seva',
       amount: amount !== null && amount !== undefined ? `₹${Number(amount).toLocaleString('en-IN')}` : '',
