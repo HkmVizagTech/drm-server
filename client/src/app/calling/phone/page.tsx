@@ -20,7 +20,7 @@ import {
   type FoundRecording,
   type PhoneInfo,
 } from "@/lib/phone-app";
-import { Alert, Badge, Button, Card, CardHeader, PageHeader } from "@/components/ui";
+import { Alert, Badge, Button, Card, CardHeader, LinkButton, PageHeader } from "@/components/ui";
 import { Icon } from "@/components/icons";
 import { toast } from "@/components/toast";
 
@@ -124,6 +124,10 @@ export default function ThisPhonePage() {
         title="This phone"
         subtitle="So that every call - the ones you make and the ones that ring back - is saved in DRM with its recording."
         actions={
+          <>
+          <LinkButton href="/calling/recordings" variant="secondary" icon="mic">
+            My recordings
+          </LinkButton>
           <Button
             icon="refresh"
             variant="secondary"
@@ -138,6 +142,7 @@ export default function ThisPhonePage() {
           >
             Send calls now
           </Button>
+          </>
         }
       />
 

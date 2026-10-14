@@ -18,6 +18,7 @@ import pool from '../src/db/pool';
 import { generateToken } from '../src/middleware/auth';
 import crmRoutes from '../src/routes/crm';
 import crmCallsRoutes from '../src/routes/crmCalls';
+import crmReportsRoutes from '../src/routes/crmReports';
 import phoneAppRoutes from '../src/routes/phoneApp';
 import { linkPhoneCalls } from '../src/services/phoneCalls';
 
@@ -50,6 +51,7 @@ const app = express();
 app.use(express.json());
 app.use('/api/crm', crmRoutes);
 app.use('/api/crm', crmCallsRoutes);
+app.use('/api/crm', crmReportsRoutes);
 app.use('/api/app', phoneAppRoutes);
 
 let base = '';
@@ -274,6 +276,47 @@ async function main() {
   check('the Phones page shows her phone and its week', d && d.model === 'SM-A146B' && d.outbound >= 3 && d.inbound >= 2 && d.missed >= 2 && d.recorded === 1 && d.recordings_folder === 'Recordings/Call' && d.app_version === '1.0.1', d);
   const callerDevs = await req('GET', '/api/app/devices', ana);
   check('a caller cannot open the Phones page', callerDevs.status === 403, callerDevs.status);
+
+  console.log('\n10b. the Recordings list and one call');
+  const list = await req('GET', '/api/app/calls', ana);
+  check("Ana's list holds her calls, newest first, with totals", list.status === 200 && list.body.calls.length === list.body.totals.calls && list.body.totals.calls === 7, list.body.totals);
+  check('totals: made, rang back, missed, recorded', list.body.totals.inbound >= 2 && list.body.totals.missed >= 2 && list.body.totals.recorded === 1, list.body.totals);
+  const first = list.body.calls[0];
+  check('each row says who, the outcome and whether it can be played', 'lead_name' in first && 'disposition_label' in first && 'can_listen' in first, first);
+  const recorded = await req('GET', '/api/app/calls?recording=uploaded', ana);
+  check('filter: recorded only', recorded.body.calls.length === 1 && recorded.body.calls[0].id === made.id && recorded.body.calls[0].can_listen === true, recorded.body);
+  const missedOnly = await req('GET', '/api/app/calls?direction=missed', ana);
+  check('filter: missed call-backs', missedOnly.body.calls.length >= 2 && missedOnly.body.calls.every((c: any) => c.direction === 'missed'), missedOnly.body.totals);
+  const byName = await req('GET', '/api/app/calls?search=Asha', ana);
+  check('search by name', byName.body.calls.length >= 1 && byName.body.calls.every((c: any) => c.lead_name === 'Asha Rao'), byName.body.calls?.length);
+  const bhavinList = await req('GET', '/api/app/calls', bhavin);
+  check("a caller never sees a colleague's calls", bhavinList.body.calls.every((c: any) => c.user_id === BHAVIN), bhavinList.body.totals);
+  const adminList = await req('GET', `/api/app/calls?user_id=${ANA}`, admin);
+  check("the admin sees Ana's calls", adminList.body.totals.calls === list.body.totals.calls, adminList.body.totals);
+  const accountant = await req('GET', '/api/app/calls', { userId: ADMIN, role: 'accountant' });
+  check('not for other roles', accountant.status === 403, accountant.status);
+  const detail = await req('GET', `/api/app/calls/${made.id}`, admin);
+  check('one call: donor, caller, outcome, recording and who listened', detail.status === 200 && detail.body.call.lead_name === 'Asha Rao' && detail.body.call.caller_name === 'Ana' && detail.body.call.disposition === 'interested' && detail.body.call.can_listen && detail.body.listens.length === 2 && detail.body.other_calls.length >= 1, detail.body);
+  const mineDetail = await req('GET', `/api/app/calls/${made.id}`, ana);
+  check("the caller opens her own call, without the listen log", mineDetail.status === 200 && mineDetail.body.listens.length === 0, mineDetail.body.listens);
+  const notYours = await req('GET', `/api/app/calls/${made.id}`, bhavin);
+  check("but not a colleague's", notYours.status === 404, notYours.status);
+  const dash = await req('GET', '/api/crm/dashboard?preset=today', admin);
+  check('the overview counts the phone calls', dash.body.phone_calls?.calls === adminList.body.totals.calls && dash.body.phone_calls.recorded === 1, dash.body.phone_calls);
+  const anaDash = await req('GET', '/api/crm/dashboard?preset=today', ana);
+  check("a caller's overview counts only hers", anaDash.body.phone_calls?.calls === list.body.totals.calls, anaDash.body.phone_calls);
+
+  console.log('\n10c. staying signed in inside the app');
+  const sess = await req('POST', '/api/app/session', phone);
+  check('the phone gets a fresh login for its caller', sess.status === 200 && typeof sess.body.token === 'string' && sess.body.user?.id === ANA, sess.body);
+  const me = await new Promise<number>((resolve) => {
+    http.get(`${base}/api/app/calls`, { headers: { authorization: `Bearer ${sess.body.token}` } }, (r) => { r.resume(); resolve(r.statusCode ?? 0); });
+  });
+  check('and that login works', me === 200, me);
+  const spare = await req('POST', '/api/app/devices', ana, { install_id: 'ana-spare-phone', model: 'Spare' });
+  const out = await req('POST', '/api/app/sign-out', { key: spare.body.device_key });
+  const afterOut = await req('POST', '/api/app/session', { key: spare.body.device_key });
+  check('signing out in the app ends it on that phone', out.status === 200 && afterOut.status === 401, [out.status, afterOut.status]);
 
   console.log('\n11. signing a phone out');
   const off = await req('DELETE', `/api/app/devices/${link.body.device_id}`, admin);

@@ -21,6 +21,7 @@ import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { currency, number } from "@/lib/format";
+import { talk } from "@/lib/phone-calls";
 import {
   Alert,
   Badge,
@@ -128,6 +129,19 @@ interface Dashboard {
       calls: { made: number; connected: number; connect_rate: number };
       money: { raised: number; credits: number };
     };
+  };
+  /** What the callers' phones saw (the DRM app), measured rather than typed in. */
+  phone_calls?: {
+    calls: number;
+    outbound: number;
+    answered_out: number;
+    inbound: number;
+    missed: number;
+    talk_seconds: number;
+    spoke: number;
+    recorded: number;
+    waiting: number;
+    no_recording: number;
   };
   /** Per caller, both halves. Empty on a caller's own screen. */
   by_caller: {
@@ -258,6 +272,21 @@ function CallingDashboard() {
     );
     for (const [k, v] of Object.entries(extra)) p.set(k, v);
     return `/calling/calls?${p}`;
+  };
+  // The Recordings list for the same period, narrowed by `extra`.
+  const recordingsLink = (extra: Record<string, string> = {}) => {
+    const p = new URLSearchParams(
+      preset === "today" || preset === "month" || preset === "all"
+        ? { period: preset }
+        : preset === "week"
+          ? {}
+          : r
+            ? { from: r.from, to: r.to }
+            : {}
+    );
+    for (const [k, v] of Object.entries(extra)) p.set(k, v);
+    const qs = p.toString();
+    return `/calling/recordings${qs ? `?${qs}` : ""}`;
   };
   const earningsLink = (kind?: string) => `/calling/earnings?preset=${preset}${kind ? `&kind=${kind}` : ""}`;
 
@@ -434,6 +463,83 @@ function CallingDashboard() {
           href={leadsLink({ due: "overdue" })}
         />
       </div>
+
+      {/* CALLS FROM THE PHONES
+          The DRM app's own record of each call - measured, with the recording.
+          An admin does not make calls, so this is where they start: each
+          figure opens the Recordings list narrowed to it, and from there any
+          one call. */}
+      {data?.phone_calls && data.phone_calls.calls > 0 && (
+        <Card className="mb-6">
+          <CardHeader
+            title={mine ? "Your calls from the phone" : "Calls from the phones"}
+            icon="mic"
+            subtitle="Saved by the DRM app, with the real talk time and the recording"
+            action={
+              <Link
+                href={recordingsLink()}
+                className="inline-flex items-center gap-1 text-xs font-medium text-brand-700 hover:underline"
+              >
+                See all calls
+                <Icon name="arrowRight" size={12} />
+              </Link>
+            }
+          />
+          <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            {[
+              {
+                label: "Calls made",
+                value: number(data.phone_calls.outbound),
+                sub: `${number(data.phone_calls.answered_out)} answered`,
+                href: recordingsLink({ direction: "outbound" }),
+              },
+              {
+                label: "They rang back",
+                value: number(data.phone_calls.inbound),
+                sub: "answered call-backs",
+                href: recordingsLink({ direction: "inbound" }),
+              },
+              {
+                label: "Missed call-backs",
+                value: number(data.phone_calls.missed),
+                sub: data.phone_calls.missed ? "to ring back" : "none",
+                href: recordingsLink({ direction: "missed" }),
+                warn: data.phone_calls.missed > 0,
+              },
+              {
+                label: "Talk time",
+                value: talk(data.phone_calls.talk_seconds),
+                sub: data.phone_calls.spoke ? `avg ${talk(data.phone_calls.talk_seconds / data.phone_calls.spoke)}` : "—",
+                href: recordingsLink({ direction: "outbound" }),
+              },
+              {
+                label: "Recorded",
+                value: `${number(data.phone_calls.recorded)} of ${number(data.phone_calls.spoke)}`,
+                sub: data.phone_calls.no_recording
+                  ? `${number(data.phone_calls.no_recording)} not found`
+                  : data.phone_calls.waiting
+                    ? `${number(data.phone_calls.waiting)} on the way`
+                    : "calls where someone spoke",
+                href: recordingsLink({ recording: data.phone_calls.no_recording ? "none" : "uploaded" }),
+                warn: data.phone_calls.no_recording > 0,
+              },
+            ].map((x) => (
+              <li key={x.label}>
+                <Link
+                  href={x.href}
+                  className="block rounded-control bg-sunken px-3 py-2.5 transition-colors hover:bg-brand-50 hover:ring-1 hover:ring-brand-200"
+                >
+                  <span className="block text-2xs font-medium uppercase tracking-wide text-ink-muted">{x.label}</span>
+                  <span className={`mt-0.5 block truncate text-lg font-semibold tabular-nums ${x.warn ? "text-warn" : "text-ink"}`}>
+                    {x.value}
+                  </span>
+                  <span className="block truncate text-xs text-ink-muted">{x.sub}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       {/* NEARLY GAVE AGAINST EVERYTHING ELSE
           The two kinds of calling are different work - a warm list of people

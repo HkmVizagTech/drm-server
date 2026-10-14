@@ -28,7 +28,8 @@ export type IconName =
   | "user" | "users" | "userPlus" | "logout" | "menu" | "more"
   | "edit" | "trash" | "copy" | "file" | "fileText" | "sheet" | "receipt"
   | "qr" | "rupee" | "chart" | "home" | "list" | "inbox" | "link" | "tag"
-  | "star" | "sparkle" | "shield" | "box" | "target" | "trendUp" | "eye";
+  | "star" | "sparkle" | "shield" | "box" | "target" | "trendUp" | "eye"
+  | "mic" | "play" | "pause" | "phoneIncoming" | "phoneMissed";
 
 // Paths only - the wrapper supplies viewBox, stroke and sizing, so a new icon
 // cannot arrive with a different weight than the rest.
@@ -60,6 +61,11 @@ const PATHS: Record<IconName, string> = {
   info: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-9v4.5M12 8h.01",
   help: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm-2.2-11a2.2 2.2 0 1 1 3 2.1c-.5.2-.8.7-.8 1.2v.4m0 3h.01",
   phone: "M7 3h3l1.5 4-2 1.5a12 12 0 0 0 6 6L17 12.5l4 1.5v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 5.2 2 2 0 0 1 5 3h2Z",
+  phoneIncoming: "M7 3h3l1.5 4-2 1.5a12 12 0 0 0 6 6L17 12.5l4 1.5v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 5.2 2 2 0 0 1 5 3h2ZM21 3l-5 5m0 0V4m0 4h4",
+  phoneMissed: "M7 3h3l1.5 4-2 1.5a12 12 0 0 0 6 6L17 12.5l4 1.5v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 5.2 2 2 0 0 1 5 3h2ZM16 3l5 5m0-5-5 5",
+  mic: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm7 9a7 7 0 0 1-14 0m7 7v3",
+  play: "M8 5.5v13a.5.5 0 0 0 .77.42l10-6.5a.5.5 0 0 0 0-.84l-10-6.5A.5.5 0 0 0 8 5.5Z",
+  pause: "M8 5v14M16 5v14",
   phoneOutgoing: "M7 3h3l1.5 4-2 1.5a12 12 0 0 0 6 6L17 12.5l4 1.5v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 5.2 2 2 0 0 1 5 3h2ZM16 8l5-5m0 0h-4m4 0v4",
   message: "M21 11.5a8 8 0 0 1-11.6 7.1L3 21l2.4-6A8 8 0 1 1 21 11.5Z",
   mail: "M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Zm0 .5 9 6 9-6",

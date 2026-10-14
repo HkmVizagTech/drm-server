@@ -8,12 +8,20 @@
 // DRM. It now uses the same surfaces, type and controls as every screen behind
 // it.
 
-import { useState, FormEvent } from "react";
-import { useAuth } from "@/lib/auth-context";
+import { useEffect, useState, FormEvent } from "react";
+import { useRouter } from "next/navigation";
+import { homeFor, useAuth } from "@/lib/auth-context";
 import { Alert, Button, Field, Input } from "@/components/ui";
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, user, ready } = useAuth();
+  const router = useRouter();
+
+  // Already signed in - opening the app, or DRM's address with a login still
+  // stored: straight on to work instead of asking for the password again.
+  useEffect(() => {
+    if (ready && user) router.replace(homeFor(user.role));
+  }, [ready, user, router]);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -31,6 +39,15 @@ export default function LoginPage() {
       setLoading(false);
     }
   };
+
+  // Checking who is signed in, or on the way in: no form to flash past.
+  if (!ready || user) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-page px-4">
+        <p className="text-sm text-ink-muted">Opening DRM…</p>
+      </div>
+    );
+  }
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-page px-4 py-10">

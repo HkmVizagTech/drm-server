@@ -1,3 +1,5 @@
+import { restoreAppSession } from './app-session';
+
 // Empty string means "same origin" - the API and this UI are served by one
 // process on one port, so "/api/..." resolves against whatever host the browser
 // is already on. That removes the class of bug where NEXT_PUBLIC_API_URL is
@@ -11,7 +13,7 @@ const API_URL =
   process.env.NEXT_PUBLIC_API_URL ??
   (process.env.NODE_ENV === 'development' ? 'http://localhost:4000' : '');
 
-export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+export async function api<T>(path: string, options: RequestInit = {}, retried = false): Promise<T> {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
 
   const res = await fetch(`${API_URL}${path}`, {
@@ -22,6 +24,12 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
       ...options.headers,
     },
   });
+
+  // Inside the Android app, a refused login is renewed by the app and the
+  // request tried once more, rather than the caller being signed out.
+  if (res.status === 401 && !retried && !path.startsWith('/api/auth/login') && (await restoreAppSession())) {
+    return api<T>(path, options, true);
+  }
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: 'Request failed' }));

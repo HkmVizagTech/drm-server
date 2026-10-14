@@ -152,7 +152,7 @@ router.get('/dashboard', async (req, res) => {
     // conversion figures below are current rather than a day behind.
     await reconcileConversions();
 
-    const [leads, conv, credits, calls, pipeline, followUps, byStatus, bySource, callers, qr, byQr, ngCalls, ngMoney, byCallerCalls, byCallerMoney] = await Promise.all([
+    const [leads, conv, credits, calls, pipeline, followUps, byStatus, bySource, callers, qr, byQr, ngCalls, ngMoney, byCallerCalls, byCallerMoney, phoneCalls] = await Promise.all([
       pool.query(
         // WHAT COUNTS AS A CONVERSION, AND WHY THIS CHANGED
         //
@@ -389,6 +389,24 @@ router.get('/dashboard', async (req, res) => {
               GROUP BY x.user_id, u.name`,
             [from, to]
           ),
+      // What the callers' phones saw (the DRM app): measured, not typed in.
+      // Opens the Recordings list.
+      pool.query(
+        `SELECT COUNT(*)::int AS calls,
+                COUNT(*) FILTER (WHERE direction = 'outbound')::int AS outbound,
+                COUNT(*) FILTER (WHERE direction = 'outbound' AND duration_seconds > 0)::int AS answered_out,
+                COUNT(*) FILTER (WHERE direction = 'inbound')::int AS inbound,
+                COUNT(*) FILTER (WHERE direction = 'missed')::int AS missed,
+                COALESCE(SUM(duration_seconds), 0)::int AS talk_seconds,
+                COUNT(*) FILTER (WHERE duration_seconds > 0)::int AS spoke,
+                COUNT(*) FILTER (WHERE recording_status = 'uploaded')::int AS recorded,
+                COUNT(*) FILTER (WHERE recording_status = 'waiting')::int AS waiting,
+                COUNT(*) FILTER (WHERE recording_status = 'none')::int AS no_recording
+           FROM phone_calls
+          WHERE ${WINDOW('started_at', 1, 2)}
+            AND ($3::uuid IS NULL OR user_id = $3::uuid)`,
+        [from, to, me]
+      ),
     ]);
 
     const c = calls.rows[0];
@@ -459,6 +477,7 @@ router.get('/dashboard', async (req, res) => {
       range: { from, to, label },
       split,
       by_caller: byCaller,
+      phone_calls: phoneCalls.rows[0],
       // The screen says whose figures these are rather than leaving the reader
       // to assume. A caller reading temple-wide totals as their own, or the
       // reverse, is the failure this one field prevents.

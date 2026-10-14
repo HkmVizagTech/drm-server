@@ -19,7 +19,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import express from 'express';
 import crypto from 'crypto';
 import pool from '../db/pool';
-import { authenticate, authorize } from '../middleware/auth';
+import { authenticate, authorize, generateToken } from '../middleware/auth';
 import * as storage from '../services/storage';
 import {
   linkPhoneCalls,
@@ -99,6 +99,39 @@ router.post('/devices', authenticate, async (req, res) => {
   } catch (err) {
     console.error('phoneApp.link error:', err);
     res.status(500).json({ error: 'Could not link this phone.' });
+  }
+});
+
+/**
+ * POST /api/app/session - a fresh login for whoever this phone is linked to.
+ *
+ * WHY: the login lives in the WebView's storage, and Android does not always
+ * write that to disk before the app is closed - so callers were asked to sign
+ * in again every time they opened the app. The phone's own key is kept safely
+ * by the app, so the app asks for a login with it instead. An admin signing
+ * the phone out on the Phones page, or the caller being deactivated, ends this.
+ */
+router.post('/session', deviceAuth, async (req: DeviceReq, res) => {
+  try {
+    const u = await pool.query(`SELECT id, name, email, role FROM users WHERE id = $1 AND active`, [req.device!.user_id]);
+    if (!u.rows.length) return res.status(401).json({ error: 'This phone is signed out.' });
+    const user = u.rows[0];
+    await pool.query(`UPDATE app_devices SET last_sync_at = NOW() WHERE id = $1`, [req.device!.id]);
+    res.json({ token: generateToken({ userId: user.id, role: user.role }), user });
+  } catch (err) {
+    console.error('phoneApp.session error:', err);
+    res.status(500).json({ error: 'Could not sign in.' });
+  }
+});
+
+/** POST /api/app/sign-out - the caller signed out in the app: this phone's key stops working. */
+router.post('/sign-out', deviceAuth, async (req: DeviceReq, res) => {
+  try {
+    await pool.query(`UPDATE app_devices SET revoked_at = NOW(), updated_at = NOW() WHERE id = $1`, [req.device!.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('phoneApp.signOut error:', err);
+    res.status(500).json({ error: 'Could not sign out.' });
   }
 });
 
@@ -222,6 +255,141 @@ router.post('/calls/:id/no-recording', deviceAuth, async (req: DeviceReq, res) =
 
 /* ------------------------------------------------------- for the screens */
 
+/* --------------------------------------------- the recordings list and a call */
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Who may open the calls list at all. A caller sees only their own calls. */
+const LIST_ROLES = ['admin', 'volunteer_coordinator', 'caller'] as const;
+
+const CALL_ROW = `
+  pc.id, pc.direction, pc.phone, pc.started_at, pc.duration_seconds, pc.from_app,
+  pc.recording_status, pc.recording_bytes, pc.user_id, u.name AS caller_name,
+  pc.lead_id, l.name AS lead_name, l.phone AS lead_phone,
+  a.disposition, d.label AS disposition_label, a.note AS outcome_note,
+  dv.model AS phone_model, dv.manufacturer AS phone_maker`;
+const CALL_FROM = `
+  FROM phone_calls pc
+  LEFT JOIN users u ON u.id = pc.user_id
+  LEFT JOIN leads l ON l.id = pc.lead_id
+  LEFT JOIN lead_activities a ON a.id = pc.activity_id
+  LEFT JOIN crm_dispositions d ON d.slug = a.disposition
+  LEFT JOIN app_devices dv ON dv.id = pc.device_id`;
+
+/**
+ * GET /api/app/calls - every call the phones saw, newest first, with totals.
+ * ?from=&to= (Indian days) &user_id= (admins; "all" or one caller)
+ * &direction=outbound|inbound|missed &recording=uploaded|none|waiting
+ * &search= (name or number) &page= &limit=
+ */
+router.get('/calls', authenticate, authorize(...LIST_ROLES), async (req, res) => {
+  const q = req.query as Record<string, string | undefined>;
+  const reviewer = REVIEWERS.includes(req.user!.role);
+  const values: unknown[] = [];
+  const p = (v: unknown) => {
+    values.push(v);
+    return `$${values.length}`;
+  };
+  const conds: string[] = [];
+  if (!reviewer) conds.push(`pc.user_id = ${p(req.user!.userId)}::uuid`);
+  else if (q.user_id && q.user_id !== 'all' && isUuid(q.user_id)) conds.push(`pc.user_id = ${p(q.user_id)}::uuid`);
+  if (q.from && DATE_RE.test(q.from)) conds.push(`pc.started_at >= ${p(q.from)}::date`);
+  if (q.to && DATE_RE.test(q.to)) conds.push(`pc.started_at < ${p(q.to)}::date + INTERVAL '1 day'`);
+  if (q.direction && ['outbound', 'inbound', 'missed'].includes(q.direction)) conds.push(`pc.direction = ${p(q.direction)}`);
+  if (q.recording === 'uploaded' || q.recording === 'none' || q.recording === 'waiting') {
+    conds.push(`pc.recording_status = ${p(q.recording)}`);
+  }
+  if (q.answered === 'true') conds.push(`pc.duration_seconds > 0`);
+  const term = String(q.search ?? '').trim().slice(0, 80);
+  if (term) {
+    const digits = term.replace(/\D/g, '');
+    if (digits.length >= 4) conds.push(`pc.phone LIKE ${p(`%${digits.slice(-10)}%`)}`);
+    else conds.push(`l.name ILIKE ${p(`%${term}%`)}`);
+  }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  const limit = Math.min(100, Math.max(1, Number(q.limit) || 50));
+  const page = Math.max(1, Number(q.page) || 1);
+  try {
+    const [rows, totals] = await Promise.all([
+      pool.query(
+        `SELECT ${CALL_ROW},
+                (pc.recording_status = 'uploaded' AND (${p(reviewer)}::boolean OR pc.user_id = ${p(req.user!.userId)}::uuid)) AS can_listen
+           ${CALL_FROM} ${where}
+          ORDER BY pc.started_at DESC
+          LIMIT ${limit} OFFSET ${(page - 1) * limit}`,
+        values
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS calls,
+                COUNT(*) FILTER (WHERE pc.direction = 'outbound')::int AS outbound,
+                COUNT(*) FILTER (WHERE pc.direction = 'outbound' AND pc.duration_seconds > 0)::int AS answered_out,
+                COUNT(*) FILTER (WHERE pc.direction = 'inbound')::int AS inbound,
+                COUNT(*) FILTER (WHERE pc.direction = 'missed')::int AS missed,
+                COALESCE(SUM(pc.duration_seconds), 0)::int AS talk_seconds,
+                COUNT(*) FILTER (WHERE pc.duration_seconds > 0)::int AS spoke,
+                COUNT(*) FILTER (WHERE pc.recording_status = 'uploaded')::int AS recorded,
+                COUNT(*) FILTER (WHERE pc.recording_status = 'waiting')::int AS waiting,
+                COUNT(*) FILTER (WHERE pc.recording_status = 'none')::int AS no_recording
+           ${CALL_FROM} ${where}`,
+        values.slice(0, values.length - 2)
+      ),
+    ]);
+    res.json({ calls: rows.rows, totals: totals.rows[0], page, limit });
+  } catch (err) {
+    console.error('phoneApp.list error:', err);
+    res.status(500).json({ error: 'Could not load calls.' });
+  }
+});
+
+/** GET /api/app/calls/:id - one call: who, when, what was said, the recording, who listened. */
+router.get('/calls/:id', authenticate, authorize(...LIST_ROLES), async (req, res) => {
+  const id = String(req.params.id);
+  if (!isUuid(id)) return res.status(404).json({ error: 'Not found.' });
+  const reviewer = REVIEWERS.includes(req.user!.role);
+  try {
+    const r = await pool.query(
+      `SELECT ${CALL_ROW},
+              pc.recording_type, pc.recording_name, pc.recording_at, pc.sim, pc.activity_id,
+              a.connected AS outcome_connected, a.occurred_at AS outcome_at,
+              l.status AS lead_status, st.label AS lead_status_label, l.alt_phone AS lead_alt_phone,
+              l.converted_at, l.converted_amount, owner.name AS lead_owner_name
+         ${CALL_FROM}
+         LEFT JOIN crm_statuses st ON st.slug = l.status
+         LEFT JOIN users owner ON owner.id = l.assigned_to
+        WHERE pc.id = $1`,
+      [id]
+    );
+    const call = r.rows[0];
+    if (!call || (!reviewer && call.user_id !== req.user!.userId)) return res.status(404).json({ error: 'Not found.' });
+    const [listens, others] = await Promise.all([
+      reviewer
+        ? pool.query(
+            `SELECT rl.listened_at, u.name FROM recording_listens rl LEFT JOIN users u ON u.id = rl.user_id
+              WHERE rl.call_id = $1 ORDER BY rl.listened_at DESC LIMIT 20`,
+            [id]
+          )
+        : Promise.resolve({ rows: [] }),
+      call.lead_id
+        ? pool.query(
+            `SELECT pc.id, pc.direction, pc.started_at, pc.duration_seconds, pc.recording_status, u.name AS caller_name
+               FROM phone_calls pc LEFT JOIN users u ON u.id = pc.user_id
+              WHERE pc.lead_id = $1 AND pc.id <> $2 AND ($3::boolean OR pc.user_id = $4::uuid)
+              ORDER BY pc.started_at DESC LIMIT 10`,
+            [call.lead_id, id, reviewer, req.user!.userId]
+          )
+        : Promise.resolve({ rows: [] }),
+    ]);
+    res.json({
+      call: { ...call, can_listen: call.recording_status === 'uploaded' },
+      listens: listens.rows,
+      other_calls: others.rows,
+    });
+  } catch (err) {
+    console.error('phoneApp.detail error:', err);
+    res.status(500).json({ error: 'Could not load the call.' });
+  }
+});
+
 /** GET /api/app/calls/:id/recording - play a recording (logged). */
 router.get('/calls/:id/recording', authenticate, async (req, res) => {
   if (!isUuid(String(req.params.id))) return res.status(404).json({ error: 'Not found.' });
@@ -273,13 +441,9 @@ router.get('/leads/:id/calls', authenticate, async (req, res) => {
   try {
     await linkPhoneCalls();
     const r = await pool.query(
-      `SELECT pc.id, pc.direction, pc.phone, pc.started_at, pc.duration_seconds, pc.from_app,
-              pc.recording_status, pc.recording_bytes, pc.activity_id, pc.user_id,
-              u.name AS user_name, d.model AS phone_model,
+      `SELECT ${CALL_ROW},
               (pc.recording_status = 'uploaded' AND ($2 OR pc.user_id = $3)) AS can_listen
-         FROM phone_calls pc
-         LEFT JOIN users u ON u.id = pc.user_id
-         LEFT JOIN app_devices d ON d.id = pc.device_id
+         ${CALL_FROM}
         WHERE pc.lead_id = $1
         ORDER BY pc.started_at DESC
         LIMIT 100`,

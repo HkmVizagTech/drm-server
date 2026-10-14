@@ -88,6 +88,9 @@ export const navGroups: NavGroup[] = [
       // "What calls have I made, and to whom" - and where a caller goes when
       // somebody rings back, to find them and log what happened.
       { href: "/calling/calls", label: "My calls", icon: "phone" },
+      // Calls the DRM app saw on callers' phones, with their recordings: a
+      // caller's own, or the whole team's for an admin.
+      { href: "/calling/recordings", label: "Recordings", icon: "mic" },
       // The app's own setup: permissions, recordings, last sync. Only in the app.
       { href: "/calling/phone", label: "This phone", icon: "settings", appOnly: true },
       { href: "/follow-ups", label: "Follow-ups", icon: "clock" },

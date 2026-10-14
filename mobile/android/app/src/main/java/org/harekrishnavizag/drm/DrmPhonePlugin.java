@@ -20,7 +20,7 @@ import com.getcapacitor.annotation.PermissionCallback;
 /**
  * What DRM's web pages can ask the phone to do, as window.Capacitor.Plugins.DrmPhone
  * (see client/src/lib/phone-app.ts):
- *   getInfo, link, unlink, requestPermissions, call, syncNow, findRecording,
+ *   getInfo, link, unlink, signIn, signOut, requestPermissions, call, syncNow, findRecording,
  *   openAllFilesSettings, openBatterySettings, openAppSettings.
  */
 @CapacitorPlugin(
@@ -82,6 +82,54 @@ public class DrmPhonePlugin extends Plugin {
         SyncWorker.schedule(ctx());
         SyncWorker.soon(ctx(), "drm-sync-link", 1);
         call.resolve(info());
+    }
+
+    /**
+     * A fresh DRM login for whoever this phone is linked to: { token, user }.
+     *
+     * The login DRM keeps in the WebView is not always written to disk before
+     * the app is closed, so callers were asked to sign in every time they opened
+     * it. The phone's key is kept here, safely, so the app signs back in with it.
+     */
+    @PluginMethod
+    public void signIn(PluginCall call) {
+        Store s = new Store(ctx());
+        if (!s.isLinked()) {
+            call.reject("not linked");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                org.json.JSONObject r = new Api(s.baseUrl(), s.deviceKey()).post("/api/app/session", new org.json.JSONObject());
+                call.resolve(JSObject.fromJSONObject(r));
+            } catch (Api.HttpError e) {
+                if (e.code == 401) s.unlink();
+                call.reject(e.getMessage());
+            } catch (Exception e) {
+                call.reject("offline");
+            }
+        }).start();
+    }
+
+    /** The caller signed out: this phone's key stops working, here and in DRM. */
+    @PluginMethod
+    public void signOut(PluginCall call) {
+        Store s = new Store(ctx());
+        if (!s.isLinked()) {
+            call.resolve(info());
+            return;
+        }
+        String base = s.baseUrl();
+        String key = s.deviceKey();
+        s.unlink();
+        new Thread(() -> {
+            try {
+                new Api(base, key).post("/api/app/sign-out", new org.json.JSONObject());
+            } catch (Exception ignored) {
+                // Offline: the key is already gone from the phone, which is what matters.
+            }
+            call.resolve(info());
+        }).start();
     }
 
     @PluginMethod

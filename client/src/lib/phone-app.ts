@@ -50,6 +50,8 @@ interface DrmPhonePlugin {
   getInfo(): Promise<PhoneInfo>;
   link(o: { baseUrl: string; deviceId: string; deviceKey: string; userId: string }): Promise<PhoneInfo>;
   unlink(): Promise<PhoneInfo>;
+  /** Added in app 1.0.1. */
+  signOut?(): Promise<PhoneInfo>;
   requestPermissions(): Promise<PhoneInfo>;
   call(o: { phone: string; leadId?: string | null }): Promise<{ placed: boolean; direct: boolean }>;
   syncNow(): Promise<PhoneInfo>;
@@ -145,4 +147,16 @@ export function missing(info: PhoneInfo | null): string[] {
  */
 export function dialerHidesRecordings(dialer: string | null | undefined): boolean {
   return !!dialer && /com\.google\.android\.dialer/.test(dialer);
+}
+
+/** Sign this phone out of DRM (the caller signed out). Older apps only forget the key locally. */
+export async function signOutPhone(): Promise<void> {
+  const p = phone();
+  if (!p) return;
+  try {
+    if (p.signOut) await p.signOut();
+    else await p.unlink();
+  } catch {
+    // Nothing more to do; the next sign-in links the phone again.
+  }
 }
