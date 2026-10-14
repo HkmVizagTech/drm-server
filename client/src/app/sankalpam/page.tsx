@@ -640,7 +640,7 @@ function DonorsView({ version, onEdit }: { version: number; onEdit: (id: string)
     <div className="space-y-4">
       <SourceSwitch value={source} onChange={setSource} counts={data?.counts} />
       <div className="flex flex-wrap items-end gap-2">
-        <SearchInput value={search} onChange={setSearch} placeholder="Name, number, patron no. or occasion" className="min-w-0 flex-1 basis-64" />
+        <SearchInput value={search} onChange={setSearch} placeholder="Name, number, patron no. or occasion" className="min-w-0 flex-[1_1_14rem] basis-64" />
         <Select
           value={month}
           onChange={setMonth}

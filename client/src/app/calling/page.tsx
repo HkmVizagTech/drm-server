@@ -818,7 +818,7 @@ function CallingDashboard() {
                 .filter((q) => q.payments > 0)
                 .map((q) => (
                   <li key={q.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
-                    <span className="min-w-0 flex-1">
+                    <span className="min-w-0 flex-[1_1_14rem]">
                       <span className="block truncate text-sm font-medium text-ink">{q.label}</span>
                       <span className="block text-2xs text-ink-muted">
                         {[q.purpose, q.owner_name ?? "Temple"].filter(Boolean).join(" · ")}

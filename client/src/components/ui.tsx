@@ -115,8 +115,10 @@ export function CardHeader({
   icon?: IconName;
 }) {
   return (
-    <div className="mb-4 flex items-start justify-between gap-4">
-      <div className="flex min-w-0 items-start gap-2.5">
+    // Wraps: on a phone a wide action (a set of tabs, a button) goes under the
+    // title rather than squeezing it to a word a line.
+    <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+      <div className="flex min-w-0 flex-[1_1_12rem] items-start gap-2.5">
         {icon && (
           <span className="mt-0.5 grid h-7 w-7 flex-none place-items-center rounded-control bg-brand-50 text-brand-700">
             <Icon name={icon} size={15} />

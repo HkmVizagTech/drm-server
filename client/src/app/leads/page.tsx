@@ -778,8 +778,10 @@ function Leads() {
                     label={<span className="sr-only">Select {l.name || l.phone}</span>}
                   />
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-start justify-between gap-2">
-                      <Link href={`/leads/${l.id}`} className="min-w-0 truncate font-medium text-ink">
+                    {/* Name, then the call chip under it when they don't fit side by side -
+                        a long name was cut to "Shri Ramach..." and the chip ran off the card. */}
+                    <div className="flex flex-wrap items-start justify-between gap-x-2 gap-y-1">
+                      <Link href={`/leads/${l.id}`} className="min-w-0 font-medium text-ink [overflow-wrap:anywhere]">
                         {l.name || "No name"}
                       </Link>
                       <CallStateChip state={callState(l, user?.id)} />

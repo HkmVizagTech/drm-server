@@ -279,7 +279,9 @@ export default function RemindersPage() {
                 <ul className="divide-y divide-line-soft border-t border-line-soft">
                   {rows.map((r) => (
                     <li key={r.id} className="px-5 py-3.5 transition-colors hover:bg-brand-50/60">
-                      <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
+                      {/* On a phone the buttons go under the words; side by side
+                          they squeezed the donor's words to one per line. */}
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <Link href={`/leads/${r.lead_id}`} className="font-medium text-ink hover:text-brand-700">
@@ -312,7 +314,7 @@ export default function RemindersPage() {
                         </div>
 
                         {r.status === "open" ? (
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5 sm:flex-none">
                             {/* Through the call screen, so what they said is
                                 logged against the promise's donor. */}
                             <Link

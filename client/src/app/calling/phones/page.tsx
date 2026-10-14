@@ -13,6 +13,7 @@
 //     outcome. The call is still in the lead's phone calls.
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { number, relativeDate } from "@/lib/format";
@@ -25,11 +26,6 @@ import {
   EmptyState,
   PageHeader,
   Skeleton,
-  TableShell,
-  Tbody,
-  Td,
-  Th,
-  Thead,
 } from "@/components/ui";
 import { toast } from "@/components/toast";
 
@@ -135,78 +131,103 @@ export default function PhonesPage() {
           />
         </Card>
       ) : (
-        <TableShell>
-          <Thead>
-            <Th>Caller and phone</Th>
-            <Th>Last heard</Th>
-            <Th align="right">Calls made</Th>
-            <Th align="right">Rang back</Th>
-            <Th align="right">Missed</Th>
-            <Th align="right">Talk time</Th>
-            <Th align="right">Recordings</Th>
-            <Th align="right">No outcome</Th>
-            <Th>Needs attention</Th>
-            {user?.role === "admin" && <Th><span className="sr-only">Actions</span></Th>}
-          </Thead>
-          <Tbody>
-            {devices?.map((d) => {
-              const issues = problems(d);
-              return (
-                <tr key={d.id} className={d.revoked_at ? "opacity-60" : ""}>
-                  <Td>
-                    <p className="font-medium text-ink">{d.user_name}</p>
+        // One card per phone: readable on the admin's own phone as well as on a
+        // desk, where a nine-column table had to be scrolled sideways.
+        <div className="grid gap-4 xl:grid-cols-2">
+          {devices?.map((d) => {
+            const issues = problems(d);
+            const stats: { label: string; value: string; sub?: string; warn?: boolean; href?: string }[] = [
+              {
+                label: "Calls made",
+                value: number(d.outbound),
+                sub: `${number(d.answered_out)} answered`,
+                href: `/calling/recordings?user_id=${d.user_id}&direction=outbound`,
+              },
+              { label: "Rang back", value: number(d.inbound), href: `/calling/recordings?user_id=${d.user_id}&direction=inbound` },
+              {
+                label: "Missed",
+                value: number(d.missed),
+                warn: d.missed > 0,
+                href: `/calling/recordings?user_id=${d.user_id}&direction=missed`,
+              },
+              { label: "Talk time", value: talk(d.talk_seconds) },
+              {
+                label: "Recorded",
+                value: `${number(d.recorded)} / ${number(d.needs_recording)}`,
+                sub: d.waiting ? `${number(d.waiting)} on the way` : d.no_recording ? `${number(d.no_recording)} not found` : undefined,
+                warn: d.no_recording > 0,
+                href: `/calling/recordings?user_id=${d.user_id}&recording=${d.no_recording ? "none" : "uploaded"}`,
+              },
+              { label: "No outcome", value: number(d.no_outcome), warn: d.no_outcome > 0 },
+            ];
+            return (
+              <Card key={d.id} className={d.revoked_at ? "opacity-60" : ""}>
+                <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+                  <div className="min-w-0 flex-[1_1_14rem]">
+                    <p className="font-semibold text-ink">{d.user_name}</p>
                     <p className="text-xs text-ink-muted">
                       {[d.manufacturer, d.model].filter(Boolean).join(" ")}
                       {d.android_version ? ` · Android ${d.android_version}` : ""}
                       {d.app_version ? ` · app ${d.app_version}` : ""}
                     </p>
-                    {d.recordings_folder && <p className="text-xs text-ink-faint">Recordings: {d.recordings_folder}</p>}
-                  </Td>
-                  <Td>
-                    {d.last_sync_at ? relativeDate(d.last_sync_at) : "Never"}
-                    {d.last_error && <p className="max-w-56 text-xs text-warn">{d.last_error}</p>}
-                  </Td>
-                  <Td align="right">
-                    {number(d.outbound)}
-                    <p className="text-xs text-ink-faint">{number(d.answered_out)} answered</p>
-                  </Td>
-                  <Td align="right">{number(d.inbound)}</Td>
-                  <Td align="right">{d.missed ? <Badge tone="warn">{number(d.missed)}</Badge> : 0}</Td>
-                  <Td align="right">{talk(d.talk_seconds)}</Td>
-                  <Td align="right">
-                    {number(d.recorded)} / {number(d.needs_recording)}
-                    {d.waiting > 0 && <p className="text-xs text-ink-faint">{number(d.waiting)} waiting</p>}
-                  </Td>
-                  <Td align="right">{d.no_outcome ? <Badge tone="warn">{number(d.no_outcome)}</Badge> : 0}</Td>
-                  <Td>
+                    <p className="text-xs text-ink-faint">
+                      Last heard {d.last_sync_at ? relativeDate(d.last_sync_at).toLowerCase() : "never"}
+                      {d.recordings_folder ? ` · recordings in ${d.recordings_folder}` : ""}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
                     {issues.length === 0 ? (
                       <Badge tone="good" dot>
                         Working
                       </Badge>
-                    ) : (
-                      <div className="flex flex-wrap gap-1">
-                        {issues.map((i) => (
-                          <Badge key={i} tone="warn">
-                            {i}
-                          </Badge>
-                        ))}
-                      </div>
+                    ) : null}
+                    {user?.role === "admin" && !d.revoked_at && (
+                      <Button size="xs" variant="ghost" onClick={() => void signOut(d)}>
+                        Sign out
+                      </Button>
                     )}
-                  </Td>
-                  {user?.role === "admin" && (
-                    <Td align="right">
-                      {!d.revoked_at && (
-                        <Button size="xs" variant="ghost" onClick={() => void signOut(d)}>
-                          Sign out
-                        </Button>
-                      )}
-                    </Td>
-                  )}
-                </tr>
-              );
-            })}
-          </Tbody>
-        </TableShell>
+                  </div>
+                </div>
+
+                {issues.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {issues.map((i) => (
+                      <Badge key={i} tone="warn">
+                        {i}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+                {d.last_error && <p className="mt-2 text-xs text-warn">{d.last_error}</p>}
+
+                <ul className="mt-4 grid grid-cols-3 gap-2 sm:grid-cols-6">
+                  {stats.map((x) => {
+                    const body = (
+                      <>
+                        <span className="block text-2xs font-medium uppercase tracking-wide text-ink-muted">{x.label}</span>
+                        <span className={`mt-0.5 block text-base font-semibold tabular-nums ${x.warn ? "text-warn" : "text-ink"}`}>
+                          {x.value}
+                        </span>
+                        {x.sub && <span className="block truncate text-2xs text-ink-muted">{x.sub}</span>}
+                      </>
+                    );
+                    return (
+                      <li key={x.label}>
+                        {x.href ? (
+                          <Link href={x.href} className="block rounded-control bg-sunken px-2.5 py-2 hover:bg-brand-50 hover:ring-1 hover:ring-brand-200">
+                            {body}
+                          </Link>
+                        ) : (
+                          <div className="rounded-control bg-sunken px-2.5 py-2">{body}</div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </Card>
+            );
+          })}
+        </div>
       )}
     </>
   );

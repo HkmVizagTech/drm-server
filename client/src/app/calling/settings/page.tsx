@@ -243,7 +243,7 @@ function CallingSettings() {
               const value = config?.settings[key];
               return (
                 <div key={key} className="flex flex-wrap items-start justify-between gap-4 border-b border-line-soft pb-4 last:border-0 last:pb-0">
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-0 flex-[1_1_14rem]">
                     <p className="text-sm font-medium text-ink">{meta.label}</p>
                     <p className="mt-0.5 text-xs text-ink-muted">{meta.help}</p>
                   </div>
@@ -326,7 +326,7 @@ function CallingSettings() {
               <tr>
                 <td colSpan={5} className="border-t border-line-soft bg-sunken px-4 py-3">
                   <div className="flex flex-wrap items-center gap-2">
-                    <div className="min-w-0 flex-1">
+                    <div className="min-w-0 flex-[1_1_14rem]">
                       <Input
                         value={newStage}
                         aria-label="New stage"
@@ -445,7 +445,7 @@ function CallingSettings() {
             </div>
 
             <div className="mt-5 flex flex-wrap items-start justify-between gap-4 border-t border-line-soft pt-4">
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0 flex-[1_1_14rem]">
                 <p className="text-sm font-medium text-ink">Desktop notifications</p>
                 <p className="mt-0.5 text-xs text-ink-muted">Alert even when DRM is in another tab.</p>
               </div>

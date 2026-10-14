@@ -121,7 +121,7 @@ export function NeedDetailsView({
               const dueNow = d.next_call_at && new Date(d.next_call_at).getTime() <= now;
               return (
                 <li key={d.id} className={`flex flex-wrap items-start gap-x-4 gap-y-2.5 px-4 py-3.5 sm:px-5 ${dueNow ? "bg-amber-50/60" : ""}`}>
-                  <div className="min-w-0 flex-1 basis-60">
+                  <div className="min-w-0 flex-[1_1_14rem] basis-60">
                     <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <button type="button" onClick={() => onEdit(d.id)} className="font-medium text-ink hover:text-brand-700 hover:underline">
                         {d.donor_name}

@@ -414,7 +414,7 @@ export default function FollowUpsPage() {
                           screen, so its outcome is logged and the board
                           updates, instead of a bare tel: link DRM never hears
                           about. */}
-                      <div className="grid w-full grid-cols-4 gap-1.5 sm:flex sm:w-auto sm:items-center">
+                      <div className="grid w-full grid-cols-2 gap-1.5 sm:flex sm:w-auto sm:items-center">
                         <Link
                           href={callHref(l.id, "/follow-ups")}
                           className={buttonClass("primary", "sm", "max-sm:h-11 max-sm:text-sm")}

@@ -302,7 +302,7 @@ export default function MyLinksPage() {
         <ul className="divide-y divide-line-soft border-t border-line-soft">
           {shared.map((l) => (
             <li key={l.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0 flex-[1_1_14rem]">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium text-ink">{l.label}</span>
                   {/* A shared link can be assigned to one caller: everybody

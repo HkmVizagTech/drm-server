@@ -250,7 +250,10 @@ h1, h2, h3, h4 {
    browser default blue fighting the palette. A ring as well as an outline:
    the outline survives on elements with their own background, and the ring
    gives it the soft halo that makes it visible against the green fills. */
-:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+/* Not on tabindex="-1": those are focused by the page itself (the next
+   donor's name on the call screen, for screen readers), and a ring round a
+   heading nobody tabbed to looked like a broken text box on phones. */
+:where(a, button, input, select, textarea, [tabindex]:not([tabindex="-1"])):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius-control);
@@ -428,5 +431,21 @@ aside::-webkit-scrollbar-thumb {
   .shimmer {
     background-image: none;
     background-color: rgba(140, 160, 173, 0.16);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   A GRID MAY NEVER BE WIDER THAN THE SCREEN.
+
+   Most grids here only say how many columns they have from a breakpoint up
+   ("grid lg:grid-cols-3"). Below it the browser makes one column sized to its
+   widest unbreakable content - a long link in a WhatsApp message was enough to
+   push a lead's whole page 170px off the side of a phone. One column that is
+   allowed to shrink fixes every such grid at once; any grid-cols-* class still
+   wins, because utilities sit above this layer.
+   --------------------------------------------------------------------------- */
+@layer base {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
