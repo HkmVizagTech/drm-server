@@ -59,6 +59,7 @@ import {
 // See the header of services/credits.ts and of caller_credits in schema.sql.
 import { CREDIT_WINDOW, totalsFor } from '../services/credits';
 
+import { CALL_BREAKDOWN, CALL_EVENTS } from '../services/callEvents';
 import { NEARLY_GAVE_CALL, NEARLY_GAVE_CREDIT, NEARLY_GAVE_DAYS } from '../services/nearlyGaveCalls';
 const router = Router();
 router.use(authenticate);
@@ -229,9 +230,12 @@ router.get('/dashboard', async (req, res) => {
                 -- a person typing them in. Drives the "self-reported" caveat.
                 COUNT(*) FILTER (WHERE source <> 'manual')::int AS measured,
                 COALESCE(SUM(duration_seconds), 0)::int AS total_seconds,
-                COUNT(*) FILTER (WHERE duration_seconds IS NOT NULL)::int AS with_duration
-           FROM lead_activities
-          WHERE kind = 'call' AND ${WINDOW('occurred_at', 1, 2)}
+                COUNT(*) FILTER (WHERE duration_seconds IS NOT NULL)::int AS with_duration,
+                ${CALL_BREAKDOWN('a')}
+           -- Every call: saved in DRM, seen by the phone app, and Sankalpam
+           -- (services/callEvents.ts), each once.
+           FROM ${CALL_EVENTS} a
+          WHERE ${WINDOW('occurred_at', 1, 2)}
             AND ($3::uuid IS NULL OR user_id = $3::uuid)`,
         [from, to, me]
       ),
@@ -283,8 +287,8 @@ router.get('/dashboard', async (req, res) => {
             `SELECT u.id, u.name,
                     COUNT(*)::int AS calls,
                     COUNT(*) FILTER (WHERE a.connected)::int AS connected
-               FROM lead_activities a JOIN users u ON a.user_id = u.id
-              WHERE a.kind = 'call' AND a.occurred_at >= date_trunc('day', NOW())
+               FROM ${CALL_EVENTS} a JOIN users u ON a.user_id = u.id
+              WHERE a.occurred_at >= date_trunc('day', NOW())
               GROUP BY u.id, u.name ORDER BY calls DESC LIMIT 10`
           ),
       // QR codes shared and what came back. On a caller's own screen this is
@@ -345,9 +349,10 @@ router.get('/dashboard', async (req, res) => {
         `SELECT COUNT(*)::int AS made,
                 COUNT(*) FILTER (WHERE a.connected)::int AS connected,
                 COUNT(DISTINCT a.lead_id)::int AS leads_touched
-           FROM lead_activities a
-          WHERE a.kind = 'call' AND ${WINDOW('a.occurred_at', 1, 2)}
+           FROM ${CALL_EVENTS} a
+          WHERE ${WINDOW('a.occurred_at', 1, 2)}
             AND ($3::uuid IS NULL OR a.user_id = $3::uuid)
+            AND a.lead_id IS NOT NULL
             AND ${NEARLY_GAVE_CALL('a')}`,
         [from, to, me]
       ),
@@ -369,9 +374,9 @@ router.get('/dashboard', async (req, res) => {
                     COUNT(*) FILTER (WHERE x.connected)::int AS connected,
                     COUNT(*) FILTER (WHERE x.ng)::int AS ng_calls,
                     COUNT(*) FILTER (WHERE x.ng AND x.connected)::int AS ng_connected
-               FROM (SELECT a.user_id, a.connected, ${NEARLY_GAVE_CALL('a')} AS ng
-                       FROM lead_activities a
-                      WHERE a.kind = 'call' AND a.user_id IS NOT NULL AND ${WINDOW('a.occurred_at', 1, 2)}) x
+               FROM (SELECT a.user_id, a.connected, (a.lead_id IS NOT NULL AND ${NEARLY_GAVE_CALL('a')}) AS ng
+                       FROM ${CALL_EVENTS} a
+                      WHERE a.user_id IS NOT NULL AND ${WINDOW('a.occurred_at', 1, 2)}) x
                JOIN users u ON u.id = x.user_id
               GROUP BY x.user_id, u.name`,
             [from, to]
@@ -508,6 +513,14 @@ router.get('/dashboard', async (req, res) => {
       },
       calls: {
         made: c.made,
+        // Where the total comes from (services/callEvents.ts).
+        breakdown: {
+          outgoing: c.outgoing,
+          incoming: c.incoming,
+          missed: c.missed,
+          sankalpam: c.sankalpam,
+          not_saved: c.not_saved,
+        },
         connected: c.connected,
         unanswered: c.made - c.connected,
         connect_rate: c.made ? Math.round((c.connected / c.made) * 1000) / 10 : 0,
@@ -890,8 +903,8 @@ const CALLER_REPORT_SQL = `WITH calls AS (
                 COUNT(*) FILTER (WHERE a.duration_seconds IS NOT NULL)::int AS with_duration,
                 COUNT(*) FILTER (WHERE a.source <> 'manual')::int AS measured,
                 COUNT(DISTINCT date_trunc('day', a.occurred_at))::int AS active_days
-           FROM lead_activities a
-          WHERE a.kind = 'call' AND ${WINDOW('a.occurred_at', 1, 2)}
+           FROM ${CALL_EVENTS} a
+          WHERE ${WINDOW('a.occurred_at', 1, 2)}
           GROUP BY a.user_id
        ),
        conversions AS (
@@ -1088,7 +1101,7 @@ router.get('/reports/timeline', async (req, res) => {
            SELECT date_trunc($3, occurred_at) AS b,
                   COUNT(*)::int AS calls,
                   COUNT(*) FILTER (WHERE connected)::int AS connected
-             FROM lead_activities WHERE kind='call' AND ${WINDOW('occurred_at', 1, 2)}
+             FROM ${CALL_EVENTS} a WHERE ${WINDOW('occurred_at', 1, 2)}
             GROUP BY 1
          ) c ON c.b = d.bucket
          LEFT JOIN (
@@ -1138,15 +1151,16 @@ router.get('/reports/calls', async (req, res) => {
   try {
     const [byDisposition, byHour, totals] = await Promise.all([
       pool.query(
-        `SELECT a.disposition, COALESCE(d.label, a.disposition) AS label,
+        `SELECT COALESCE(a.disposition, a.via) AS disposition,
+                COALESCE(d.label, a.label, a.disposition, 'No result') AS label,
                 COALESCE(d.counts_connected, FALSE) AS counts_connected,
                 COUNT(*)::int AS n,
                 COUNT(*) FILTER (WHERE a.duration_seconds IS NOT NULL)::int AS with_duration,
                 COALESCE(AVG(a.duration_seconds) FILTER (WHERE a.duration_seconds IS NOT NULL), 0)::int AS avg_seconds
-           FROM lead_activities a
+           FROM ${CALL_EVENTS} a
            LEFT JOIN crm_dispositions d ON a.disposition = d.slug
-          WHERE a.kind='call' AND ${WINDOW('a.occurred_at', 1, 2)}
-          GROUP BY a.disposition, d.label, d.counts_connected, d.sort_order
+          WHERE ${WINDOW('a.occurred_at', 1, 2)}
+          GROUP BY COALESCE(a.disposition, a.via), d.label, a.label, a.disposition, d.counts_connected, d.sort_order
           ORDER BY MIN(COALESCE(d.sort_order, 999))`,
         [from, to]
       ),
@@ -1165,8 +1179,8 @@ router.get('/reports/calls', async (req, res) => {
         `SELECT EXTRACT(HOUR FROM occurred_at AT TIME ZONE '${APP_TIMEZONE}')::int AS hour,
                 COUNT(*)::int AS calls,
                 COUNT(*) FILTER (WHERE connected)::int AS connected
-           FROM lead_activities
-          WHERE kind='call' AND ${WINDOW('occurred_at', 1, 2)}
+           FROM ${CALL_EVENTS} a
+          WHERE ${WINDOW('occurred_at', 1, 2)}
           GROUP BY 1 ORDER BY 1`,
         [from, to]
       ),
@@ -1176,8 +1190,9 @@ router.get('/reports/calls', async (req, res) => {
                 COUNT(*) FILTER (WHERE direction='inbound')::int AS inbound,
                 COUNT(*) FILTER (WHERE direction='missed')::int AS missed,
                 COUNT(*) FILTER (WHERE source <> 'manual')::int AS measured,
-                COUNT(*) FILTER (WHERE recording_url IS NOT NULL)::int AS recorded
-           FROM lead_activities WHERE kind='call' AND ${WINDOW('occurred_at', 1, 2)}`,
+                COUNT(*) FILTER (WHERE recording_url IS NOT NULL)::int AS recorded,
+                ${CALL_BREAKDOWN('a')}
+           FROM ${CALL_EVENTS} a WHERE ${WINDOW('occurred_at', 1, 2)}`,
         [from, to]
       ),
     ]);

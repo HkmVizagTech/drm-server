@@ -2603,3 +2603,35 @@ CREATE TABLE IF NOT EXISTS incoming_rings (
   dismissed_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_incoming_rings_user ON incoming_rings(user_id, started_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- One row per link a caller sent from DRM (Send on WhatsApp). Its token rides
+-- on the link as utm_campaign, comes back on the donation, and credits the
+-- caller who SENT it - their own links and the temple's shared ones alike.
+-- See services/linkCredits.ts. (A link an admin assigned to one caller in
+-- Calling settings keeps its own token and credits that caller, as before.)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS link_sends (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  token VARCHAR(24) NOT NULL UNIQUE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+  link_id UUID REFERENCES crm_links(id) ON DELETE SET NULL,
+  url TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_link_sends_user ON link_sends(user_id, created_at DESC);
+
+-- A link's own UTM values, read from its URL, so a donation that comes back
+-- carrying them can be matched to the caller whose link it is (a caller's own
+-- links in My links, shared anywhere - status, groups, social media). Kept in
+-- step by routes/crmLinks.ts; filled here once for links saved before.
+ALTER TABLE crm_links ADD COLUMN IF NOT EXISTS utm_source VARCHAR(120);
+ALTER TABLE crm_links ADD COLUMN IF NOT EXISTS utm_medium VARCHAR(120);
+ALTER TABLE crm_links ADD COLUMN IF NOT EXISTS utm_campaign VARCHAR(120);
+UPDATE crm_links SET
+  utm_source   = NULLIF(lower(substring(url from '[?&]utm_source=([^&#]*)')), ''),
+  utm_medium   = NULLIF(lower(substring(url from '[?&]utm_medium=([^&#]*)')), ''),
+  utm_campaign = NULLIF(lower(substring(url from '[?&]utm_campaign=([^&#]*)')), '')
+ WHERE utm_source IS NULL AND utm_medium IS NULL AND utm_campaign IS NULL AND url ~* 'utm_';
+CREATE INDEX IF NOT EXISTS idx_crm_links_utm_campaign ON crm_links(utm_campaign) WHERE utm_campaign IS NOT NULL;

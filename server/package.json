@@ -32,6 +32,8 @@
     "test:dialer": "tsx scripts/test-dialer.ts",
     "test:sankalpreplace": "tsx scripts/test-sankalpam-replace.ts",
     "test:incoming": "tsx scripts/test-incoming.ts",
+    "test:calltotals": "tsx scripts/test-call-totals.ts",
+    "test:linkcredits": "tsx scripts/test-link-credits.ts",
     "test:phoneapp": "tsx scripts/test-phone-app.ts",
     "test:paging": "tsx scripts/test-abandoned-paging.ts",
     "bench:abandoned": "tsx scripts/bench-abandoned.ts",

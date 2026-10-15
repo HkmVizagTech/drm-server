@@ -23,6 +23,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { currency, number } from "@/lib/format";
 import {
   Alert,
   Badge,
@@ -56,19 +57,34 @@ interface LinkRow {
   sort_order: number;
   active: boolean;
   use_count: number;
+  /** The link's utm_campaign: on an own link, the caller's code. */
+  utm_campaign?: string | null;
+  /** An own link whose code is this caller's alone: payments with it count for them. */
+  tracked?: boolean;
+  /** What has come in through it for this caller. */
+  raised?: string | number;
+  payments?: number;
 }
 
 /**
- * Whether this link is earning, and for whom.
+ * Who the money through this link counts for.
  *
- * Worth a caller seeing on their own list: a preset of theirs that credits
- * nobody looks identical to one that credits them, right up until the month's
- * figures come out and the donations they remember sending are attached to no
- * one. Read-only, because the endpoint behind it is admin-only and a control
- * that answered 403 every time would be worse than none.
+ * A link nobody was assigned counts for whoever sends it from DRM (each send
+ * carries its own tracking code - server/src/services/linkCredits.ts). One an
+ * admin assigned in Calling settings counts for that caller, whoever sends it.
+ * Read-only here: assigning is admin-only.
  */
 function CreditBadge({ link, youId }: { link: LinkRow; youId?: string }) {
-  if (!link.credit_user_id) return null;
+  if (!link.credit_user_id) {
+    // An own link counts for its owner only with a code of their own (the
+    // line under it says so, with the fix).
+    if (link.owner_user_id && !link.tracked) return null;
+    return (
+      <Badge tone="good" icon="rupee">
+        {link.owner_user_id ? "Counts for you" : "Counts for whoever sends it from DRM"}
+      </Badge>
+    );
+  }
   const yours = link.credit_user_id === youId;
   return (
     <Badge tone={yours ? "good" : "neutral"} icon="rupee">
@@ -114,6 +130,16 @@ export default function MyLinksPage() {
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save. Try again.");
+    }
+  }
+
+  /** Give an own link a utm_campaign of the caller's own. */
+  async function track(l: LinkRow) {
+    try {
+      await apiClient.post(`/api/crm/links/${l.id}/track`, {});
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not add your code. Try again.");
     }
   }
 
@@ -256,6 +282,30 @@ export default function MyLinksPage() {
                     <p className="truncate text-xs text-ink-muted" title={l.url}>
                       {l.url}
                     </p>
+                    {/* Shared anywhere - status, groups, social media - a
+                        payment carrying this code counts for the caller. */}
+                    {l.tracked ? (
+                      <p className="mt-1 text-xs text-ink-soft">
+                        Your code <code className="rounded bg-sunken px-1 py-px font-mono text-[11px] text-ink">{l.utm_campaign}</code>
+                        {" · "}
+                        {Number(l.payments ?? 0) > 0 ? (
+                          <span className="font-medium text-good">
+                            {currency(Number(l.raised ?? 0))} from {number(Number(l.payments))} payment{l.payments === 1 ? "" : "s"}
+                          </span>
+                        ) : (
+                          "no payments yet"
+                        )}
+                      </p>
+                    ) : (
+                      <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-warn">
+                        {l.utm_campaign
+                          ? `Its code (${l.utm_campaign}) is also used by another link, so payments can't be counted for you.`
+                          : "No tracking code, so payments through it can't be counted for you."}
+                        <button type="button" onClick={() => void track(l)} className="font-semibold text-brand-700 hover:underline">
+                          Add my code
+                        </button>
+                      </p>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-1 whitespace-nowrap">
@@ -389,6 +439,9 @@ function LinkForm({
           placeholder="https://harekrishnavizag.org/govardhan?utm_source=call&utm_medium=whatsapp&utm_campaign=govardhan-2026"
           className="text-xs"
         />
+        <p className="mt-1 text-xs text-ink-muted">
+          Share it anywhere. Payments with its utm_campaign count for you. Leave utm_campaign out and DRM adds your own.
+        </p>
       </Field>
 
       <Field label="Message">

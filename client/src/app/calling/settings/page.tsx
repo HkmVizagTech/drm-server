@@ -919,7 +919,7 @@ function LinksSection() {
                         className="min-w-[10rem]"
                         ariaLabel={`${l.label} counts for`}
                         options={[
-                          { value: "", label: "No one" },
+                          { value: "", label: "Whoever sends it" },
                           ...users.map((u) => ({ value: u.id, label: u.name })),
                         ]}
                       />
@@ -928,7 +928,7 @@ function LinksSection() {
                         {l.credit_user_name}
                       </Badge>
                     ) : (
-                      <span className="text-xs text-ink-faint">No one</span>
+                      <span className="text-xs text-ink-faint">Whoever sends it</span>
                     )}
                     {/* The token is a diagnostic, not something anybody types:
                         it is here so that "why was this donation not credited"

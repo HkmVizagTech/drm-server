@@ -43,6 +43,7 @@ import { randomBytes } from 'crypto';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import { greetName } from '../utils/greetName';
+import { codeTakenBy, mintSendToken, personalCode, utmOf, withCampaign } from '../services/linkCredits';
 
 const router = Router();
 router.use(authenticate);
@@ -69,6 +70,41 @@ function fill(template: string, vars: Record<string, string>): string {
 /* ------------------------------------------------------------------- links */
 
 /**
+ * A link's URL as it is saved, and its UTM values.
+ *
+ * A caller's OWN link (My links) is how payments find their way to that caller
+ * when they share it anywhere - WhatsApp status, a group, social media - so it
+ * must carry a utm_campaign that is theirs alone (services/linkCredits.ts):
+ *   - none on the URL: DRM adds one ("radha-gau-seva");
+ *   - one another caller's link or a temple link already uses: refused, since
+ *     a payment carrying it could not be told apart.
+ * A shared (temple) link is saved as typed.
+ */
+async function prepareUrl(
+  url: string,
+  label: string,
+  ownerId: string | null,
+  linkId: string | null
+): Promise<{ url: string; utm: ReturnType<typeof utmOf> } | { error: string }> {
+  let utm = utmOf(url);
+  if (!ownerId) return { url, utm };
+  if (!utm.campaign) {
+    const code = await personalCode(pool, ownerId, label, linkId);
+    url = withCampaign(url, code);
+    utm = utmOf(url);
+    return { url, utm };
+  }
+  const taken = await codeTakenBy(pool, utm.campaign, ownerId, linkId);
+  if (taken) {
+    const suggest = await personalCode(pool, ownerId, label, linkId);
+    return {
+      error: `utm_campaign=${utm.campaign} is already used by ${taken}, so payments through it could not be told apart. Use one only you use, like utm_campaign=${suggest} - or leave it out and DRM adds yours.`,
+    };
+  }
+  return { url, utm };
+}
+
+/**
  * GET /links - what this caller can send.
  *
  * Shared links plus their own. Ordered by sort_order and then by how often each
@@ -78,7 +114,18 @@ function fill(template: string, vars: Record<string, string>): string {
 router.get('/links', async (req, res) => {
   try {
     const rows = await pool.query(
-      `SELECT l.*, u.name AS owner_name, cu.name AS credit_user_name
+      `SELECT l.*, u.name AS owner_name, cu.name AS credit_user_name,
+              -- An own link whose utm_campaign is this caller's alone: payments
+              -- carrying it count for them (services/linkCredits.ts).
+              (l.owner_user_id IS NOT NULL AND l.utm_campaign IS NOT NULL AND NOT EXISTS (
+                 SELECT 1 FROM crm_links o
+                  WHERE o.utm_campaign = l.utm_campaign
+                    AND (o.owner_user_id IS NULL OR o.owner_user_id <> l.owner_user_id))) AS tracked,
+              -- What has come in through it, for this caller.
+              (SELECT COALESCE(SUM(c.amount), 0) FROM caller_credits c
+                WHERE c.link_id = l.id AND c.status = 'active' AND c.user_id = $1::uuid)::numeric AS raised,
+              (SELECT COUNT(*) FROM caller_credits c
+                WHERE c.link_id = l.id AND c.status = 'active' AND c.user_id = $1::uuid)::int AS payments
          FROM crm_links l
          LEFT JOIN users u ON l.owner_user_id = u.id
          -- Who the money goes to, which is a different person from the owner
@@ -129,25 +176,32 @@ router.post('/links', async (req, res) => {
   }
 
   try {
+    const ownerId = b.shared === false ? req.user?.userId ?? null : null;
+    const prepared = await prepareUrl(url, label, ownerId, null);
+    if ('error' in prepared) return res.status(409).json({ error: prepared.error });
     const result = await pool.query(
-      `INSERT INTO crm_links (label, url, site, seva_name, message, owner_user_id, sort_order, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6::uuid,COALESCE($7::int, 500),$8::uuid)
+      `INSERT INTO crm_links (label, url, site, seva_name, message, owner_user_id, sort_order, created_by,
+                              utm_source, utm_medium, utm_campaign)
+       VALUES ($1,$2,$3,$4,$5,$6::uuid,COALESCE($7::int, 500),$8::uuid,$9,$10,$11)
        -- Null rather than absent, so every response that carries a link has the
        -- same shape and a screen reading credit_user_name does not have to tell
        -- "nobody is assigned" apart from "this endpoint forgot to say".
        RETURNING *, NULL::text AS credit_user_name`,
       [
         label,
-        url,
+        prepared.url,
         str(b.site, 20),
         str(b.seva_name, 120),
         str(b.message, 2000),
         // "Just for me" keeps one caller's experiment out of everyone's
         // dropdown; shared is the default because most links are the temple's,
         // not one person's.
-        b.shared === false ? req.user?.userId ?? null : null,
+        ownerId,
         b.sort_order ?? null,
         req.user?.userId ?? null,
+        prepared.utm.source,
+        prepared.utm.medium,
+        prepared.utm.campaign,
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -163,11 +217,25 @@ router.put('/links/:id', async (req, res) => {
     const refusal = await assertMayEdit(req.params.id, req.user?.userId ?? null);
     if (refusal) return res.status(refusal === 'Link not found' ? 404 : 403).json({ error: refusal });
 
+    // A new URL: its UTM values again, and for an own link a code of its own.
+    let newUrl = str(b.url, 2000);
+    let utm: ReturnType<typeof utmOf> | null = null;
+    if (newUrl) {
+      const cur = await pool.query(`SELECT owner_user_id, label FROM crm_links WHERE id = $1`, [req.params.id]);
+      const prepared = await prepareUrl(newUrl, str(b.label, 80) ?? cur.rows[0].label, cur.rows[0].owner_user_id, req.params.id);
+      if ('error' in prepared) return res.status(409).json({ error: prepared.error });
+      newUrl = prepared.url;
+      utm = prepared.utm;
+    }
+
     const result = await pool.query(
       `WITH upd AS (
          UPDATE crm_links SET
            label      = COALESCE($1, label),
            url        = COALESCE($2, url),
+           utm_source   = CASE WHEN $2::text IS NULL THEN utm_source ELSE $9 END,
+           utm_medium   = CASE WHEN $2::text IS NULL THEN utm_medium ELSE $10 END,
+           utm_campaign = CASE WHEN $2::text IS NULL THEN utm_campaign ELSE $11 END,
            site       = COALESCE($3, site),
            seva_name  = COALESCE($4, seva_name),
            message    = COALESCE($5, message),
@@ -180,13 +248,16 @@ router.put('/links/:id', async (req, res) => {
          FROM upd LEFT JOIN users cu ON cu.id = upd.credit_user_id`,
       [
         str(b.label, 80),
-        str(b.url, 2000),
+        newUrl,
         str(b.site, 20),
         str(b.seva_name, 120),
         str(b.message, 2000),
         b.sort_order ?? null,
         typeof b.active === 'boolean' ? b.active : null,
         req.params.id,
+        utm?.source ?? null,
+        utm?.medium ?? null,
+        utm?.campaign ?? null,
       ]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Link not found' });
@@ -424,14 +495,34 @@ router.post('/leads/:id/send-link', async (req, res) => {
     const caller = String(L.caller_name ?? '').trim();
     const amount = b.amount ?? L.expected_amount ?? null;
 
+    // WHO THE MONEY COUNTS FOR. A link an admin assigned to one caller keeps
+    // its own code and credits that caller, as it always has. Every other
+    // send - a caller's own links, shared links nobody was assigned, a URL
+    // typed into the box - gets a code of its own that credits whoever sent
+    // it (services/linkCredits.ts). Before this, those carried no code and
+    // the money through them was credited to nobody.
+    const assigned = link?.credit_user_id && link?.credit_token ? (link.credit_token as string) : null;
+    // The sender's own link with their own utm_campaign keeps it: payments
+    // through it already count for them, wherever else they shared it.
+    const ownCode =
+      !assigned && link?.owner_user_id && link.owner_user_id === req.user?.userId && link.utm_campaign
+        ? !(await codeTakenBy(pool, String(link.utm_campaign), String(link.owner_user_id), String(link.id)))
+        : false;
+    const sendToken = assigned || ownCode ? null : mintSendToken();
     const url = withCreditToken(
       fill(rawUrl, {
         phone: L.phone,
         lead: String(L.id).slice(0, 8),
         caller: caller.replace(/\s+/g, '-').toLowerCase(),
       }),
-      (link?.credit_token as string | null) ?? null
+      assigned ?? sendToken
     );
+    if (sendToken && req.user?.userId) {
+      await pool.query(
+        `INSERT INTO link_sends (token, user_id, lead_id, link_id, url) VALUES ($1, $2, $3, $4, $5)`,
+        [sendToken, req.user.userId, L.id, (link?.id as string | undefined) ?? null, url.slice(0, 2000)]
+      );
+    }
 
     // A caller who edited the text in the box gets exactly what they typed.
     const rawMessage =
@@ -482,6 +573,34 @@ router.post('/leads/:id/send-link', async (req, res) => {
 });
 
 /**
+ * POST /links/:id/track - give one of my links a utm_campaign of my own, so
+ * payments through it count for me. For a link saved before DRM did this, or
+ * whose code another caller also uses.
+ */
+router.post('/links/:id/track', async (req, res) => {
+  const me = req.user?.userId ?? null;
+  try {
+    const cur = await pool.query(`SELECT label, url, owner_user_id FROM crm_links WHERE id = $1`, [req.params.id]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Link not found' });
+    if (!me || cur.rows[0].owner_user_id !== me) {
+      return res.status(403).json({ error: 'Only your own links can carry your tracking code.' });
+    }
+    const code = await personalCode(pool, me, String(cur.rows[0].label), req.params.id);
+    const url = withCampaign(String(cur.rows[0].url), code);
+    const utm = utmOf(url);
+    const r = await pool.query(
+      `UPDATE crm_links SET url = $2, utm_source = $3, utm_medium = $4, utm_campaign = $5, updated_at = NOW()
+        WHERE id = $1 RETURNING *`,
+      [req.params.id, url, utm.source, utm.medium, utm.campaign]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('crm.trackLink error:', err);
+    res.status(500).json({ error: 'Could not add your code' });
+  }
+});
+
+/**
  * POST /links/:id/copy - take a shared link and make it mine.
  *
  * The common way a caller ends up with a preset: the temple's Gau Seva link is
@@ -492,6 +611,16 @@ router.post('/leads/:id/send-link', async (req, res) => {
  */
 router.post('/links/:id/copy', async (req, res) => {
   try {
+    const me = req.user?.userId ?? null;
+    const src = await pool.query(`SELECT label, url FROM crm_links WHERE id = $1`, [req.params.id]);
+    if (!src.rows.length) return res.status(404).json({ error: 'Link not found' });
+    const label = str(req.body?.label, 80) ?? `${src.rows[0].label} (mine)`;
+    // The copy gets a utm_campaign of the caller's own, in place of the
+    // temple link's, so payments through it count for them wherever they
+    // share it (services/linkCredits.ts).
+    const code = me ? await personalCode(pool, me, String(src.rows[0].label)) : null;
+    const url = code ? withCampaign(String(src.rows[0].url), code) : String(src.rows[0].url);
+    const utm = utmOf(url);
     const result = await pool.query(
       // The credit columns are deliberately not among the ones copied. A
       // credit_token is unique and identifies ONE link, so duplicating it would
@@ -499,11 +628,12 @@ router.post('/links/:id/copy', async (req, res) => {
       // either: copying a link assigned to Ana would otherwise hand her the
       // money from every link anybody made out of hers. A copy starts
       // unassigned, and an admin assigns it on purpose.
-      `INSERT INTO crm_links (label, url, site, seva_name, message, owner_user_id, sort_order, created_by)
-       SELECT COALESCE($2, label || ' (mine)'), url, site, seva_name, message, $3::uuid, 0, $3::uuid
+      `INSERT INTO crm_links (label, url, site, seva_name, message, owner_user_id, sort_order, created_by,
+                              utm_source, utm_medium, utm_campaign)
+       SELECT $2, $4, site, seva_name, message, $3::uuid, 0, $3::uuid, $5, $6, $7
          FROM crm_links WHERE id = $1
        RETURNING *, NULL::text AS credit_user_name`,
-      [req.params.id, str(req.body?.label, 80), req.user?.userId ?? null]
+      [req.params.id, label, me, url, utm.source, utm.medium, utm.campaign]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Link not found' });
     res.status(201).json(result.rows[0]);

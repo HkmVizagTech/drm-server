@@ -25,6 +25,7 @@ import { registerName } from './personNames';
 import { alignQrDonationDate } from './qrDonationDate';
 import { recordCredit } from './credits';
 import { addressValues, fromHkmvSaved } from '../utils/address';
+import { creditLinkSend, creditUtmLink } from './linkCredits';
 
 export interface HkmvDonorPayload {
   externalId?: string;
@@ -213,6 +214,8 @@ async function creditAssignedLink(
     amount: number | string;
     occurredAt: Date | string;
     utmCampaign: string | null;
+    utmSource?: string | null;
+    utmMedium?: string | null;
   }
 ): Promise<void> {
   const token = String(donation.utmCampaign ?? '').trim();
@@ -220,6 +223,13 @@ async function creditAssignedLink(
 
   try {
     await client.query('SAVEPOINT credit_link');
+
+    // A link sent from DRM carries a code for that one send: credit the
+    // caller who sent it (services/linkCredits.ts).
+    if (await creditLinkSend(client, { ...donation, token })) {
+      await client.query('RELEASE SAVEPOINT credit_link');
+      return;
+    }
 
     // credit_user_id IS NOT NULL in the WHERE, not checked afterwards: a link
     // that has a token but nobody assigned is the normal state of a link that
@@ -229,10 +239,13 @@ async function creditAssignedLink(
         WHERE credit_token = $1 AND credit_user_id IS NOT NULL`,
       [token]
     );
-    // Most donations land here: every seeded link carries utm_campaign=calling
-    // and donors arrive through campaigns DRM has never heard of. Not a match
-    // is the ordinary case, not a problem, and says nothing worth logging.
+    // Not an admin-assigned link: perhaps a caller's own link from My links,
+    // shared somewhere DRM never saw, matched by its UTM values
+    // (services/linkCredits.ts). Most donations match nothing at all - every
+    // seeded link carries utm_campaign=calling and donors arrive through
+    // campaigns DRM has never heard of - which is the ordinary case.
     if (!found.rows.length) {
+      await creditUtmLink(client, donation);
       await client.query('RELEASE SAVEPOINT credit_link');
       return;
     }
@@ -346,7 +359,7 @@ async function upsertDonation(
      -- in hand. They differ in the cases that matter: utm_campaign is
      -- truncated on the way in, and created_at is NOT in the DO UPDATE list,
      -- so on a re-sync it is still the moment the donation first arrived.
-     RETURNING id, amount, created_at, utm_campaign`,
+     RETURNING id, amount, created_at, utm_campaign, utm_source, utm_medium`,
     [
       personId,
       d.amount,
@@ -404,6 +417,8 @@ async function upsertDonation(
     amount: donationResult.rows[0].amount,
     occurredAt,
     utmCampaign: donationResult.rows[0].utm_campaign,
+    utmSource: donationResult.rows[0].utm_source,
+    utmMedium: donationResult.rows[0].utm_medium,
   });
 
   if (d.prasadam) {

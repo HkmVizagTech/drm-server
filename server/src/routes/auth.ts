@@ -18,6 +18,7 @@ import bcrypt from 'bcryptjs';
 import pool from '../db/pool';
 import { generateToken, authenticate, authorize } from '../middleware/auth';
 import type { UserRole } from '../types';
+import { CALL_EVENTS } from '../services/callEvents';
 
 const router = Router();
 
@@ -265,8 +266,9 @@ router.get('/users', authenticate, authorize('admin'), async (_req, res) => {
             WHERE le.assigned_to = u.id
          ) l ON TRUE
          LEFT JOIN LATERAL (
-           SELECT COUNT(*)::int AS calls_7d FROM lead_activities a
-            WHERE a.user_id = u.id AND a.kind = 'call' AND a.created_at > NOW() - INTERVAL '7 days'
+           -- Every call, the same as the reports (services/callEvents.ts).
+           SELECT COUNT(*)::int AS calls_7d FROM ${CALL_EVENTS} a
+            WHERE a.user_id = u.id AND a.occurred_at > NOW() - INTERVAL '7 days'
          ) c ON TRUE
         ORDER BY u.active DESC, u.name`
     );

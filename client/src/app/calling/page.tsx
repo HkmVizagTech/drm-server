@@ -86,6 +86,11 @@ interface Dashboard {
   };
   calls: {
     made: number;
+    /**
+     * Where "made" comes from: every call, once - saved in DRM, seen only by
+     * the phone app, incoming, missed and Sankalpam (server/src/services/callEvents.ts).
+     */
+    breakdown?: { outgoing: number; incoming: number; missed: number; sankalpam: number; not_saved: number };
     connected: number;
     unanswered: number;
     connect_rate: number;
@@ -208,6 +213,21 @@ function mins(seconds: number | null): string {
 
 // The period lives in the URL, so opening a tile and pressing Back returns
 // to the same period. useSearchParams needs a Suspense boundary.
+/** Under "Calls made": what the total is made of, when it is more than outgoing calls. */
+function callsSub(c: Dashboard["calls"]): string {
+  const b = c.breakdown;
+  const people = `to ${number(c.leads_touched)} ${c.leads_touched === 1 ? "person" : "people"}`;
+  if (!b || b.incoming + b.missed + b.sankalpam === 0) return people;
+  return [
+    `${number(b.outgoing)} out`,
+    b.incoming ? `${number(b.incoming)} in` : "",
+    b.missed ? `${number(b.missed)} missed` : "",
+    b.sankalpam ? `${number(b.sankalpam)} Sankalpam` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 export default function CallingDashboardPage() {
   return (
     <Suspense fallback={null}>
@@ -382,7 +402,7 @@ function CallingDashboard() {
           value={number(c?.made ?? 0)}
           loading={loading}
           icon="phone"
-          sub={c ? `to ${number(c.leads_touched)} ${c.leads_touched === 1 ? "person" : "people"}` : undefined}
+          sub={c ? callsSub(c) : undefined}
           href={callsLink()}
         />
         <StatTile
@@ -708,6 +728,22 @@ function CallingDashboard() {
           <Link href="/calling/collected" className="font-medium text-brand-700 hover:underline">
             Collected by PhonePe
           </Link>
+        </Alert>
+      )}
+
+      {/* Calls the phone app saw that nobody saved a result for. Counted in
+          the total; saving the result is what makes them useful. */}
+      {c?.breakdown && c.breakdown.not_saved > 0 && (
+        <Alert
+          tone="info"
+          action={
+            <Link href="/calling/recordings" className="text-sm font-semibold text-brand-700 hover:underline">
+              See them
+            </Link>
+          }
+        >
+          {number(c.breakdown.not_saved)} {c.breakdown.not_saved === 1 ? "call was" : "calls were"} made on the phone
+          without saving what happened. {c.breakdown.not_saved === 1 ? "It is" : "They are"} counted in the calls made.
         </Alert>
       )}
 
