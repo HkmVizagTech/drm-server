@@ -12,6 +12,7 @@ import { useEffect, useState, FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { homeFor, useAuth } from "@/lib/auth-context";
 import { Alert, Button, Field, Input } from "@/components/ui";
+import { BrandMark } from "@/components/brand-mark";
 
 export default function LoginPage() {
   const { login, user, ready } = useAuth();
@@ -66,8 +67,8 @@ export default function LoginPage() {
 
       <div className="relative w-full max-w-sm">
         <div className="mb-7 text-center">
-          <span className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-panel bg-gradient-to-b from-brand-500 to-brand-700 text-xl font-bold text-white shadow-raised ring-1 ring-brand-800/40">
-            H
+          <span className="mx-auto mb-4 block w-fit">
+            <BrandMark className="h-14 w-14 shadow-raised" rounded="rounded-panel" />
           </span>
           <h1 className="text-2xl font-semibold tracking-tight text-ink">HKM Vizag</h1>
           <p className="mt-1 text-sm text-ink-muted">Donor manager</p>

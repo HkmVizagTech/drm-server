@@ -31,6 +31,7 @@ import { Icon } from "./icons";
 import { GlobalSearch } from "./global-search";
 import { Toaster } from "./toast";
 import { PhoneAppBridge } from "./phone-app-bridge";
+import { BrandMark } from "@/components/brand-mark";
 
 function Breadcrumb() {
   const pathname = usePathname();
@@ -146,9 +147,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             {/* The mark only appears on a phone, where the sidebar is hidden and
                 nothing else says which product this is. */}
             <Link href="/dashboard" className="flex min-w-0 items-center gap-2 lg:hidden">
-              <span className="grid h-7 w-7 flex-none place-items-center rounded-lg bg-gradient-to-b from-brand-500 to-brand-700 text-xs font-bold text-white shadow-button">
-                H
-              </span>
+              <BrandMark className="h-7 w-7" rounded="rounded-lg" />
               <span className="truncate text-sm font-semibold text-ink">HKM Vizag</span>
             </Link>
 

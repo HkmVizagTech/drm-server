@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Cream behind the temple on the opening screen. -->
+    <color name="splash_background">#FFF8EC</color>
+</resources>

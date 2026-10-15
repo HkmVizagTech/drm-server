@@ -6,6 +6,7 @@ import { useAuth } from "@/lib/auth-context";
 import { useCallingAlerts } from "./calling-alerts";
 import { Icon, type IconName } from "./icons";
 import { useInApp } from "@/lib/phone-app";
+import { BrandMark } from "@/components/brand-mark";
 
 // Grouped so the nav reads as "what am I looking at" vs "what do I need to do"
 // rather than one undifferentiated list of nine links.
@@ -213,12 +214,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           onClick={onNavigate}
           className="flex items-center gap-2.5 rounded-control outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
         >
-          {/* A ring and an inner highlight rather than a flat square. At 36px a
-              plain filled rectangle reads as a placeholder; this reads as a
-              mark. */}
-          <span className="grid h-9 w-9 flex-none place-items-center rounded-[11px] bg-gradient-to-b from-brand-500 to-brand-700 text-base font-bold text-white shadow-button ring-1 ring-brand-800/40">
-            H
-          </span>
+          <BrandMark className="h-9 w-9" />
           <span className="min-w-0">
             <span className="block truncate text-sm font-semibold leading-tight text-ink">
               HKM Vizag
