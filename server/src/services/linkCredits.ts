@@ -43,6 +43,19 @@ export function mintSendToken(): string {
   return `drm-s-${out}`;
 }
 
+/**
+ * A donation the donor made online - not one somebody entered by hand on a
+ * site's admin: counter cash, a PhonePe/UPI collection DRM raised a receipt
+ * for (which comes back from the site as its own donation), a QR receipt.
+ * Only an online payment can have come through a link; the hand-entered ones
+ * are already counted where they were recorded.
+ */
+const ONLINE = (d: string) => `(
+  COALESCE(${d}.source_page, '') NOT ILIKE 'admin%'
+  AND COALESCE(${d}.payment_mode, '') NOT IN ('cash', 'cheque', 'bank')
+  AND NOT EXISTS (SELECT 1 FROM collections col
+                   WHERE col.external_donation_id IS NOT NULL AND col.external_donation_id = ${d}.external_ref))`;
+
 /** Not a QR payment: those are credited through the payment itself. */
 const NOT_QR = (d: string) => `NOT EXISTS (
   SELECT 1 FROM qr_payments p
@@ -105,6 +118,7 @@ export async function creditRecentLinkSends(db: { query: PoolClient['query'] } =
         AND COALESCE(d.amount, 0) > 0
         AND NOT EXISTS (SELECT 1 FROM caller_credits c WHERE c.donation_id = d.id AND c.status = 'active')
         AND ${NOT_QR('d')}
+        AND ${ONLINE('d')}
       -- The latest send before they paid: the link they acted on.
       ORDER BY d.id, a.occurred_at DESC`
   );
@@ -295,4 +309,38 @@ export async function creditUtmLinks(db: Db = pool): Promise<number> {
     if (done) n++;
   }
   return n;
+}
+
+/**
+ * Keep collections and link credits straight. Run before the credits above.
+ *
+ *   1. A "Donated within 7 days of being sent a link" credit on a donation
+ *      that was entered by hand (see ONLINE) is undone. Before ONLINE existed,
+ *      a PhonePe collection whose receipt DRM raised came back from the site as
+ *      a donation, looked uncredited, and was counted a second time as a link
+ *      payment for whoever had sent that donor a link.
+ *   2. A collection's credit is tied to the donation its receipt created on
+ *      the site, once that donation has synced back - so the donation reads as
+ *      credited (nothing else claims it) and its receipt number shows beside
+ *      the collection.
+ * Returns how many it changed.
+ */
+export async function tidyLinkCredits(db: Db = pool): Promise<number> {
+  const undone = await db.query(
+    `UPDATE caller_credits c
+        SET status = 'reversed', reversed_at = NOW(),
+            reversed_reason = 'Not a link payment: entered by hand on the site (a PhonePe or UPI collection, or a counter entry), and counted where it was recorded.'
+      WHERE c.kind = 'link' AND c.status = 'active'
+        AND c.note LIKE 'Donated within % days of being sent a link%'
+        AND EXISTS (SELECT 1 FROM donations d WHERE d.id = c.donation_id AND NOT ${ONLINE('d')})`
+  );
+  const tied = await db.query(
+    `UPDATE caller_credits c SET donation_id = d.id
+       FROM collections col
+       JOIN donations d ON d.external_ref = col.external_donation_id
+      WHERE col.credit_id = c.id AND c.donation_id IS NULL AND c.status = 'active'
+        AND col.external_donation_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM caller_credits x WHERE x.donation_id = d.id AND x.status = 'active')`
+  );
+  return (undone.rowCount ?? 0) + (tied.rowCount ?? 0);
 }

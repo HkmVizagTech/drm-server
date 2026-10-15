@@ -46,7 +46,7 @@ import {
 // counts as callable changes the queue and every list's count together.
 import { CALLABLE, DUE_NOW, FROM_DONATIONS_PAGE, LIST_MATCH, NOT_CLAIMED_BY_OTHERS, listPredicate, loadList, maxAttempts } from './crmLists';
 import { GIVEN } from '../services/leadGiven';
-import { creditRecentLinkSends, creditUtmLinks } from '../services/linkCredits';
+import { creditRecentLinkSends, creditUtmLinks, tidyLinkCredits } from '../services/linkCredits';
 
 const router = Router();
 router.use(authenticate);
@@ -133,7 +133,13 @@ async function reconcileConversions(force = false): Promise<number> {
   // Payments through links callers sent, credited to the sender BEFORE the
   // conversion below credits the lead's assigned caller - the one who sent
   // the link did the work (services/linkCredits.ts).
-  // First, payments carrying the UTM of a caller's own link (My links).
+  // Collections tied to their donations, and link credits that were really
+  // hand-entered donations undone - before anything below looks for money
+  // nobody has claimed.
+  await tidyLinkCredits().catch((e) =>
+    console.error('crm.reconcileConversions tidy link credits failed:', (e as Error).message)
+  );
+  // Then payments carrying the UTM of a caller's own link (My links).
   await creditUtmLinks().catch((e) =>
     console.error('crm.reconcileConversions UTM link credits failed:', (e as Error).message)
   );

@@ -12,7 +12,8 @@ import crmRoutes from '../src/routes/crm';
 import crmLinksRoutes from '../src/routes/crmLinks';
 import crmReportsRoutes from '../src/routes/crmReports';
 import { upsertDonorSnapshot } from '../src/services/hkmvSync';
-import { creditRecentLinkSends, creditUtmLinks } from '../src/services/linkCredits';
+import { recordCredit } from '../src/services/credits';
+import { creditRecentLinkSends, creditUtmLinks, tidyLinkCredits } from '../src/services/linkCredits';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
 if (!/_test$/.test(dbName)) {
@@ -70,7 +71,7 @@ async function main() {
   const server = app.listen(0);
   await new Promise((r) => server.once('listening', r));
   base = `http://127.0.0.1:${(server.address() as any).port}`;
-  await pool.query(`TRUNCATE link_sends, caller_credits, crm_links, lead_activities, donations, people, leads, users RESTART IDENTITY CASCADE`);
+  await pool.query(`TRUNCATE link_sends, collections, caller_credits, crm_links, lead_activities, donations, people, leads, users RESTART IDENTITY CASCADE`);
   await pool.query(
     `INSERT INTO users (id, name, email, password_hash, role) VALUES ($1,'Admin','a@t','x','admin'), ($2,'Ana','ana@t','x','caller'), ($3,'Bhavin','b@t','x','caller')`,
     [ADMIN, ANA, BHAVIN]
@@ -198,6 +199,45 @@ async function main() {
   const sentOwn = await req('POST', `/api/crm/leads/${l2}/send-link`, as(ANA), { link_id: own.id });
   check('sending her own link from DRM keeps her code', new URL(sentOwn.url).searchParams.get('utm_campaign') === 'ana-diwali', sentOwn.url);
   check("Bhavin cannot put his code on Ana's link", (await req('POST', `/api/crm/links/${own.id}/track`, as(BHAVIN))).status === 403);
+
+  console.log('\n11. a PhonePe collection whose receipt DRM raised comes back from the site');
+  // Manas (here Bhavin) collected ₹5,551 by PhonePe; Ana had sent this donor a link two days before.
+  const donorLead = await lead('9820085002', 'Dharmapuri Chekkala', BHAVIN);
+  await pool.query(
+    `INSERT INTO lead_activities (lead_id, user_id, kind, note, to_value, occurred_at)
+     VALUES ($1, $2, 'whatsapp', 'link', 'https://harekrishnavizag.org/annadan', NOW() - INTERVAL '2 days')`,
+    [donorLead, ANA]
+  );
+  const col = await recordCredit({ kind: 'offline', userId: BHAVIN, amount: 5551, occurredAt: new Date().toISOString(), note: 'Dharmapuri Chekkala, collected by PhonePe' });
+  await pool.query(
+    `INSERT INTO collections (credit_id, donor_name, donor_phone, method, reference, receipt_status, receipt_number, external_donation_id)
+     VALUES ($1, 'Dharmapuri Chekkala', '9820085002', 'phonepe', '628819282189', 'issued', 'HKMI|2026|D|VSP|13932', 'site-don-13932')`,
+    [col!.id]
+  );
+  // The site's copy, as the sync brings it in: entered on the admin, no UTM.
+  await upsertDonorSnapshot(
+    { donor: { name: 'Dharmapuri Chekkala', mobile: '9820085002', donorSince: new Date().toISOString() },
+      donations: [{ externalId: 'site-don-13932', amount: 5551, type: 'Annadana Seva', status: 'completed', createdAt: new Date().toISOString(),
+                    isRecurring: false, sourcePage: 'admin-manual', paymentMode: 'upi' } as never] },
+    'hkmv'
+  );
+  await creditRecentLinkSends();
+  check('it is not counted again as a link payment', !(await credits(ANA)).some((x: any) => x.amount === 5551), await credits(ANA));
+  await tidyLinkCredits();
+  const colRow = (await pool.query(`SELECT donation_id FROM caller_credits WHERE id = $1`, [col!.id])).rows[0];
+  const siteDon = (await pool.query(`SELECT id FROM donations WHERE external_ref = 'site-don-13932'`)).rows[0];
+  check("the collection's credit is tied to the site's donation", colRow.donation_id === siteDon.id, { colRow, siteDon });
+  check('so the money counts once, for Bhavin', (await pool.query(`SELECT COUNT(*)::int AS n FROM caller_credits WHERE amount = 5551 AND status = 'active'`)).rows[0].n === 1);
+
+  console.log('\n12. one already counted twice (before this fix) is undone');
+  await pay('9100000099', 2222, null, 'Counter Donor');
+  const counter = (await pool.query(`SELECT id FROM donations WHERE amount = 2222`)).rows[0].id;
+  await pool.query(`UPDATE donations SET source_page = 'admin-manual' WHERE id = $1`, [counter]);
+  await recordCredit({ kind: 'link', userId: ANA, amount: 2222, occurredAt: new Date().toISOString(), donationId: counter, note: 'Donated within 7 days of being sent a link (Counter Donor)' });
+  await tidyLinkCredits();
+  const wrong = (await pool.query(`SELECT status, reversed_reason FROM caller_credits WHERE donation_id = $1`, [counter])).rows[0];
+  check('reversed, with the reason', wrong.status === 'reversed' && /entered by hand/.test(wrong.reversed_reason), wrong);
+  check('online link payments are left alone', (await credits(ANA)).some((x: any) => x.amount === 251));
 
   server.close();
   await pool.end();
