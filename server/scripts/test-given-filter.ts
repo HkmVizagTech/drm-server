@@ -1,5 +1,5 @@
 // "Only ring the people who have given at least ₹500" - on Leads, in a run
-// started from Leads, and on a calling list.
+// started from Leads, on a calling list, and on Start calling.
 //
 //   DATABASE_URL=postgresql://localhost/drm_test npx tsx scripts/test-given-filter.ts
 
@@ -10,6 +10,7 @@ import pool from '../src/db/pool';
 import { generateToken } from '../src/middleware/auth';
 import crmRoutes from '../src/routes/crm';
 import crmListsRoutes from '../src/routes/crmLists';
+import crmSessionsRoutes from '../src/routes/crmSessions';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
 if (!/_test$/.test(dbName)) {
@@ -21,6 +22,7 @@ const app = express();
 app.use(express.json());
 app.use('/api/crm', crmRoutes);
 app.use('/api/crm', crmListsRoutes);
+app.use('/api/crm', crmSessionsRoutes);
 let base = '';
 const ADMIN = '11111111-1111-1111-1111-111111111111';
 const token = generateToken({ userId: ADMIN, role: 'admin' } as never);
@@ -32,6 +34,24 @@ function get(path: string) {
       res.on('data', (c) => (d += c));
       res.on('end', () => resolve(JSON.parse(d || '{}')));
     }).on('error', reject);
+  });
+}
+
+function post(path: string, body: unknown) {
+  return new Promise<any>((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const u = new URL(`${base}${path}`);
+    const r = http.request(
+      { hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } },
+      (res) => {
+        let d = '';
+        res.on('data', (c) => (d += c));
+        res.on('end', () => resolve({ status: res.statusCode, ...JSON.parse(d || '{}') }));
+      }
+    );
+    r.on('error', reject);
+    r.end(data);
   });
 }
 
@@ -86,6 +106,40 @@ async function main() {
   )).rows[0].id;
   const listed = await ids(`list=${cl}`);
   check('a calling list with "given at least ₹1,000" uses the same rule', listed.size === 3 && listed.has(site) && listed.has(afterCall) && listed.has(big), [...listed]);
+
+  // ---- Start calling: the "Given at least" chips
+  await pool.query(`TRUNCATE calling_sessions, lead_reminders CASCADE`);
+  const all = (await pool.query(
+    `INSERT INTO calling_lists (name, import_batch_id, created_by) VALUES ('Janmashtami sheet', $1, $2) RETURNING id`,
+    [batch, ADMIN]
+  )).rows[0].id;
+  const card = (r: any) => (r.lists ?? []).find((l: any) => l.list_id === all);
+  const plain = await get(`/api/crm/sessions/sources`);
+  const at2000 = await get(`/api/crm/sessions/sources?min_given=2000`);
+  check('Start calling: the sheet card holds all 5 with "Any amount"', card(plain)?.count === 5, card(plain));
+  check('Start calling: ₹2,000+ narrows the sheet card to 1', card(at2000)?.count === 1 && at2000.min_given === 2000, card(at2000));
+  check('Start calling: ₹2,000+ narrows "Everyone due" too', at2000.sources.find((s: any) => s.kind === 'everything')?.count === 2, at2000.sources);
+  const promised = (await pool.query(
+    `INSERT INTO lead_reminders (lead_id, title, due_at, status) VALUES ($1, 'Promised', NOW() - INTERVAL '1 hour', 'open') RETURNING id`, [never]
+  )).rowCount;
+  const p0 = (await get(`/api/crm/sessions/sources`)).sources.find((s: any) => s.kind === 'reminders')?.count;
+  const p2000 = (await get(`/api/crm/sessions/sources?min_given=2000`)).sources.find((s: any) => s.kind === 'reminders');
+  check('Promises due is never narrowed: a promise matters more than past giving', promised === 1 && p0 === 1 && p2000?.count === 1 && p2000?.key === 'reminders', { p0, p2000 });
+  check('Start calling: card keys carry the amount', card(at2000)?.key === `list:${all}|given:2000`, card(at2000)?.key);
+
+  const run = await post('/api/crm/sessions', { source: { kind: 'list', list_id: all, min_given: 1000 } });
+  const items = (await pool.query(`SELECT lead_id FROM calling_session_items WHERE session_id = $1`, [run.session?.id])).rows.map((r) => r.lead_id);
+  check('a run started at ₹1,000+ holds only those 3', run.status === 201 && items.length === 3 && items.includes(big) && items.includes(site) && items.includes(afterCall), { run: run.status, items });
+  check('its name says the amount', /gave ₹1,000\+$/.test(run.session?.label ?? run.session?.source_label ?? ''), run.session);
+  const again = await post('/api/crm/sessions', { source: { kind: 'list', list_id: all, min_given: 1000 } });
+  check('starting it again carries on with the same run', again.resumed === true && again.session?.id === run.session?.id, again);
+  const unfiltered = await post('/api/crm/sessions', { source: { kind: 'list', list_id: all } });
+  check('the same sheet with "Any amount" is a separate run of 5', unfiltered.status === 201 && unfiltered.session?.id !== run.session?.id && unfiltered.count === 5, unfiltered);
+  const openRuns = (await get(`/api/crm/sessions/sources?min_given=1000`)).open ?? [];
+  const mine = openRuns.find((o: any) => o.id === run.session?.id);
+  check('the open run remembers its amount (for Start over)', mine?.min_given === 1000 && mine?.key === `list:${all}|given:1000`, openRuns);
+  const bad = await post('/api/crm/sessions', { source: { kind: 'list', list_id: all, min_given: 'lots' } });
+  check('a nonsense amount is ignored, not an error', bad.resumed === true && bad.session?.id === unfiltered.session?.id, bad);
 
   server.close();
   await pool.end();

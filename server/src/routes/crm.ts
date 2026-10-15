@@ -2588,7 +2588,7 @@ async function logCallForLead(
     // Settings because the right gap differs by campaign - a festival appeal
     // three days out cannot wait a week between attempts.
     const retry = await client.query(`SELECT value FROM crm_settings WHERE key = 'retry_after_days'`);
-    const retryAfterDays = Math.max(1, Math.min(90, Number(retry.rows[0]?.value ?? 2)));
+    const retryAfterDays = Math.max(1, Math.min(90, Number(retry.rows[0]?.value ?? 1)));
 
     const updated = await client.query(
       `UPDATE leads SET
@@ -2611,9 +2611,15 @@ async function logCallForLead(
              -- NOT: keeping it is what left a "No answer" on an overdue
              -- callback overdue for ever - first in the queue every time,
              -- rung again within the minute.
+             --
+             -- The retry lands at 10am IST on that day (the session runs in
+             -- IST, db/pool.ts), the same time as the "Tomorrow" button. It
+             -- used to be NOW() plus the days, so a "No answer" at 4pm came
+             -- back at 4pm - not in the morning, when the day's calling starts
+             -- and the follow-up list is read.
              WHEN $5::boolean THEN CASE
                WHEN next_follow_up_at > NOW() THEN next_follow_up_at
-               ELSE NOW() + ($9::int || ' days')::interval END
+               ELSE date_trunc('day', NOW()) + ($9::int || ' days')::interval + INTERVAL '10 hours' END
              ELSE NULL END,
          follow_up_note    = CASE WHEN $4::timestamptz IS NOT NULL THEN $6 ELSE follow_up_note END,
          do_not_call       = do_not_call OR $7::boolean,

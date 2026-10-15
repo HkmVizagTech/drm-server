@@ -292,6 +292,8 @@ function CallScreen({
   const [single, setSingle] = useState<CallLead | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [dispositions, setDispositions] = useState<Disposition[]>([]);
+  /** Settings' retry_after_days: when a missed call comes back round. */
+  const [retryAfterDays, setRetryAfterDays] = useState(1);
 
   const [saving, setSaving] = useState<string | null>(null);
   const [moving, setMoving] = useState<Move | "pause" | "resume" | "finish" | null>(null);
@@ -409,6 +411,8 @@ function CallScreen({
       .get<{ dispositions: Disposition[]; settings?: Record<string, unknown> }>("/api/crm/config")
       .then((cfg) => {
         setDispositions(cfg.dispositions);
+        const retry = Number(cfg.settings?.retry_after_days);
+        if (Number.isFinite(retry) && retry >= 1) setRetryAfterDays(retry);
         // The temple's own alert times, so a promise taken mid-call warns the
         // way whoever set DRM up expects.
         const fromSettings = cfg.settings?.reminder_lead_times;
@@ -1016,6 +1020,7 @@ function CallScreen({
   const confirmEl =
     confirmOn && pickedHere && lead ? (
       <ConfirmLog
+        retryAfterDays={retryAfterDays}
         outcome={pickedHere}
         name={leadName}
         form={form}
@@ -1121,6 +1126,7 @@ function CallScreen({
             a panel used on a few calls is real fatigue. */}
         <div ref={outcomeRef} className="scroll-mt-28">
           <OutcomePanel
+            retryAfterDays={retryAfterDays}
             form={form}
             dispositions={dispositions}
             keys={keys}

@@ -92,7 +92,7 @@ const SETTING_COPY: Record<string, { label: string; help: string; kind: "number"
   },
   retry_after_days: {
     label: "Days before calling a missed lead again",
-    help: "Used when no follow-up date is set.",
+    help: "No answer, Busy or Switched off with no date picked. They come back at 10am that day (1 = next morning).",
     kind: "number",
   },
   max_attempts: {

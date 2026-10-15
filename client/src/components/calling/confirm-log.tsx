@@ -28,7 +28,7 @@
 import { useEffect } from "react";
 import { currency, dateTime, istDayPlus, istInputToISO, istInstant, shortDate } from "@/lib/format";
 import { Button, Icon, Input, Textarea } from "@/components/ui";
-import { isClosingOutcome, isDonatedOutcome, type Disposition } from "@/lib/calling";
+import { isClosingOutcome, isDonatedOutcome, retryWhen, type Disposition } from "@/lib/calling";
 import type { CallForm } from "./outcome-panel";
 
 /** "When will they donate?" - the days people actually say on the phone. */
@@ -53,7 +53,10 @@ export function ConfirmLog({
   expectedAmount,
   onChange,
   onConfirm,
+  retryAfterDays = 1,
 }: {
+  /** Settings' retry_after_days, for "We'll try them again tomorrow morning." */
+  retryAfterDays?: number;
   outcome: Disposition;
   /** Who it is for, as the caller knows them. */
   name: string;
@@ -140,7 +143,7 @@ export function ConfirmLog({
           {qr && <p>Send the QR next.</p>}
           {extras.length > 0 && <p className="text-ink-soft">{extras.join(" · ")}</p>}
           {note && <p className="line-clamp-2 text-ink-soft">“{note}”</p>}
-          {missingCallback && <p>No date picked. We&apos;ll try them again later.</p>}
+          {missingCallback && <p>No date picked. We&apos;ll try them again {retryWhen(retryAfterDays)}.</p>}
         </div>
 
         {/* The one field worth having right here: "Donated now" with no

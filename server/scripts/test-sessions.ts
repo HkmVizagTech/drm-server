@@ -207,8 +207,14 @@ async function main() {
   console.log('\n7. no answer on an overdue callback books a fresh retry');
   const overdue = await lead('9800000100', 'Overdue', { next_follow_up_at: new Date(Date.now() - 3 * 86_400_000).toISOString() });
   await req('POST', `/api/crm/leads/${overdue}/call`, ana, { disposition: 'no_answer' });
-  const od = await pool.query(`SELECT next_follow_up_at > NOW() + INTERVAL '1 day' AS ahead FROM leads WHERE id = $1`, [overdue]);
-  check('the retry is in the future', od.rows[0].ahead === true, od.rows[0]);
+  // In the future, at 10am IST on a later day (the next morning by default).
+  const od = await pool.query(
+    `SELECT next_follow_up_at > NOW() AND (next_follow_up_at AT TIME ZONE 'Asia/Kolkata')::date > (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+            AND to_char(next_follow_up_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') = '10:00' AS ahead
+       FROM leads WHERE id = $1`,
+    [overdue]
+  );
+  check('the retry is in the future, on a later morning', od.rows[0].ahead === true, od.rows[0]);
   const future = await lead('9800000101', 'Booked Friday', { next_follow_up_at: new Date(Date.now() + 5 * 86_400_000).toISOString() });
   const before = await pool.query(`SELECT next_follow_up_at FROM leads WHERE id = $1`, [future]);
   await req('POST', `/api/crm/leads/${future}/call`, ana, { disposition: 'no_answer' });

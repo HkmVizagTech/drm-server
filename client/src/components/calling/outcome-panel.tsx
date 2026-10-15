@@ -32,7 +32,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type
 import { istDayPlus, istInputToISO, istInstant, istWeekday } from "@/lib/format";
 import { AlertPicker, Button, Card, Field, Icon, Input, SegmentedControl, Toggle, textareaClass, type ButtonVariant } from "@/components/ui";
 import { ALERT_OPTIONS, DEFAULT_ALERTS } from "@/lib/reminders";
-import { isClosingOutcome, type Disposition } from "@/lib/calling";
+import { isClosingOutcome, retryWhen, type Disposition } from "@/lib/calling";
 
 // Callback dates as buttons rather than a date picker. "Next week" said on the
 // phone should not become four taps on a calendar.
@@ -192,7 +192,10 @@ export function OutcomePanel({
   noteRef,
   logged,
   after,
+  retryAfterDays = 1,
 }: {
+  /** Settings' retry_after_days, for "We'll try them again tomorrow morning." */
+  retryAfterDays?: number;
   form: CallForm;
   dispositions: Disposition[];
   /** slug -> number key. */
@@ -358,7 +361,7 @@ export function OutcomePanel({
           Not answered
         </p>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{unanswered.map((d) => button(d, "secondary"))}</div>
-        <p className="mt-2 text-xs text-ink-muted">We&apos;ll try them again later.</p>
+        <p className="mt-2 text-xs text-ink-muted">We&apos;ll try them again {retryWhen(retryAfterDays)}.</p>
       </div>
 
       {confirm}

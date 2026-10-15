@@ -217,7 +217,11 @@ const KEPT: Record<string, string> = {
   min: "",
   max: "",
   status: "",
-  sort: "uncalled",
+  // Newest first, everyone - called or not. With no filters chosen the list is
+  // the whole list; "Not called yet, newest" is there in Sort for a caller who
+  // wants the untouched ones on top. It used to open that way, which made a
+  // list with no filters look filtered (and the button said "Filters (1)").
+  sort: "recent",
   called: "",
   from: "",
   to: "",

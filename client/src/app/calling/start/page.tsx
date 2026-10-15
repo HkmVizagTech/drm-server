@@ -20,6 +20,17 @@
 // continuing. Starting the same source again also carries on with it - the
 // server never splits a morning's place in two - so "Start over" is the only
 // way to throw a place away, and it asks twice.
+//
+// GIVEN AT LEAST
+// A sheet holds everybody the office ever wrote down, and many of them never
+// gave, or gave ₹50 once. The "Given at least" chips at the top narrow the
+// lists, Everyone due, My leads and Follow-ups to people who have given that
+// much (the office sheet's total, their donations in DRM, or money after a
+// call - whichever is highest), and the run started from a card keeps to it.
+// Nearly gave and Promises due are never narrowed: those people reached for
+// their wallet or promised to, which matters more than what they gave before. The choice sits in the address
+// (?given=1000) and is remembered on this phone, so a caller who works the
+// ₹1,000-and-up people every morning does not set it every morning.
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -86,8 +97,22 @@ const FIXED: Record<
 };
 const ORDER: (keyof typeof FIXED)[] = ["nearly_gave", "reminders", "follow_ups", "mine", "everything"];
 
-function sourceFor(kind: SourceKind, listId: string | null): RunSource {
-  return kind === "list" && listId ? { kind, list_id: listId } : { kind };
+/** The "Given at least" chips. 0 is everyone. */
+const GIVEN_STEPS = [0, 500, 1000, 2000, 5000, 10000];
+const GIVEN_KEY = "drm.start.given";
+/** Cards the amount applies to (the same as NARROWS_BY_GIVEN on the server). */
+const NARROWS: SourceKind[] = ["everything", "mine", "list", "follow_ups"];
+
+const rupees = (n: number) => `₹${n.toLocaleString("en-IN")}`;
+
+function readGiven(v: string | null): number {
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function sourceFor(kind: SourceKind, listId: string | null, minGiven?: number | null): RunSource {
+  const base: RunSource = kind === "list" && listId ? { kind, list_id: listId } : { kind };
+  return minGiven && NARROWS.includes(kind) ? { ...base, min_given: minGiven } : base;
 }
 
 export default function StartCallingPage() {
@@ -117,6 +142,7 @@ function StartCalling() {
   const router = useRouter();
   const params = useSearchParams();
   const autoList = params.get("list");
+  const minGiven = readGiven(params.get("given"));
   const { user } = useAuth();
   const canManage = user?.role === "admin" || user?.role === "accountant";
 
@@ -127,18 +153,52 @@ function StartCalling() {
 
   const reload = useCallback(async () => {
     try {
-      setData(await getSources());
+      setData(await getSources(minGiven));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load. Try again.");
     }
-  }, []);
+  }, [minGiven]);
 
   useEffect(() => {
-    getSources()
-      .then(setData)
+    getSources(minGiven)
+      .then((d) => {
+        setData(d);
+        setError(null);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : "Could not load. Try again."));
-  }, []);
+  }, [minGiven]);
+
+  // Came in without ?given= (the sidebar link): use the amount last picked on
+  // this phone. Once per visit.
+  const restored = useRef(false);
+  useEffect(() => {
+    if (restored.current) return;
+    restored.current = true;
+    if (params.get("given") !== null || autoList) return;
+    let saved = 0;
+    try {
+      saved = readGiven(window.localStorage.getItem(GIVEN_KEY));
+    } catch {
+      // Storage blocked: start from everyone.
+    }
+    if (saved) router.replace(`/calling/start?given=${saved}`, { scroll: false });
+  }, [params, autoList, router]);
+
+  function pickGiven(n: number) {
+    try {
+      if (n) window.localStorage.setItem(GIVEN_KEY, String(n));
+      else window.localStorage.removeItem(GIVEN_KEY);
+    } catch {
+      // Not remembered; the address still holds it.
+    }
+    // given=0 rather than nothing, so "Any amount" is not undone by the
+    // remembered amount above.
+    router.replace(`/calling/start?given=${n}`, { scroll: false });
+  }
+
+  /** Counts on screen are for an older choice while the new ones load. */
+  const stale = !!data && (data.min_given ?? 0) !== minGiven;
 
   const start = useCallback(
     /** Resolves true once it has navigated to the run. */
@@ -221,6 +281,8 @@ function StartCalling() {
 
       <SankalpamStrip className="mb-5" />
 
+      <GivenChips value={minGiven} onChange={pickGiven} loading={stale} />
+
       {error && (
         <Alert tone="danger" action={<Button size="sm" variant="secondary" onClick={() => void reload()}>Try again</Button>}>
           {error}
@@ -256,7 +318,10 @@ function StartCalling() {
                     onRestart={
                       r.kind === "selection"
                         ? undefined
-                        : () => void start(`restart:${r.id}`, sourceFor(r.kind, r.list_id), { restart: true })
+                        : () =>
+                            void start(`restart:${r.id}`, sourceFor(r.kind, r.list_id, r.min_given), {
+                              restart: true,
+                            })
                     }
                     onFinish={() => void finishRun(r)}
                   />
@@ -286,16 +351,17 @@ function StartCalling() {
                         ? `${number(fresh)} new will be added`
                         : undefined
                     }
-                    empty={meta.empty}
+                    empty={minGiven && NARROWS.includes(s.kind) ? `No one who gave ${rupees(minGiven)}+` : meta.empty}
                     // Starting Nearly gave adds the new website attempts
                     // first, so it is worth starting even when it holds
                     // nobody yet.
-                    enabled={s.count > 0 || fresh > 0}
+                    enabled={(s.count > 0 || fresh > 0) && !stale}
+                    dim={stale}
                     emphasis={s.kind === "nearly_gave"}
                     open={openByKey.get(s.key)}
                     starting={starting === s.key}
                     busy={starting !== null}
-                    onStart={() => void start(s.key, { kind: s.kind })}
+                    onStart={() => void start(s.key, sourceFor(s.kind, null, minGiven))}
                   />
                 );
               })}
@@ -329,13 +395,14 @@ function StartCalling() {
                     count={l.count}
                     blurb={l.description || undefined}
                     badge={l.assigned_to_me ? "Yours" : undefined}
-                    empty="None due today"
-                    enabled={l.count > 0}
+                    empty={minGiven ? `No one due who gave ${rupees(minGiven)}+` : "None due today"}
+                    enabled={l.count > 0 && !stale}
+                    dim={stale}
                     open={openByKey.get(l.key)}
                     starting={starting === l.key}
                     busy={starting !== null}
-                    onStart={() => void start(l.key, { kind: "list", list_id: l.list_id })}
-                    seeHref={`/leads?list=${l.list_id}&callable=true`}
+                    onStart={() => void start(l.key, sourceFor("list", l.list_id, minGiven))}
+                    seeHref={`/leads?list=${l.list_id}&callable=true${minGiven ? `&min_given=${minGiven}` : ""}`}
                   />
                 ))}
               </div>
@@ -348,6 +415,52 @@ function StartCalling() {
 }
 
 /* ------------------------------------------------------------- the cards */
+
+/** "Given at least": Any amount · ₹500 · ₹1,000 · … One tap narrows every card. */
+function GivenChips({
+  value,
+  onChange,
+  loading,
+}: {
+  value: number;
+  onChange: (n: number) => void;
+  loading: boolean;
+}) {
+  return (
+    <section className="mb-6">
+      <h2 className="mb-2 flex items-center gap-2 text-2xs font-semibold uppercase tracking-[0.08em] text-ink-muted">
+        Given at least
+        {loading && <Spinner size={12} label="Counting" />}
+      </h2>
+      <div role="group" aria-label="Given at least" className="flex flex-wrap gap-1.5">
+        {GIVEN_STEPS.map((n) => {
+          const on = n === value;
+          return (
+            <button
+              key={n}
+              type="button"
+              aria-pressed={on}
+              onClick={() => onChange(n)}
+              className={`inline-flex h-9 items-center rounded-pill px-3.5 text-sm font-medium tabular-nums ring-1 ring-inset transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/55 ${
+                on
+                  ? "bg-brand-700 text-white ring-brand-700"
+                  : "bg-surface text-ink-soft ring-line-strong hover:bg-sunken hover:text-ink"
+              }`}
+            >
+              {n ? `${rupees(n)}+` : "Any amount"}
+            </button>
+          );
+        })}
+      </div>
+      {value > 0 && (
+        <p className="mt-2 text-xs text-ink-muted">
+          Lists, follow-ups and leads: only people who gave {rupees(value)} or more (office sheet, DRM or after a call).
+          Nearly gave and Promises due still show everyone.
+        </p>
+      )}
+    </section>
+  );
+}
 
 function OpenRunCard({
   run,
@@ -445,6 +558,7 @@ function SourceTile({
   badge,
   empty,
   enabled,
+  dim = false,
   emphasis = false,
   open,
   starting,
@@ -462,6 +576,8 @@ function SourceTile({
   /** Why it cannot be started, said in place of the count. */
   empty: string;
   enabled: boolean;
+  /** The count is for an older choice and a new one is loading. */
+  dim?: boolean;
   /** Nearly gave: the warmest list, so it stands out. */
   emphasis?: boolean;
   open?: OpenRun;
@@ -475,7 +591,7 @@ function SourceTile({
       padded={false}
       tone={emphasis && enabled ? "warn" : undefined}
       interactive={enabled && !busy}
-      className={`flex flex-col ${enabled ? "" : "opacity-60"} ${emphasis && enabled ? "ring-1 ring-amber-300" : ""}`}
+      className={`flex flex-col transition-opacity ${enabled && !dim ? "" : "opacity-60"} ${emphasis && enabled ? "ring-1 ring-amber-300" : ""}`}
     >
       {/* The whole card is the button: on a phone a tile is tapped anywhere,
           and a small "Start" in its corner is the part people miss. */}

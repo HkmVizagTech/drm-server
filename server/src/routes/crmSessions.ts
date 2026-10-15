@@ -29,6 +29,7 @@ import {
   LEAD_COLUMNS, LEAD_JOINS, buildLeadFilters, leadScopeFor,
   abandonedRowsFor, adoptAbandonedRows,
 } from './crm';
+import { GIVEN } from '../services/leadGiven';
 
 const router = Router();
 router.use(authenticate);
@@ -53,6 +54,15 @@ export interface Source {
   lead_ids?: string[];
   filters?: Record<string, unknown>;
   label?: string | null;
+  /**
+   * Only people who have given at least this much (₹), however DRM knows it
+   * (services/leadGiven.ts). Chosen on the start screen so a caller working a
+   * sheet does not spend the morning on people who never gave, or gave ₹50.
+   * Not for a selection, which carries the leads screen's own filters, and
+   * not for Nearly gave or Promises due: those people reached for their wallet
+   * or promised to, which matters more than what they gave before.
+   */
+  min_given?: number | null;
 }
 
 const KINDS: SourceKind[] = ['everything', 'mine', 'list', 'follow_ups', 'reminders', 'nearly_gave', 'selection'];
@@ -67,8 +77,26 @@ const LABELS: Record<SourceKind, string> = {
   selection: 'Picked by hand',
 };
 
-function sourceKey(src: Source): string {
-  return src.kind === 'list' ? `list:${src.list_id}` : src.kind;
+/**
+ * One open run per source AND amount: "Janmashtami sheet" and "Janmashtami
+ * sheet, ₹1,000 or more" are two different sets of people, each with its own
+ * place.
+ */
+export function sourceKey(src: Source): string {
+  const base = src.kind === 'list' ? `list:${src.list_id}` : src.kind;
+  return src.min_given ? `${base}|given:${src.min_given}` : base;
+}
+
+/** "₹1,000" */
+export const rupees = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+
+/** The sources a "given at least" amount applies to. */
+export const NARROWS_BY_GIVEN: SourceKind[] = ['everything', 'mine', 'list', 'follow_ups'];
+
+/** Read a "given at least" amount: a positive whole number of rupees, or null. */
+export function parseMinGiven(v: unknown): number | null {
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n > 0 && n <= 100_000_000 ? n : null;
 }
 
 /** Lighter than LEAD_JOINS - no per-row donation sum - for counting and ordering. */
@@ -108,6 +136,7 @@ async function sourceQuery(
   };
   const conds: string[] = [CALLABLE];
   let order = QUEUE_ORDER;
+  if (NARROWS_BY_GIVEN.includes(src.kind) && src.min_given) conds.push(`${GIVEN('l')} >= ${p(src.min_given)}`);
 
   if (src.kind === 'selection') {
     // Chosen by hand, so no due-date or attempt limit - the person picked
@@ -186,6 +215,10 @@ function parseSource(b: Record<string, unknown>): Source | string {
   const kind = String(raw.kind ?? '') as SourceKind;
   if (!KINDS.includes(kind)) return 'Choose who to call';
   const src: Source = { kind, label: str(raw.label, 200) };
+  if (NARROWS_BY_GIVEN.includes(kind)) {
+    const mg = parseMinGiven(raw.min_given);
+    if (mg) src.min_given = mg;
+  }
   if (kind === 'list') {
     src.list_id = str(raw.list_id, 36);
     if (!src.list_id || !UUID_RE.test(src.list_id)) return 'Choose a list';
@@ -521,10 +554,13 @@ async function sessionState(session: SessionRow, me: string) {
 router.get('/sessions/sources', async (req, res) => {
   const user = req.user;
   const me = user?.userId ?? null;
+  // ?min_given=1000: count only people who have given at least that much.
+  const minGiven = parseMinGiven(req.query.min_given);
+  const mg = minGiven ? { min_given: minGiven } : {};
   try {
     const fixed: SourceKind[] = ['everything', 'mine', 'follow_ups', 'reminders', 'nearly_gave'];
     const [counts, lists, open, newAttempts] = await Promise.all([
-      Promise.all(fixed.map((k) => countSource({ kind: k }, user))),
+      Promise.all(fixed.map((k) => countSource({ kind: k, ...(NARROWS_BY_GIVEN.includes(k) ? mg : {}) }, user))),
       pool.query(
         `SELECT cl.id, cl.name, cl.description, a.id IS NOT NULL AS assigned_to_me
            FROM calling_lists cl
@@ -555,20 +591,21 @@ router.get('/sessions/sources', async (req, res) => {
         .catch(() => 0),
     ]);
     const listCounts = await Promise.all(
-      lists.rows.map((l) => countSource({ kind: 'list', list_id: l.id }, user))
+      lists.rows.map((l) => countSource({ kind: 'list', list_id: l.id, ...mg }, user))
     );
 
     res.json({
+      min_given: minGiven,
       sources: fixed.map((k, n) => ({
         kind: k,
-        key: k,
+        key: sourceKey({ kind: k, ...(NARROWS_BY_GIVEN.includes(k) ? mg : {}) }),
         label: LABELS[k],
         count: counts[n],
         ...(k === 'nearly_gave' ? { new_attempts: newAttempts } : {}),
       })),
       lists: lists.rows.map((l, n) => ({
         kind: 'list',
-        key: `list:${l.id}`,
+        key: sourceKey({ kind: 'list', list_id: l.id, ...mg }),
         list_id: l.id,
         label: l.name,
         description: l.description,
@@ -583,6 +620,7 @@ router.get('/sessions/sources', async (req, res) => {
           kind: (s.source?.kind ?? 'everything') as SourceKind,
           label: s.source_label ?? s.list_name ?? LABELS[(s.source?.kind ?? 'everything') as SourceKind],
           list_id: s.list_id,
+          min_given: parseMinGiven(s.source?.min_given),
           last_active_at: s.last_active_at,
           paused: !!s.paused_at,
           total: s.total,
@@ -684,7 +722,7 @@ router.post('/sessions', async (req, res) => {
     const label =
       src.kind === 'selection'
         ? src.label ?? `${count} picked ${count === 1 ? 'person' : 'people'}`
-        : src.label ?? listName ?? LABELS[src.kind];
+        : (src.label ?? listName ?? LABELS[src.kind]) + (src.min_given ? ` · gave ${rupees(src.min_given)}+` : '');
 
     // Finish whatever this replaces. A selection replaces the last selection.
     if (open.rows.length) {

@@ -517,15 +517,22 @@ INSERT INTO crm_settings (key, value) VALUES
   -- How many unanswered attempts before the lead is parked rather than
   -- dialled forever.
   ('max_attempts',          '6'::jsonb),
-  -- Days before an unanswered lead comes back round. Without this a "no
-  -- answer" would leave the lead with no date at all and it would quietly
-  -- drop out of everyone's day.
-  ('retry_after_days',      '2'::jsonb),
+  -- Days before an unanswered lead comes back round (at 10am that day).
+  -- Without this a "no answer" would leave the lead with no date at all and
+  -- it would quietly drop out of everyone's day.
+  ('retry_after_days',      '1'::jsonb),
   -- Calling hours, so the screen can warn before someone rings at 6am.
   ('calling_hours',         '{"from":"09:00","to":"20:00"}'::jsonb),
   -- Whether a caller may see leads assigned to someone else.
   ('callers_see_all_leads', 'false'::jsonb)
 ON CONFLICT (key) DO NOTHING;
+
+-- No answer, Busy and Switched off come back the NEXT morning. The default
+-- was 2 days; it is moved to 1 only where nobody has ever changed it in
+-- Settings (updated_by is set by every save there), so a gap an admin chose
+-- on purpose is left alone. Runs once in effect: after it the value is 1.
+UPDATE crm_settings SET value = '1'::jsonb, updated_at = NOW()
+ WHERE key = 'retry_after_days' AND value = '2'::jsonb AND updated_by IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- REMINDERS

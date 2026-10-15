@@ -28,6 +28,7 @@
     "test:wathanks": "tsx scripts/test-wa-thanks.ts",
     "test:nearlysplit": "tsx scripts/test-nearly-gave-split.ts",
     "test:given": "tsx scripts/test-given-filter.ts",
+    "test:retry": "tsx scripts/test-retry-morning.ts",
     "test:phoneapp": "tsx scripts/test-phone-app.ts",
     "test:paging": "tsx scripts/test-abandoned-paging.ts",
     "bench:abandoned": "tsx scripts/bench-abandoned.ts",

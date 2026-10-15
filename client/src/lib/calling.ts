@@ -22,6 +22,8 @@ export interface RunSource {
   /** For a selection: everybody the leads screen's filters find. */
   filters?: Record<string, string>;
   label?: string;
+  /** Only people who have given at least this much (₹). Not for a selection. */
+  min_given?: number | null;
 }
 
 export interface RunCounts {
@@ -152,12 +154,24 @@ export interface ListSourceCard {
 }
 
 /** A run the caller can carry on with. */
+/**
+ * When a lead with no date picked comes back round (No answer, Busy, Switched
+ * off...): 10am on the day `retry_after_days` in Settings says. The server
+ * sets it; this only says it.
+ */
+export function retryWhen(days: number | null | undefined): string {
+  const n = Math.max(1, Math.round(Number(days) || 1));
+  return n === 1 ? "tomorrow morning" : `in ${n} days, in the morning`;
+}
+
 export interface OpenRun {
   id: string;
   key: string;
   kind: SourceKind;
   label: string;
   list_id: string | null;
+  /** The "given at least" amount it was started with, if any. */
+  min_given: number | null;
   last_active_at: string;
   paused: boolean;
   total: number;
@@ -167,13 +181,16 @@ export interface OpenRun {
 }
 
 export interface SourcesResponse {
+  /** The amount the counts were made with, or null for everyone. */
+  min_given: number | null;
   sources: SourceCard[];
   lists: ListSourceCard[];
   open: OpenRun[];
 }
 
-export function getSources() {
-  return api<SourcesResponse>("/api/crm/sessions/sources");
+/** Who could be called, counted only over people who gave at least `minGiven` when set. */
+export function getSources(minGiven?: number | null) {
+  return api<SourcesResponse>(`/api/crm/sessions/sources${minGiven ? `?min_given=${minGiven}` : ""}`);
 }
 
 /* -------------------------------------------------------------- the run itself */
