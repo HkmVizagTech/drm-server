@@ -22,6 +22,7 @@
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
+import { GIVEN } from '../services/leadGiven';
 
 const router = Router();
 router.use(authenticate);
@@ -68,7 +69,9 @@ export const LIST_MATCH = (cl: string, l: string) => `(
     -- Loose on purpose: sheets carry "Vizag", "Visakhapatnam" and "VIZAG" in
     -- the same column.
     AND (${cl}.city        IS NULL OR ${l}.city ILIKE '%' || ${cl}.city || '%')
-    AND (${cl}.min_external_total IS NULL OR ${l}.external_total_donated >= ${cl}.min_external_total)
+    -- Given at least this much, however DRM knows it (services/leadGiven.ts):
+    -- the office sheet's total, donations on record, or money after a call.
+    AND (${cl}.min_external_total IS NULL OR ${GIVEN(l)} >= ${cl}.min_external_total)
     AND NOT EXISTS (SELECT 1 FROM calling_list_members xm
                      WHERE xm.list_id = ${cl}.id AND xm.lead_id = ${l}.id AND xm.kind = 'exclude')
   )

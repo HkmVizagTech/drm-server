@@ -45,6 +45,7 @@ import {
 // The queue's filter lives with the lists it belongs to, so a change to what
 // counts as callable changes the queue and every list's count together.
 import { CALLABLE, DUE_NOW, FROM_DONATIONS_PAGE, LIST_MATCH, NOT_CLAIMED_BY_OTHERS, listPredicate, loadList, maxAttempts } from './crmLists';
+import { GIVEN } from '../services/leadGiven';
 
 const router = Router();
 router.use(authenticate);
@@ -520,6 +521,16 @@ function buildLeadFilters(q: Record<string, unknown>, startIdx = 1): Filters {
   if (q.min_external) {
     conditions.push(`l.external_total_donated >= $${i++}`);
     values.push(num(q.min_external));
+  }
+  // Given at least ₹X (or nothing at all), however DRM knows it - see
+  // services/leadGiven.ts. So a sheet can be rung from its best donors only,
+  // without the people who never gave or gave very little.
+  if (q.min_given !== undefined && q.min_given !== '') {
+    if (String(q.min_given) === 'none') conditions.push(`${GIVEN('l')} = 0`);
+    else if (num(q.min_given) !== null && (num(q.min_given) as number) > 0) {
+      conditions.push(`${GIVEN('l')} >= $${i++}`);
+      values.push(num(q.min_given));
+    }
   }
   // Dates, so a tile on the overview opens exactly the leads it counted:
   // "added this month", "gave this month". The same day boundaries as the

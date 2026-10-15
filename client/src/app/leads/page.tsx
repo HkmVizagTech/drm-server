@@ -160,6 +160,8 @@ const FILTER_KEYS = [
   "preacher",
   "tag",
   "batch",
+  // Given at least ₹X, or nothing yet (server: services/leadGiven.ts).
+  "min_given",
   "list",
   "callable",
   // Set by a tile on the calling overview, so the list is exactly the leads
@@ -172,6 +174,17 @@ const FILTER_KEYS = [
   "called",
   "called_by",
 ] as const;
+
+/** "Given at least" choices. "none" is the opposite: people who have given nothing yet. */
+const GIVEN_OPTIONS = [
+  { value: "", label: "Any amount" },
+  { value: "1", label: "Given something" },
+  ...[500, 1000, 2000, 5000, 10000, 25000, 50000, 100000].map((n) => ({
+    value: String(n),
+    label: `₹${n.toLocaleString("en-IN")} or more`,
+  })),
+  { value: "none", label: "Nothing given yet" },
+];
 
 const EMPTY = new Set<string>();
 const limit = 50;
@@ -210,6 +223,7 @@ function Leads() {
   const preacher = param("preacher");
   const tag = param("tag");
   const batch = param("batch");
+  const minGiven = param("min_given");
   const list = param("list");
   const callable = param("callable");
   const urlSearch = param("search");
@@ -467,7 +481,7 @@ function Leads() {
     open: param("open"),
   };
   const activeCount = [
-    urlSearch, status, source, assigned, due, preacher, tag, batch, list, callable, calledFilter,
+    urlSearch, status, source, assigned, due, preacher, tag, batch, minGiven, list, callable, calledFilter,
     fromOverview.added[0] || fromOverview.added[1],
     fromOverview.converted[0] || fromOverview.converted[1],
     fromOverview.open,
@@ -654,6 +668,19 @@ function Leads() {
               />
             </Field>
           )}
+          {/* "Only the people who have given ₹1,000 or more": a sheet rung from
+              its best donors, without those who never gave or gave little.
+              Counts the highest of the office sheet's total, donations on
+              record and money given after a call. */}
+          <Field label="Given at least" className="w-full sm:w-auto sm:min-w-[9rem] sm:flex-1">
+            <Select
+              value={minGiven}
+              onChange={(v) => setParams({ min_given: v || null })}
+              ariaLabel="Given at least"
+              placeholder="Any amount"
+              options={GIVEN_OPTIONS}
+            />
+          </Field>
           <Field label="Sort by" className="w-full md:w-auto md:flex-none">
             {/* Four segments do not fit a phone's width, so a phone gets the
                 same choice as a dropdown. */}

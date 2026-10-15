@@ -430,7 +430,7 @@ function ListCard({
             {l.city && <Badge>{l.city}</Badge>}
             {l.status_slug && <Badge>{l.status_slug.replace(/_/g, " ")}</Badge>}
             {l.source && <Badge>{SOURCES.find((s) => s.key === l.source)?.label ?? l.source}</Badge>}
-            {l.min_external_total && <Badge>over {currency(Number(l.min_external_total))}</Badge>}
+            {l.min_external_total && <Badge>gave {currency(Number(l.min_external_total))}+</Badge>}
             {!anyFilter && <span className="text-xs text-ink-faint">Everyone</span>}
           </>
         )}
@@ -669,7 +669,12 @@ function ListFilterFields({
       <Field label="City" htmlFor="list-city">
         <Input id="list-city" value={value.city} onChange={(e) => set("city")(e.target.value)} placeholder="Any city" />
       </Field>
-      <Field label="Total given, at least (₹)" htmlFor="list-min" className="sm:col-span-2">
+      <Field
+        label="Given at least (₹)"
+        htmlFor="list-min"
+        className="sm:col-span-2"
+        hint="Their donations, or the total in the office sheet - whichever is more. Leave empty for everyone."
+      >
         <Input
           id="list-min"
           value={value.min_external_total}
