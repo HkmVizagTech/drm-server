@@ -32,6 +32,7 @@ import { GlobalSearch } from "./global-search";
 import { Toaster } from "./toast";
 import { PhoneAppBridge } from "./phone-app-bridge";
 import { BrandMark } from "@/components/brand-mark";
+import { DialerChip, PhoneDialerBridge } from "./phone-dialer-bridge";
 
 function Breadcrumb() {
   const pathname = usePathname();
@@ -170,6 +171,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               >
                 <Icon name={searching ? "x" : "search"} size={18} />
               </button>
+              <DialerChip />
               <ReminderBell />
             </div>
           </header>
@@ -183,6 +185,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             {/* Inside the Android app only: links the phone, rings tel: links
                 from the SIM, and asks for permissions. Renders nothing in a browser. */}
             <PhoneAppBridge />
+            {/* On a laptop: Call buttons ring from the caller's phone when it
+                is on the Laptop dialer screen. Renders nothing. */}
+            <PhoneDialerBridge />
             {children}
           </div>
         </main>

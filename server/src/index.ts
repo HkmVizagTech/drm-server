@@ -51,6 +51,7 @@ import { scheduleBirthdayAnniversaryCheck, scheduleNotifications, schedulePhoneC
 import notificationsRoutes from './routes/notifications';
 import waThanksRoutes from './routes/waThanks';
 import phoneAppRoutes from './routes/phoneApp';
+import phoneDialerRoutes from './routes/phoneDialer';
 import { storeAbandonedAttempt } from './routes/crm';
 import { runMigrations, setMigrationResult, getMigrationResult } from './db/migrate';
 
@@ -260,6 +261,8 @@ app.use('/api/notifications', notificationsRoutes);
 app.use('/api/wa-thanks', waThanksRoutes);
 // The Android app: calls and recordings from callers' phones.
 app.use('/api/app', phoneAppRoutes);
+// Call from the laptop, ring from the phone.
+app.use('/api/app', phoneDialerRoutes);
 
 // Razorpay's QR payment webhook. Mounted here, ahead of the JWT-protected
 // groups and outside /api/crm, because Razorpay has no token and because a

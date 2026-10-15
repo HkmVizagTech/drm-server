@@ -33,7 +33,9 @@ export async function api<T>(path: string, options: RequestInit = {}, retried = 
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: 'Request failed' }));
-    throw new Error(error.error || 'Request failed');
+    // The status rides along for the few callers that act on it (a 409 from
+    // the laptop dialer means "your phone is not ready", not "it broke").
+    throw Object.assign(new Error(error.error || 'Request failed'), { status: res.status });
   }
 
   return res.json();

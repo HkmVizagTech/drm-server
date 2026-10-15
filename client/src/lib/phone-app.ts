@@ -59,6 +59,8 @@ interface DrmPhonePlugin {
   openAllFilesSettings(): Promise<void>;
   openBatterySettings(): Promise<void>;
   openAppSettings(): Promise<void>;
+  /** Added in app 1.0.4. */
+  keepScreenOn?(o: { on: boolean }): Promise<void>;
 }
 
 interface CapacitorGlobal {
@@ -147,6 +149,30 @@ export function missing(info: PhoneInfo | null): string[] {
  */
 export function dialerHidesRecordings(dialer: string | null | undefined): boolean {
   return !!dialer && /com\.google\.android\.dialer/.test(dialer);
+}
+
+/**
+ * Keep the phone's screen on (the Laptop dialer screen). The app does it
+ * itself from 1.0.4; before that the browser's own wake lock is tried, which
+ * holds only while the screen is in front. Returns a function that lets go.
+ */
+export async function keepScreenOn(): Promise<() => void> {
+  const p = phone();
+  if (p?.keepScreenOn) {
+    try {
+      await p.keepScreenOn({ on: true });
+      return () => void p.keepScreenOn?.({ on: false }).catch(() => undefined);
+    } catch {
+      // Fall through to the wake lock.
+    }
+  }
+  try {
+    const nav = navigator as Navigator & { wakeLock?: { request(t: "screen"): Promise<{ release(): Promise<void> }> } };
+    const lock = await nav.wakeLock?.request("screen");
+    return () => void lock?.release().catch(() => undefined);
+  } catch {
+    return () => {};
+  }
 }
 
 /** Sign this phone out of DRM (the caller signed out). Older apps only forget the key locally. */

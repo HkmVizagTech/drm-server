@@ -172,6 +172,7 @@ export function LeadCard({
           <div className="flex gap-1.5">
             <LinkButton
               href={telHref(lead.phone)}
+              data-lead-id={lead.id}
               variant="primary"
               size="lg"
               icon="phone"
@@ -195,6 +196,7 @@ export function LeadCard({
             {lead.alt_phone && (
               <LinkButton
                 href={telHref(lead.alt_phone)}
+                data-lead-id={lead.id}
                 variant="secondary"
                 icon="phone"
                 className="flex-1 tabular-nums"

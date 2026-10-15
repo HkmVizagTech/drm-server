@@ -2555,3 +2555,31 @@ CREATE TABLE IF NOT EXISTS recording_listens (
   listened_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_recording_listens_call ON recording_listens(call_id, listened_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Laptop dialer: a Call click on the laptop rings from the caller's phone.
+-- See routes/phoneDialer.ts.
+-- ---------------------------------------------------------------------------
+
+-- When the phone last asked for a call to dial. Asked within the last half
+-- minute means it is on the Laptop dialer screen and ready.
+ALTER TABLE app_devices ADD COLUMN IF NOT EXISTS dialer_seen_at TIMESTAMPTZ;
+
+-- One click on the laptop, waiting for (or picked up by) the person's phone.
+CREATE TABLE IF NOT EXISTS dial_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  phone VARCHAR(20) NOT NULL,
+  lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+  -- Shown on the phone: "Calling Ramesh".
+  name VARCHAR(200),
+  device_id UUID REFERENCES app_devices(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  picked_at TIMESTAMPTZ,
+  done_at TIMESTAMPTZ,
+  -- placed | failed | replaced (a newer click came first)
+  result VARCHAR(20),
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_dial_requests_waiting ON dial_requests(user_id, created_at DESC)
+  WHERE picked_at IS NULL AND done_at IS NULL;
