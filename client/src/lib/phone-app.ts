@@ -15,6 +15,8 @@ export interface PhonePermissions {
   audio?: boolean;
   all_files?: boolean;
   battery?: boolean;
+  /** "Who is calling" notifications allowed. App 1.0.5 and later; missing before. */
+  notify?: boolean;
   pending_recordings?: number;
   numbers?: number;
 }

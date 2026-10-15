@@ -2583,3 +2583,23 @@ CREATE TABLE IF NOT EXISTS dial_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_dial_requests_waiting ON dial_requests(user_id, created_at DESC)
   WHERE picked_at IS NULL AND done_at IS NULL;
+
+-- A DRM number ringing the caller's phone, as it happens, so the laptop can
+-- say "Ramesh Kumar is calling" and open their call screen. The call itself is
+-- saved afterwards the usual way (phone_calls); this is only the live alert.
+-- Only numbers already in DRM are ever reported - the phone checks first.
+CREATE TABLE IF NOT EXISTS incoming_rings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id UUID REFERENCES app_devices(id) ON DELETE SET NULL,
+  phone VARCHAR(20) NOT NULL,
+  lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+  -- ringing | answered | ended
+  state VARCHAR(10) NOT NULL DEFAULT 'ringing',
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  answered_at TIMESTAMPTZ,
+  ended_at TIMESTAMPTZ,
+  -- Closed on the laptop.
+  dismissed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_incoming_rings_user ON incoming_rings(user_id, started_at DESC);

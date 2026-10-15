@@ -759,24 +759,42 @@ export function groupDonors(rows: ParsedRow[]) {
       gotram: first('gotram'),
       address: first('address'),
       notes: spouse ? `Spouse: ${spouse}` : null,
+      // Whether the sheet gave a name (not just a patron number).
+      named: !!(first('donor') ?? first('sevak')),
       days,
     };
   });
 }
 
 /**
- * POST /sankalpam/import { filename, base64, apply?: boolean }
+ * POST /sankalpam/import { filename, base64, apply?: boolean, mode?: 'add' | 'replace' }
  *
  * Without apply: what the file would do, so it can be checked first. With
- * apply: does it. Never removes anything and never duplicates. A donor is
+ * apply: does it.
+ *
+ * ADD (the default) never removes anything and never duplicates. A donor is
  * found by patron number, else by mobile number; a day the donor already has
  * on that date is left as it is, however its occasion was worded. Uploading
  * the same sheet twice adds nothing the second time; a fresher sheet adds only
  * what is new and fills blanks on who is already here.
+ *
+ * REPLACE (admins) makes DRM match this sheet - for when the office sends a
+ * corrected sheet and the old one had wrong dates. For every donor in it:
+ * their details are taken from the sheet, and their days become the sheet's
+ * days - a day from an older sheet that this one does not have is removed. A
+ * donor from an older sheet who is not in this one is switched off, not
+ * deleted: their calls and WhatsApp history stay, and one click brings them
+ * back if the sheet missed them. Days and donors added by hand in DRM are
+ * never touched. A day on the same date keeps its row, so "done" and "sent"
+ * ticks on correct days survive the replace.
  */
 router.post('/import', async (req, res) => {
   const base64 = String(req.body?.base64 ?? '');
   const filename = String(req.body?.filename ?? 'sheet.xlsx');
+  const replace = req.body?.mode === 'replace';
+  if (replace && req.user?.role !== 'admin') {
+    return res.status(403).json({ error: 'Only an admin can replace the Sankalpam data.' });
+  }
   if (!base64) return res.status(400).json({ error: 'No file received.' });
   let sheets;
   try {
@@ -789,12 +807,36 @@ router.post('/import', async (req, res) => {
     return res.status(400).json({ error: 'No date column found. Use the sample sheet headings.' });
   }
   const donors = groupDonors(rows);
+  if (replace && !donors.length) {
+    return res.status(400).json({ error: 'This sheet has no donors in it. Nothing was replaced.' });
+  }
 
   const apply = req.body?.apply === true;
   const client = await pool.connect();
-  const out = { donors_new: 0, donors_existing: 0, dates_new: 0, dates_existing: 0, donors_without_dates: 0 };
+  const out = {
+    donors_new: 0,
+    donors_existing: 0,
+    dates_new: 0,
+    dates_existing: 0,
+    donors_without_dates: 0,
+    // Replace only.
+    dates_removed: 0,
+    donors_switched_off: 0,
+    donors_switched_on: 0,
+    sheet_donors_before: 0,
+  };
+  const removed: { donor: string; month: number; day: number; occasion: string }[] = [];
+  const switchedOff: string[] = [];
+  /** Replace: each donor this sheet touched, their rows as they were, and the rows it keeps. */
+  const touched = new Map<string, { name: string; rows: { id: string; month: number; day: number; occasion: string; origin: string | null; active: boolean }[]; kept: Set<string> }>();
+
   try {
     await client.query('BEGIN');
+    if (replace) {
+      out.sheet_donors_before = (
+        await client.query(`SELECT COUNT(*)::int AS n FROM sankalpam_donors WHERE source = 'sheet' AND active`)
+      ).rows[0].n;
+    }
     for (const d of donors) {
       let donorId: string | null = null;
       if (d.patron) {
@@ -827,7 +869,24 @@ router.post('/import', async (req, res) => {
       }
       if (donorId) {
         out.donors_existing++;
-        if (apply) {
+        if (replace) {
+          const was = await client.query(`SELECT active FROM sankalpam_donors WHERE id = $1`, [donorId]);
+          if (was.rows[0] && !was.rows[0].active && !touched.has(donorId)) out.donors_switched_on++;
+        }
+        if (apply && replace) {
+          // The sheet is right: its details replace what was here, except
+          // where the sheet leaves a cell empty.
+          await client.query(
+            `UPDATE sankalpam_donors SET
+               patron_number = COALESCE(patron_number, $2), donor_name = COALESCE($3, donor_name),
+               sevak_name = COALESCE($4, sevak_name), phone = COALESCE($5, phone), alt_phone = COALESCE($6, alt_phone),
+               preacher = COALESCE($7, preacher), gotram = COALESCE($8, gotram), address = COALESCE($9, address),
+               notes = COALESCE(notes, $10), person_id = COALESCE(person_id, $11), active = TRUE, updated_at = NOW()
+             WHERE id = $1`,
+            [donorId, d.patron, d.named ? d.donor_name : null, d.sevak_name, d.phone, d.alt_phone, d.preacher,
+             d.gotram, d.address, d.notes, await personFor(client, d.phone)]
+          );
+        } else if (apply) {
           await client.query(
             `UPDATE sankalpam_donors SET
                patron_number = COALESCE(patron_number, $2), sevak_name = COALESCE(sevak_name, $3),
@@ -854,15 +913,61 @@ router.post('/import', async (req, res) => {
       }
       if (!d.days.length) out.donors_without_dates++;
 
-      const had = donorId
-        ? (await client.query(`SELECT month, day FROM sankalpam_dates WHERE donor_id = $1`, [donorId])).rows.map(
-            (x) => `${x.month}-${x.day}`
-          )
-        : [];
-      const already = new Set(had);
+      if (!replace) {
+        const had = donorId
+          ? (await client.query(`SELECT month, day FROM sankalpam_dates WHERE donor_id = $1`, [donorId])).rows.map(
+              (x) => `${x.month}-${x.day}`
+            )
+          : [];
+        const already = new Set(had);
+        for (const day of d.days) {
+          if (already.has(`${day.month}-${day.day}`)) {
+            out.dates_existing++;
+            continue;
+          }
+          out.dates_new++;
+          if (apply && donorId) {
+            await client.query(
+              `INSERT INTO sankalpam_dates (donor_id, occasion, month, day, orig_year, notes, origin)
+               VALUES ($1,$2,$3,$4,$5,$6,'sheet') ON CONFLICT DO NOTHING`,
+              [donorId, day.occasion, day.month, day.day, day.year, day.notes]
+            );
+          }
+        }
+        continue;
+      }
+
+      /* REPLACE: this donor's days become the sheet's days. */
+      let t = donorId ? touched.get(donorId) : undefined;
+      if (donorId && !t) {
+        const r = await client.query(
+          `SELECT id, month, day, occasion, origin, active FROM sankalpam_dates WHERE donor_id = $1`,
+          [donorId]
+        );
+        t = { name: d.donor_name, rows: r.rows, kept: new Set() };
+        touched.set(donorId, t);
+      }
       for (const day of d.days) {
-        if (already.has(`${day.month}-${day.day}`)) {
+        const sameDay = (r: { month: number; day: number }) => r.month === day.month && r.day === day.day;
+        const rows0 = t?.rows ?? [];
+        // 1. The same day and occasion: kept as it is (with its ticks).
+        const exact = rows0.find((r) => sameDay(r) && r.occasion.toUpperCase() === day.occasion.toUpperCase());
+        // 2. The same day from an older sheet, worded differently: kept, reworded.
+        const reword = exact ? null : rows0.find((r) => sameDay(r) && r.origin === 'sheet' && !t!.kept.has(r.id));
+        // 3. The same day added by hand: left alone, and not added twice. (A
+        //    second occasion on a day the sheet already has - a birthday and an
+        //    anniversary together - is still added.)
+        const byHand = exact || reword ? null : rows0.find((r) => sameDay(r) && r.origin !== 'sheet');
+        const hit = exact ?? reword ?? byHand;
+        if (hit) {
+          t!.kept.add(hit.id);
           out.dates_existing++;
+          if (apply && (reword || (exact && !exact.active))) {
+            await client.query(
+              `UPDATE sankalpam_dates SET occasion = $2, orig_year = COALESCE($3, orig_year), active = TRUE WHERE id = $1`,
+              [hit.id, day.occasion, day.year]
+            );
+          }
           continue;
         }
         out.dates_new++;
@@ -875,13 +980,46 @@ router.post('/import', async (req, res) => {
         }
       }
     }
+
+    if (replace) {
+      // Days from older sheets that this sheet does not have.
+      for (const [donorId, t] of touched) {
+        const gone = t.rows.filter((r) => r.origin === 'sheet' && !t.kept.has(r.id));
+        out.dates_removed += gone.length;
+        for (const g of gone) removed.push({ donor: t.name, month: g.month, day: g.day, occasion: g.occasion });
+        if (apply && gone.length) {
+          await client.query(`DELETE FROM sankalpam_dates WHERE donor_id = $1 AND id = ANY($2::uuid[])`, [
+            donorId,
+            gone.map((g) => g.id),
+          ]);
+        }
+      }
+      // Donors from older sheets who are not in this one: switched off.
+      const off = await client.query(
+        `SELECT id, donor_name FROM sankalpam_donors
+          WHERE source = 'sheet' AND active AND NOT (id = ANY($1::uuid[]))
+          ORDER BY donor_name`,
+        [[...touched.keys()]]
+      );
+      out.donors_switched_off = off.rows.length;
+      switchedOff.push(...off.rows.map((r) => r.donor_name as string));
+      if (apply && off.rows.length) {
+        await client.query(`UPDATE sankalpam_donors SET active = FALSE, updated_at = NOW() WHERE id = ANY($1::uuid[])`, [
+          off.rows.map((r) => r.id),
+        ]);
+      }
+    }
+
     await client.query(apply ? 'COMMIT' : 'ROLLBACK');
     res.json({
       applied: apply,
+      mode: replace ? 'replace' : 'add',
       ...out,
       sheets: usedSheets,
       skipped: skipped.length,
       skipped_rows: skipped.slice(0, 50),
+      removed_dates: removed.slice(0, 100),
+      switched_off: switchedOff.slice(0, 100),
     });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);

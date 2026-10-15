@@ -33,6 +33,7 @@ import { Toaster } from "./toast";
 import { PhoneAppBridge } from "./phone-app-bridge";
 import { BrandMark } from "@/components/brand-mark";
 import { DialerChip, PhoneDialerBridge } from "./phone-dialer-bridge";
+import { IncomingCalls } from "./incoming-call";
 
 function Breadcrumb() {
   const pathname = usePathname();
@@ -188,6 +189,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             {/* On a laptop: Call buttons ring from the caller's phone when it
                 is on the Laptop dialer screen. Renders nothing. */}
             <PhoneDialerBridge />
+            {/* On a laptop: "Ramesh Kumar is calling" while the phone rings. */}
+            <IncomingCalls />
             {children}
           </div>
         </main>

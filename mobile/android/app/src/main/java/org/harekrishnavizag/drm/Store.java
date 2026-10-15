@@ -92,6 +92,14 @@ final class Store {
     JSONArray pending() { return array("pending"); }
     void setPending(JSONArray a) { p.edit().putString("pending", a.toString()).apply(); }
 
+    /* The DRM number ringing this phone right now, if any (see CallerId). */
+    String ringingPhone() { return p.getString("ringing_phone", null); }
+    long ringingAt() { return p.getLong("ringing_at", 0); }
+    void setRinging(String phone) {
+        p.edit().putString("ringing_phone", phone).putLong("ringing_at", System.currentTimeMillis()).apply();
+    }
+    void clearRinging() { p.edit().remove("ringing_phone").remove("ringing_at").apply(); }
+
     long lastSyncAt() { return p.getLong("last_sync_at", 0); }
     String lastError() { return p.getString("last_error", null); }
     void setLastSync(long at, String error) {

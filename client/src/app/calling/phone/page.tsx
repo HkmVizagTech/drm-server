@@ -202,6 +202,26 @@ export default function ThisPhonePage() {
               So a donor who rings you back at night is saved even when DRM is closed.
             </Step>
             <Step
+              done={p.notify === undefined ? null : !!p.notify}
+              title="Show who is calling"
+              action={
+                p.notify === false && (
+                  <>
+                    <Button size="sm" loading={busy === "notify"} onClick={() => void run("notify", () => phone()!.requestPermissions())}>
+                      Allow
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={() => void run("settings", () => phone()!.openAppSettings())}>
+                      Open settings
+                    </Button>
+                  </>
+                )
+              }
+            >
+              {p.notify === undefined
+                ? "Install the latest DRM app to see a donor's name while they ring you."
+                : "When a donor rings, their name and notes show on this phone, and on your laptop."}
+            </Step>
+            <Step
               done={found ? found.found : null}
               title="Check the app can see your recordings"
               action={

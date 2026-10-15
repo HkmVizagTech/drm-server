@@ -510,4 +510,150 @@ router.delete('/devices/:id', authenticate, authorize('admin'), async (req, res)
   }
 });
 
+/* ------------------------------------------------------- incoming calls */
+//
+// "Ramesh Kumar is calling" - on the laptop while the phone rings, and on the
+// phone's own screen as a notification.
+//
+// The phone reports a ring only for a number already in DRM (the same list it
+// uses to save calls), so a personal call never leaves the phone. It reports
+// three moments: ringing, answered, ended. The laptop asks every few seconds
+// and shows the latest ones; nothing here replaces saving the call, which
+// happens afterwards exactly as before.
+
+/** Minutes a ring stays on the laptop if nobody closes it. */
+const RING_SHOWN_MINUTES = 10;
+
+/** The lead for a number, preferring this caller's own, then the latest touched. */
+async function leadForNumber(phone: string, userId: string) {
+  const r = await pool.query(
+    `SELECT id FROM leads
+      WHERE phone = $1 OR right(regexp_replace(COALESCE(alt_phone, ''), '\\D', '', 'g'), 10) = $1
+      ORDER BY (assigned_to = $2::uuid) DESC NULLS LAST, updated_at DESC
+      LIMIT 1`,
+    [phone, userId]
+  );
+  return (r.rows[0]?.id as string | undefined) ?? null;
+}
+
+/**
+ * Who it is and the one thing worth knowing before picking up: a promise
+ * due, money they nearly gave, what they gave, or how the last call went.
+ */
+async function whoIsCalling(leadId: string | null) {
+  if (!leadId) return { name: null as string | null, note: null as string | null };
+  const r = await pool.query(
+    `SELECT l.name, l.converted_amount, l.last_outcome, l.last_contacted_at, 'abandoned' = ANY(l.tags) AS nearly,
+            (SELECT json_build_object('amount', rm.expected_amount, 'due_at', rm.due_at, 'occasion', rm.occasion)
+               FROM lead_reminders rm WHERE rm.lead_id = l.id AND rm.status = 'open'
+              ORDER BY rm.due_at LIMIT 1) AS promise,
+            (SELECT a.amount FROM abandoned_attempts a WHERE a.phone = l.phone
+              ORDER BY a.attempted_at DESC LIMIT 1) AS tried,
+            d.label AS outcome_label
+       FROM leads l LEFT JOIN crm_dispositions d ON d.slug = l.last_outcome
+      WHERE l.id = $1`,
+    [leadId]
+  );
+  const l = r.rows[0];
+  if (!l) return { name: null, note: null };
+  const rs = (n: unknown) => `₹${Math.round(Number(n)).toLocaleString('en-IN')}`;
+  let note: string | null = null;
+  if (l.promise) {
+    const due = new Date(l.promise.due_at);
+    const today = new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) === due.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
+    note = `Promised${l.promise.amount ? ` ${rs(l.promise.amount)}` : ''}${today ? ' today' : due < new Date() ? ' (overdue)' : ''}`;
+  } else if (Number(l.converted_amount) > 0) {
+    note = `Gave ${rs(l.converted_amount)}`;
+  } else if (l.nearly && Number(l.tried) > 0) {
+    note = `Nearly gave ${rs(l.tried)}`;
+  } else if (l.outcome_label) {
+    note = `Last call: ${l.outcome_label}`;
+  }
+  return { name: (l.name as string | null) ?? null, note };
+}
+
+/**
+ * POST /api/app/ringing { phone, state: ringing | answered | ended } - from the
+ * phone as a DRM number rings it. Answers with who it is, for the phone's own
+ * notification.
+ */
+router.post('/ringing', deviceAuth, async (req: DeviceReq, res) => {
+  const phone = String(req.body?.phone ?? '').replace(/\D/g, '').slice(-10);
+  const state = String(req.body?.state ?? 'ringing');
+  if (phone.length !== 10 || !['ringing', 'answered', 'ended'].includes(state)) {
+    return res.status(400).json({ error: 'Bad ring.' });
+  }
+  const { id: deviceId, user_id: userId } = req.device!;
+  try {
+    let ring = (
+      await pool.query(
+        `SELECT id, lead_id FROM incoming_rings
+          WHERE device_id = $1 AND phone = $2 AND started_at > NOW() - INTERVAL '30 minutes' AND ended_at IS NULL
+          ORDER BY started_at DESC LIMIT 1`,
+        [deviceId, phone]
+      )
+    ).rows[0];
+    if (state === 'ringing' && !ring) {
+      const leadId = await leadForNumber(phone, userId);
+      ring = (
+        await pool.query(
+          `INSERT INTO incoming_rings (user_id, device_id, phone, lead_id) VALUES ($1, $2, $3, $4) RETURNING id, lead_id`,
+          [userId, deviceId, phone, leadId]
+        )
+      ).rows[0];
+    } else if (ring && state === 'answered') {
+      await pool.query(`UPDATE incoming_rings SET state = 'answered', answered_at = NOW() WHERE id = $1`, [ring.id]);
+    } else if (ring && state === 'ended') {
+      await pool.query(`UPDATE incoming_rings SET state = 'ended', ended_at = NOW() WHERE id = $1`, [ring.id]);
+    }
+    if (!ring) return res.json({ ok: true, known: false });
+    const who = await whoIsCalling(ring.lead_id);
+    res.json({ ok: true, id: ring.id, known: !!ring.lead_id, lead_id: ring.lead_id, ...who });
+  } catch (err) {
+    console.error('phoneApp.ringing error:', err);
+    res.status(500).json({ error: 'Could not save that.' });
+  }
+});
+
+/** GET /api/app/incoming - the laptop: who is calling my phone, or just did. */
+router.get('/incoming', authenticate, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, phone, lead_id, state, started_at, answered_at, ended_at
+         FROM incoming_rings
+        WHERE user_id = $1 AND dismissed_at IS NULL
+          AND started_at > NOW() - ($2 || ' minutes')::interval
+        ORDER BY started_at DESC LIMIT 3`,
+      [req.user!.userId, String(RING_SHOWN_MINUTES)]
+    );
+    const rings = await Promise.all(
+      r.rows.map(async (x) => ({
+        ...x,
+        // Rang and stopped without being answered: a missed call.
+        missed: x.state === 'ended' && !x.answered_at,
+        ...(await whoIsCalling(x.lead_id)),
+      }))
+    );
+    res.json({ rings });
+  } catch (err) {
+    console.error('phoneApp.incoming error:', err);
+    res.status(500).json({ error: 'Could not check incoming calls.' });
+  }
+});
+
+/** POST /api/app/incoming/:id/dismiss - closed on the laptop. */
+router.post('/incoming/:id/dismiss', authenticate, async (req, res) => {
+  if (!isUuid(String(req.params.id))) return res.status(404).json({ error: 'Not found.' });
+  try {
+    await pool.query(`UPDATE incoming_rings SET dismissed_at = NOW() WHERE id = $1 AND user_id = $2`, [
+      String(req.params.id),
+      req.user!.userId,
+    ]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('phoneApp.dismissRing error:', err);
+    res.status(500).json({ error: 'Could not close it.' });
+  }
+});
+
 export default router;

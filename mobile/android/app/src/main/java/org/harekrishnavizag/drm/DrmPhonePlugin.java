@@ -30,6 +30,8 @@ import com.getcapacitor.annotation.PermissionCallback;
         @Permission(alias = "phone", strings = { Manifest.permission.CALL_PHONE, Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_PHONE_STATE }),
         @Permission(alias = "audio", strings = { Manifest.permission.READ_MEDIA_AUDIO }),
         @Permission(alias = "storage", strings = { Manifest.permission.READ_EXTERNAL_STORAGE }),
+        // Android 13+: the "who is calling" notification (app 1.0.5).
+        @Permission(alias = "notify", strings = { Manifest.permission.POST_NOTIFICATIONS }),
     }
 )
 public class DrmPhonePlugin extends Plugin {
@@ -142,8 +144,10 @@ public class DrmPhonePlugin extends Plugin {
     /** Ask for the phone and call-log permissions, and to read recordings. */
     @PluginMethod
     public void requestPermissions(PluginCall call) {
-        String audio = Build.VERSION.SDK_INT >= 33 ? "audio" : "storage";
-        requestPermissionForAliases(new String[] { "phone", audio }, call, "afterPermissions");
+        String[] aliases = Build.VERSION.SDK_INT >= 33
+            ? new String[] { "phone", "audio", "notify" }
+            : new String[] { "phone", "storage" };
+        requestPermissionForAliases(aliases, call, "afterPermissions");
     }
 
     @PermissionCallback

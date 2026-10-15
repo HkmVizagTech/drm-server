@@ -266,6 +266,8 @@ final class CallSync {
             o.put("battery", Battery.ignoring(ctx));
             o.put("pending_recordings", s.pending().length());
             o.put("numbers", s.numbers().size());
+            // Who-is-calling notifications (app 1.0.5).
+            o.put("notify", androidx.core.app.NotificationManagerCompat.from(ctx).areNotificationsEnabled());
         } catch (Exception ignored) { }
         return o;
     }

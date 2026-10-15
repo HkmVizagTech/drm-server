@@ -1,5 +1,6 @@
 package org.harekrishnavizag.drm;
 
+import android.content.Intent;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.webkit.WebSettings;
@@ -14,6 +15,9 @@ import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.WebViewListener;
 
 public class MainActivity extends BridgeActivity {
+    /** A DRM page to open, e.g. from the "who is calling" notification. */
+    static final String EXTRA_PATH = "drm_path";
+
     /** The longest the opening screen waits for DRM, on a slow connection. */
     private static final long OPENING_MAX_MS = 4000;
 
@@ -46,6 +50,25 @@ public class MainActivity extends BridgeActivity {
         }
         lookLikeTheWebsite();
         if (new Store(this).isLinked()) SyncWorker.schedule(this);
+        openPath(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        openPath(intent);
+    }
+
+    /** Open a DRM page inside the app (the notification's "open their call screen"). */
+    private void openPath(Intent intent) {
+        if (intent == null || getBridge() == null || getBridge().getWebView() == null) return;
+        String path = intent.getStringExtra(EXTRA_PATH);
+        String base = new Store(this).baseUrl();
+        if (path == null || !path.startsWith("/") || base == null) return;
+        intent.removeExtra(EXTRA_PATH);
+        final String url = base.replaceAll("/+$", "") + path;
+        getBridge().getWebView().post(() -> getBridge().getWebView().loadUrl(url));
     }
 
     /**
