@@ -41,7 +41,9 @@
     "test:gavesince": "tsx scripts/test-gave-since.ts",
     "diagnose:abandoned": "tsx scripts/diagnose-abandoned.ts",
     "test:qrdate": "tsx scripts/test-qr-donation-date.ts",
-    "fix:qrdates": "tsx scripts/fix-qr-donation-dates.ts"
+    "fix:qrdates": "tsx scripts/fix-qr-donation-dates.ts",
+    "test:followups": "tsx scripts/test-follow-up-rules.ts",
+    "test:nolivesites": "tsx scripts/test-no-live-sites.ts"
   },
   "keywords": [],
   "author": "",

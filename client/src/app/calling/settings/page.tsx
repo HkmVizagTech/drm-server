@@ -91,8 +91,13 @@ const SETTING_COPY: Record<string, { label: string; help: string; kind: "number"
     kind: "number",
   },
   retry_after_days: {
-    label: "Days before calling a missed lead again",
-    help: "No answer, Busy or Switched off with no date picked. They come back at 10am that day (1 = next morning).",
+    label: "Days before a missed lead comes back",
+    help: "Counted from the day of the call, not the hour: 2 means a call on the 16th, morning or evening, comes back on the morning of the 18th. Applies to No answer, Busy, Switched off and to Interested, Will donate and Call back later when no date is picked.",
+    kind: "number",
+  },
+  max_unanswered: {
+    label: "Unanswered calls before a lead is closed",
+    help: "After this many No answer, Busy or Switched off calls in a row, the lead becomes Not reachable and leaves Follow-ups. It is not deleted, and a call that connects starts the count again.",
     kind: "number",
   },
   max_attempts: {

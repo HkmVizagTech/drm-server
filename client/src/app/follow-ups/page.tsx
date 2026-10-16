@@ -155,7 +155,10 @@ export default function FollowUpsPage() {
   const fetchBuckets = useCallback(async () => {
     const results = await Promise.all(
       BUCKETS.map((b) =>
-        apiClient.get<{ leads: Lead[] }>(`/api/crm/leads?${b.query}&sort=due&limit=100${extra}`)
+        // followups=true: what the temple counts as a follow-up, which leaves out
+        // the system's own retry after an unanswered call for anyone who is not a
+        // Nearly gave lead. See FOLLOW_UP_LISTED on the server.
+        apiClient.get<{ leads: Lead[] }>(`/api/crm/leads?${b.query}&followups=true&sort=due&limit=100${extra}`)
       )
     );
     return Object.fromEntries(BUCKETS.map((b, i) => [b.key, results[i].leads])) as Record<string, Lead[]>;

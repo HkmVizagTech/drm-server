@@ -224,8 +224,14 @@ async function main() {
   console.log('\n8. a promise holds the lead; undoing Donated now reopens it');
   const promiser = await lead('9800000102', 'Promiser', { assigned_to: ANA });
   const due = new Date(Date.now() + 10 * 86_400_000).toISOString();
+  // "Will donate" with a promise attached - what the screen sends. This used to
+  // post a disposition called 'promised', which is not one of the seeded outcomes
+  // (interested, will_donate, call_back, ...): the server answers "Unknown call
+  // result", no promise is created, and the three checks below fail. It only
+  // ever passed on a database that still had that outcome left over from an
+  // older version.
   await req('POST', `/api/crm/leads/${promiser}/call`, ana, {
-    disposition: 'promised',
+    disposition: 'will_donate',
     reminder: { due_at: due, occasion: 'Govardhan Puja', expected_amount: 5000 },
   });
   const held = await pool.query(`SELECT next_follow_up_at FROM leads WHERE id = $1`, [promiser]);

@@ -55,9 +55,37 @@ export function getSite(key: SiteKey): SiteConfig {
   };
 }
 
+/**
+ * A TEST DATABASE MUST NEVER REACH A LIVE DONATION SITE.
+ *
+ * Every test script loads the same .env as the server, and that file holds the
+ * live sites' addresses and secrets. A test that raises a receipt - the QR
+ * receipt, a cash receipt from the Send Receipt form - therefore did not stop at
+ * a stand-in: it created a real donation on the live main site and used up a
+ * real number in its 80G series. Two of them did, a fake "Lakshmi" for Rs 301 and
+ * a fake "Keep Me" for Rs 700, before anybody noticed. The tests all assumed
+ * "the site is not connected in a test", which was only ever true on a machine
+ * with an empty .env.
+ *
+ * Decided here, at the one place every outbound call goes through, and keyed on
+ * the same convention every test already uses to protect its database: a
+ * database whose name ends in _test. A local address is still allowed, so a test
+ * that stands up its own fake site can; the internet is not.
+ */
+function blockedFromTests(site: SiteConfig): boolean {
+  const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
+  if (!/_test$/.test(dbName)) return false;
+  try {
+    const host = new URL(site.baseUrl).hostname;
+    return !(host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1');
+  } catch {
+    return true;
+  }
+}
+
 export function isSiteConfigured(key: SiteKey): boolean {
   const site = getSite(key);
-  return Boolean(site.baseUrl && site.secret);
+  return Boolean(site.baseUrl && site.secret) && !blockedFromTests(site);
 }
 
 // Only the sites that actually have credentials set. A temple running just the
@@ -67,7 +95,7 @@ export function configuredSites(): SiteConfig[] {
 }
 
 function assertConfigured(site: SiteConfig) {
-  if (!site.baseUrl || !site.secret) {
+  if (!site.baseUrl || !site.secret || blockedFromTests(site)) {
     const env = SITE_ENV[site.key];
     throw new Error(
       `${site.label} is not connected.`

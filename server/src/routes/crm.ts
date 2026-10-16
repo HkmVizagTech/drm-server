@@ -44,7 +44,7 @@ import {
 } from '../utils/export';
 // The queue's filter lives with the lists it belongs to, so a change to what
 // counts as callable changes the queue and every list's count together.
-import { CALLABLE, DUE_NOW, FROM_DONATIONS_PAGE, LIST_MATCH, NOT_CLAIMED_BY_OTHERS, listPredicate, loadList, maxAttempts } from './crmLists';
+import { CALLABLE, DUE_NOW, FOLLOW_UP_LISTED, FROM_DONATIONS_PAGE, LIST_MATCH, NOT_CLAIMED_BY_OTHERS, listPredicate, loadList, maxAttempts } from './crmLists';
 import { GIVEN } from '../services/leadGiven';
 import { creditRecentLinkSends, creditUtmLinks, tidyLinkCredits } from '../services/linkCredits';
 
@@ -604,6 +604,11 @@ function buildLeadFilters(q: Record<string, unknown>, startIdx = 1): Filters {
     else if (due === 'upcoming') conditions.push(`l.next_follow_up_at >= date_trunc('day', NOW()) + INTERVAL '1 day'`);
     else if (due === 'none') conditions.push(`l.next_follow_up_at IS NULL`);
     if (due !== 'none') conditions.push(`l.next_follow_up_at IS NOT NULL`);
+    // The Follow-ups page asks for followups=true, so it lists what the temple
+    // counts as a follow-up and not every date the system booked to retry a
+    // call - see FOLLOW_UP_LISTED. Every other caller of this filter is
+    // unchanged.
+    if (q.followups === 'true' && due !== 'none') conditions.push(FOLLOW_UP_LISTED);
   }
 
   if (q.open === 'true') conditions.push(`COALESCE(s.is_open, TRUE) = TRUE`);
@@ -2516,7 +2521,9 @@ async function logCallForLead(
               -- And the rest of what a call can change, so Undo puts it all
               -- back: the "said they'd pay by QR" flag, and the conversion's
               -- note and seen-marker.
-              awaiting_qr_at, converted_note, conversion_seen_at
+              awaiting_qr_at, converted_note, conversion_seen_at,
+              -- And the two the follow-up rules keep, so Undo restores them too.
+              follow_up_auto, unanswered_reset_at
          FROM leads WHERE id = $1 FOR UPDATE`,
       [leadId]
     );
@@ -2602,11 +2609,93 @@ async function logCallForLead(
     const nextStatus =
       str(b.status, 30) ?? (laterNoteOnly ? 'later_no_date' : null) ?? d.rows[0].suggests_status ?? lead.rows[0].status;
 
-    // How long before an unanswered lead comes back round. Configurable in
-    // Settings because the right gap differs by campaign - a festival appeal
-    // three days out cannot wait a week between attempts.
+    /* WHEN A LEAD COMES BACK, AND WHEN IT STOPS COMING BACK.
+
+       Three rules, all counted in CALENDAR DAYS rather than hours - a call at
+       six in the evening and a call at nine in the morning on the 16th both
+       come back on the morning of the 18th, not at some hour of the 17th or
+       18th depending on when the phone was picked up:
+
+       1. A call that did not connect (no answer, busy, switched off), or one
+          that did and needs a follow-up (interested, will donate, will pay by
+          QR, call back later), comes back `retry_after_days` days after the
+          day of the call, at 10am - the hour the day's calling starts. A date
+          the caller picks always wins.
+
+       2. After `max_unanswered` unanswered attempts IN A ROW the lead is
+          closed as "Not reachable" and leaves the follow-ups and the queue.
+          Nothing is deleted: the lead, its calls and its notes stay, and it
+          can be reopened from Leads. Ringing a number five times that never
+          answers is not follow-up, it is a list nobody can finish.
+          A call that connects starts the count again, because somebody who
+          answered once is a person, not a dead number.
+
+       3. Whether a retry shows on the Follow-ups page is a different question,
+          decided where the page reads (FOLLOW_UP_LISTED in crmLists.ts). This
+          only records WHO chose the date - the system, after an unanswered
+          call, or a person - in leads.follow_up_auto. */
     const retry = await client.query(`SELECT value FROM crm_settings WHERE key = 'retry_after_days'`);
-    const retryAfterDays = Math.max(1, Math.min(90, Number(retry.rows[0]?.value ?? 1)));
+    const retryAfterDays = Math.max(1, Math.min(90, Number(retry.rows[0]?.value ?? 2)));
+    const cap = await client.query(`SELECT value FROM crm_settings WHERE key = 'max_unanswered'`);
+    const unansweredLimit = Math.max(1, Math.min(50, Number(cap.rows[0]?.value ?? 5)));
+
+    // Asked to be followed up, and did not connect: the "try again" outcomes.
+    // `connected` rather than the disposition alone, because a caller can mark
+    // a "no answer" as connected (it picked up and hung up) and that is a
+    // conversation, not an unanswered attempt.
+    const unanswered = d.rows[0].wants_follow_up === true && connected !== true;
+
+    // Unanswered attempts in a row, this one included (it is already saved
+    // above). Counted from the call history rather than kept in a counter, so
+    // it is right for leads that were called long before this existed and
+    // right again after an Undo removes a call.
+    let streak = 0;
+    if (unanswered) {
+      const run = await client.query(
+        `SELECT COUNT(*)::int AS n
+           FROM lead_activities a
+           JOIN crm_dispositions cd ON cd.slug = a.disposition
+          WHERE a.lead_id = $1 AND a.kind = 'call'
+            AND COALESCE(a.direction, 'outbound') = 'outbound'
+            AND COALESCE(a.connected, FALSE) = FALSE
+            AND cd.wants_follow_up = TRUE
+            AND a.occurred_at > GREATEST(
+                  COALESCE((SELECT MAX(c.occurred_at) FROM lead_activities c
+                             WHERE c.lead_id = $1 AND c.kind = 'call' AND c.connected IS TRUE),
+                           '-infinity'::timestamptz),
+                  -- The count starts over when a lead was last closed as Not
+                  -- reachable. Without this a lead somebody reopens would still
+                  -- carry its five old attempts and close again on the very
+                  -- next unanswered call.
+                  --
+                  -- Read here, in SQL, and NOT passed in from the row fetched
+                  -- above: a JavaScript Date keeps milliseconds and the column
+                  -- keeps microseconds, so the value came back a fraction of a
+                  -- millisecond EARLIER than the call that closed the lead and
+                  -- that call counted again - a reopened lead started on 2
+                  -- instead of 1.
+                  COALESCE((SELECT unanswered_reset_at FROM leads WHERE id = $1), '-infinity'::timestamptz))`,
+        [leadId]
+      );
+      streak = run.rows[0].n;
+    }
+
+    // The caller choosing a date or a stage is deciding for themselves; the
+    // cap only closes a lead nobody has said anything about.
+    const autoClose = unanswered && !followUp && !str(b.status, 30) && streak >= unansweredLimit;
+    const schedules = d.rows[0].wants_follow_up === true && !laterNoteOnly && !autoClose;
+
+    // The day of the CALL, not of this request: a call rung from the phone and
+    // recorded the next morning still counts from the day it was made. Never
+    // earlier than tomorrow morning, so a call recorded days late is not
+    // booked into the past.
+    const when = await client.query(
+      `SELECT GREATEST(
+                date_trunc('day', COALESCE($1::timestamptz, NOW())) + ($2::int || ' days')::interval + INTERVAL '10 hours',
+                date_trunc('day', NOW()) + INTERVAL '1 day' + INTERVAL '10 hours') AS at`,
+      [asDate(b.occurred_at), retryAfterDays]
+    );
+    const retryAt: Date = when.rows[0].at;
 
     const updated = await client.query(
       `UPDATE leads SET
@@ -2617,27 +2706,18 @@ async function logCallForLead(
          remarks           = COALESCE($3, remarks),
          -- Three cases, in order:
          --   a date the caller chose wins outright;
-         --   an outcome that implies "try again" (no answer, busy, switched
-         --     off) and no date given schedules the retry automatically, so an
-         --     unanswered lead comes back round instead of falling into a hole
-         --     nobody ever looks in - this is what keeps the queue alive;
+         --   an outcome that implies "come back" and no date given books the
+         --     retry day, so the lead returns instead of falling into a hole
+         --     nobody ever looks in. A promise already booked FURTHER OUT is
+         --     kept: an unanswered call on Tuesday must not pull Friday's
+         --     callback forward. One booked earlier is replaced - keeping an
+         --     overdue date is what left a "No answer" overdue for ever, first
+         --     in the queue every time and rung again within the minute;
          --   anything else clears the date, so the follow-up list doesn't fill
          --     with names nobody needs to ring again.
          next_follow_up_at = CASE
              WHEN $4::timestamptz IS NOT NULL THEN $4::timestamptz
-             -- A callback still ahead is kept. One already in the past is
-             -- NOT: keeping it is what left a "No answer" on an overdue
-             -- callback overdue for ever - first in the queue every time,
-             -- rung again within the minute.
-             --
-             -- The retry lands at 10am IST on that day (the session runs in
-             -- IST, db/pool.ts), the same time as the "Tomorrow" button. It
-             -- used to be NOW() plus the days, so a "No answer" at 4pm came
-             -- back at 4pm - not in the morning, when the day's calling starts
-             -- and the follow-up list is read.
-             WHEN $5::boolean THEN CASE
-               WHEN next_follow_up_at > NOW() THEN next_follow_up_at
-               ELSE date_trunc('day', NOW()) + ($9::int || ' days')::interval + INTERVAL '10 hours' END
+             WHEN $5::boolean THEN GREATEST($9::timestamptz, COALESCE(next_follow_up_at, $9::timestamptz))
              ELSE NULL END,
          follow_up_note    = CASE WHEN $4::timestamptz IS NOT NULL THEN $6 ELSE follow_up_note END,
          do_not_call       = do_not_call OR $7::boolean,
@@ -2654,18 +2734,44 @@ async function logCallForLead(
          updated_at        = NOW()
        WHERE id = $8 RETURNING *`,
       [
-        nextStatus,
+        autoClose ? 'unreachable' : nextStatus,
         disposition,
         str(b.note, 2000),
         followUp,
-        d.rows[0].wants_follow_up === true && !laterNoteOnly,
+        schedules,
         str(b.follow_up_note, 500),
         disposition === 'do_not_call',
         leadId,
-        retryAfterDays,
+        retryAt,
         disposition === 'will_pay_qr',
       ]
     );
+
+    // Who chose this date. The database clears follow_up_auto whenever the
+    // date changes by any route (trg_leads_clear_follow_up_auto), so a person's
+    // date can never be mistaken for the system's; this sets it back on only
+    // when the date the system just booked is the one that stands. A promise
+    // kept from before, or a day the caller picked, is not the system's, so it
+    // is not marked.
+    //
+    // Every date the system books is marked - after an unanswered call AND after
+    // a connected one with no day picked - because both are listed only from
+    // their day (FOLLOW_UP_LISTED). Which of the two it was is read from
+    // last_outcome, not stored.
+    const bookedNow = updated.rows[0].next_follow_up_at as Date | null;
+    const systemChose = schedules && !followUp && !!bookedNow && +new Date(bookedNow) === +retryAt;
+    await client.query(
+      `UPDATE leads SET follow_up_auto = $2,
+              -- Strictly after the call that closed it (that call must not count
+              -- again) and on a millisecond boundary, so it survives the trip
+              -- through the Undo snapshot, which is JSON and keeps milliseconds.
+              unanswered_reset_at = CASE WHEN $3::boolean
+                                         THEN date_trunc('milliseconds', NOW()) + INTERVAL '1 millisecond'
+                                         ELSE unanswered_reset_at END
+        WHERE id = $1`,
+      [leadId, systemChose, autoClose]
+    );
+    updated.rows[0].follow_up_auto = systemChose;
 
     // And the share they were sent is marked as awaited too, which is what the
     // matcher reads. The most recent unmatched one for this lead: a caller
@@ -2812,7 +2918,14 @@ async function logCallForLead(
     }
 
     await client.query('COMMIT');
-    return { activity: activity.rows[0], lead: updated.rows[0], reminder };
+    // auto_closed and unanswered_streak are not columns: they let the screen say
+    // "closed as Not reachable after 5 unanswered attempts" instead of the lead
+    // silently disappearing from the list.
+    return {
+      activity: activity.rows[0],
+      lead: { ...updated.rows[0], auto_closed: autoClose, unanswered_streak: streak },
+      reminder,
+    };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;
@@ -3497,6 +3610,9 @@ router.delete('/activities/:id', async (req, res) => {
          awaiting_qr_at     = CASE WHEN $13::boolean THEN $14::timestamptz ELSE awaiting_qr_at END,
          converted_note     = CASE WHEN $13::boolean THEN $15::text ELSE converted_note END,
          conversion_seen_at = CASE WHEN $13::boolean THEN $16::timestamptz ELSE conversion_seen_at END,
+         -- The count's restart point: undoing the call that closed a lead must
+         -- not leave its earlier attempts forgotten.
+         unanswered_reset_at = CASE WHEN $17::boolean THEN $18::timestamptz ELSE unanswered_reset_at END,
          updated_at        = NOW()
        WHERE id = $12`,
       [
@@ -3516,8 +3632,15 @@ router.delete('/activities/:id', async (req, res) => {
         before.awaiting_qr_at ?? null,
         before.converted_note ?? null,
         before.conversion_seen_at ?? null,
+        Object.prototype.hasOwnProperty.call(before, 'unanswered_reset_at'),
+        before.unanswered_reset_at ?? null,
       ]
     );
+    // Whose date it was. Separate from the statement above because putting the
+    // date back is itself a change of date, which clears the flag.
+    if (Object.prototype.hasOwnProperty.call(before, 'follow_up_auto')) {
+      await client.query(`UPDATE leads SET follow_up_auto = $2 WHERE id = $1`, [a.lead_id, before.follow_up_auto === true]);
+    }
 
     // What the call did outside the lead row.
     const extra = (before._extra ?? {}) as { qr_share?: { id: string; awaiting_payment_at: string | null }; closed_reminders?: string[] };

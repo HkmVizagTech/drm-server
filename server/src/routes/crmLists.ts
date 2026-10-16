@@ -122,6 +122,52 @@ export const DUE_NOW = `
   (l.next_follow_up_at IS NULL OR l.next_follow_up_at < date_trunc('day', NOW()) + INTERVAL '1 day')`;
 
 /**
+ * Does this lead's follow-up belong on the Follow-ups page - and yet?
+ *
+ * Two kinds of date sit in leads.next_follow_up_at and they are not the same
+ * thing:
+ *
+ *   - a date a PERSON chose, or a promise: a callback booked, a day picked on
+ *     the call screen. Listed as soon as it exists, so a caller can see what is
+ *     coming and plan for it ("Coming up");
+ *   - a date the SYSTEM booked after a call, because nobody said when:
+ *     two days on for no answer, busy, switched off - and for a call that
+ *     connected and needs another (interested, will donate, call back later).
+ *     leads.follow_up_auto marks those.
+ *
+ * The temple's rules for the second kind:
+ *
+ *   1. ONLY FROM ITS DAY. A call on the evening of the 16th comes back on the
+ *      morning of the 18th and is NOT on Follow-ups before then. Listed early
+ *      under "Coming up" it was on the page from the moment the call ended,
+ *      which is not "after two days".
+ *   2. A RETRY AFTER AN UNANSWERED CALL (no answer, busy, switched off) is
+ *      listed only for Nearly gave leads, the people who started a donation and
+ *      did not finish (tagged 'abandoned'). For previous donors and uploaded
+ *      sheets it comes back through the calling queue and never appears here,
+ *      because Follow-ups is for people who actually said something.
+ *      A call that CONNECTED and needs another is listed for everyone.
+ *
+ * "Its day" is the same boundary the calling queue uses (DUE_NOW), so a lead is
+ * on Follow-ups from the morning it is also back in the queue.
+ *
+ * One definition, used by the page, the overview's counts and the follow-up
+ * report, so the number on a tile is the number of rows behind it.
+ */
+export const FOLLOW_UP_LISTED = `(
+  l.follow_up_auto = FALSE
+  OR (
+    l.next_follow_up_at < date_trunc('day', NOW()) + INTERVAL '1 day'
+    AND (
+      'abandoned' = ANY(l.tags)
+      OR NOT EXISTS (
+        SELECT 1 FROM crm_dispositions fd
+         WHERE fd.slug = l.last_outcome AND fd.wants_follow_up AND NOT fd.counts_connected)
+    )
+  )
+)`;
+
+/**
  * An attempt made on the main site's standalone /donations page.
  *
  * That page is its own campaign with its own team and dashboard (see

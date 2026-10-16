@@ -517,22 +517,25 @@ INSERT INTO crm_settings (key, value) VALUES
   -- How many unanswered attempts before the lead is parked rather than
   -- dialled forever.
   ('max_attempts',          '6'::jsonb),
-  -- Days before an unanswered lead comes back round (at 10am that day).
+  -- Days after a call before a lead that needs another comes back, at 10am
+  -- that day - counted from the DAY of the call, so a call at six in the
+  -- evening and one at nine in the morning come back on the same morning.
   -- Without this a "no answer" would leave the lead with no date at all and
   -- it would quietly drop out of everyone's day.
-  ('retry_after_days',      '1'::jsonb),
+  ('retry_after_days',      '2'::jsonb),
   -- Calling hours, so the screen can warn before someone rings at 6am.
   ('calling_hours',         '{"from":"09:00","to":"20:00"}'::jsonb),
   -- Whether a caller may see leads assigned to someone else.
   ('callers_see_all_leads', 'false'::jsonb)
 ON CONFLICT (key) DO NOTHING;
 
--- No answer, Busy and Switched off come back the NEXT morning. The default
--- was 2 days; it is moved to 1 only where nobody has ever changed it in
--- Settings (updated_by is set by every save there), so a gap an admin chose
--- on purpose is left alone. Runs once in effect: after it the value is 1.
-UPDATE crm_settings SET value = '1'::jsonb, updated_at = NOW()
- WHERE key = 'retry_after_days' AND value = '2'::jsonb AND updated_by IS NULL;
+-- Unanswered calls, and calls that need another, come back TWO days on (the
+-- temple's rule), not the next morning. The gap was 2, was moved to 1 for a
+-- while, and is moved to 2 again here - only where nobody has changed it in
+-- Settings (updated_by is set by every save there), so a gap an admin chose on
+-- purpose is left alone. Runs once in effect: after it the value is 2.
+UPDATE crm_settings SET value = '2'::jsonb, updated_at = NOW()
+ WHERE key = 'retry_after_days' AND value = '1'::jsonb AND updated_by IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- REMINDERS
@@ -2635,3 +2638,98 @@ UPDATE crm_links SET
   utm_campaign = NULLIF(lower(substring(url from '[?&]utm_campaign=([^&#]*)')), '')
  WHERE utm_source IS NULL AND utm_medium IS NULL AND utm_campaign IS NULL AND url ~* 'utm_';
 CREATE INDEX IF NOT EXISTS idx_crm_links_utm_campaign ON crm_links(utm_campaign) WHERE utm_campaign IS NOT NULL;
+
+
+/* =========================================================================
+   FOLLOW-UPS: WHEN A LEAD COMES BACK, AND WHEN IT STOPS COMING BACK
+   =========================================================================
+
+   THE TEMPLE'S RULES
+   - A call nobody answers (no answer, busy, switched off) comes back TWO DAYS
+     after the day of the call, in the morning - counted in calendar days, so a
+     call at six in the evening on the 16th and one at nine in the morning
+     both come back on the morning of the 18th.
+   - After FIVE unanswered attempts in a row the lead is closed as "Not
+     reachable" and leaves the follow-ups and the queue. Nothing is deleted:
+     the lead and every call stay on record and it can be reopened from Leads.
+   - A call that connects and needs another (interested, will donate, will pay
+     by QR, call back later) comes back two days on too - for every lead.
+   - But a RETRY after an unanswered call is listed on the Follow-ups page only
+     for Nearly gave leads. For previous donors and uploaded sheets it comes
+     back through the calling queue and stays off Follow-ups, which is for
+     people who actually said something.
+
+   That last rule needs to know which dates the system booked and which a
+   person chose, because both live in leads.next_follow_up_at. */
+
+-- Closed, neutral: not a "win" and not a "lost" - nobody said no, the number
+-- simply never answered, so it must not count against the conversion figures.
+INSERT INTO crm_statuses (slug, label, tone, sort_order, is_won, is_lost, is_open) VALUES
+  ('unreachable', 'Not reachable', 'zinc', 85, FALSE, FALSE, FALSE)
+ON CONFLICT (slug) DO NOTHING;
+
+-- Unanswered attempts in a row before a lead is closed as Not reachable.
+INSERT INTO crm_settings (key, value) VALUES ('max_unanswered', '5'::jsonb)
+ON CONFLICT (key) DO NOTHING;
+
+/* leads.follow_up_auto: TRUE while the follow-up date standing on a lead is one
+   the SYSTEM booked after a call - two days on, because nobody said when - and
+   FALSE for a date a person chose or a promise. Listed on Follow-ups only from
+   its day, and for an unanswered call only for Nearly gave leads; see
+   FOLLOW_UP_LISTED in routes/crmLists.ts. (It first meant only "a retry after
+   an unanswered call"; leads already marked that way keep meaning the same
+   thing, and the rule reads the last outcome to tell the two apart.)
+
+   Added once, and on that one occasion the leads that are today sitting on a
+   system retry are marked, so the rule applies to what is already there and
+   not only to calls made from now on. Guarded on the column not existing yet:
+   run on every boot, an unguarded backfill would re-mark a lead whose follow-up
+   a person had since changed. */
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+     WHERE table_schema = current_schema() AND table_name = 'leads' AND column_name = 'follow_up_auto'
+  ) THEN
+    ALTER TABLE leads ADD COLUMN follow_up_auto BOOLEAN NOT NULL DEFAULT FALSE;
+    UPDATE leads SET follow_up_auto = TRUE
+     WHERE next_follow_up_at IS NOT NULL
+       AND last_outcome IN (SELECT slug FROM crm_dispositions WHERE wants_follow_up AND NOT counts_connected);
+  END IF;
+END $$;
+
+/* leads.unanswered_reset_at: where the count of unanswered attempts in a row
+   starts over. Set when a lead is closed as Not reachable, so that reopening it
+   gives it a fresh five attempts instead of closing it again on the next call.
+   A call that connects also restarts the count, but that is read from the call
+   history and needs no column. */
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS unanswered_reset_at TIMESTAMPTZ;
+
+/* Any change to the follow-up date, by ANY route, clears the flag.
+
+   There are a dozen places that write next_follow_up_at - the follow-up
+   buttons, editing a lead, bulk actions, promises, undo - and the flag must
+   not outlive a date a person has just set, or that follow-up would be hidden
+   from the page it was asked for. Doing it in the database means none of them
+   has to remember, including the next one somebody writes. The one writer that
+   marks a date as the system's (the call handler) does it in a second
+   statement, after this has run. */
+CREATE OR REPLACE FUNCTION leads_clear_follow_up_auto() RETURNS trigger AS $fn$
+BEGIN
+  IF NEW.next_follow_up_at IS DISTINCT FROM OLD.next_follow_up_at THEN
+    NEW.follow_up_auto := FALSE;
+  END IF;
+  RETURN NEW;
+END
+$fn$ LANGUAGE plpgsql;
+
+-- Created once. Guarded rather than dropped and recreated, because DROP
+-- TRIGGER takes a lock on leads that every boot would have to wait for.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_leads_clear_follow_up_auto') THEN
+    CREATE TRIGGER trg_leads_clear_follow_up_auto
+      BEFORE UPDATE OF next_follow_up_at ON leads
+      FOR EACH ROW EXECUTE FUNCTION leads_clear_follow_up_auto();
+  END IF;
+END $$;

@@ -46,6 +46,7 @@ import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import { reconcileConversions } from './crm';
+import { FOLLOW_UP_LISTED } from './crmLists';
 import { istDate, APP_TIMEZONE } from '../bootTimezone';
 import {
   describeFilters,
@@ -249,10 +250,10 @@ router.get('/dashboard', async (req, res) => {
       ),
       pool.query(
         `SELECT
-           COUNT(*) FILTER (WHERE next_follow_up_at < date_trunc('day', NOW()))::int AS overdue,
-           COUNT(*) FILTER (WHERE next_follow_up_at >= date_trunc('day', NOW())
+           COUNT(*) FILTER (WHERE ${FOLLOW_UP_LISTED} AND next_follow_up_at < date_trunc('day', NOW()))::int AS overdue,
+           COUNT(*) FILTER (WHERE ${FOLLOW_UP_LISTED} AND next_follow_up_at >= date_trunc('day', NOW())
                               AND next_follow_up_at <  date_trunc('day', NOW()) + INTERVAL '1 day')::int AS today,
-           COUNT(*) FILTER (WHERE next_follow_up_at >= date_trunc('day', NOW()) + INTERVAL '1 day'
+           COUNT(*) FILTER (WHERE ${FOLLOW_UP_LISTED} AND next_follow_up_at >= date_trunc('day', NOW()) + INTERVAL '1 day'
                               AND next_follow_up_at <  date_trunc('day', NOW()) + INTERVAL '8 days')::int AS next_7_days,
            COUNT(*) FILTER (WHERE next_follow_up_at IS NULL)::int AS unscheduled
          FROM leads l LEFT JOIN crm_statuses s ON l.status = s.slug
@@ -1270,12 +1271,12 @@ router.get('/reports/follow-ups', async (_req, res) => {
   try {
     const rows = await pool.query(
       `SELECT COALESCE(u.name, 'Unassigned') AS caller, l.assigned_to,
-              COUNT(*) FILTER (WHERE l.next_follow_up_at < date_trunc('day', NOW()) - INTERVAL '7 days')::int AS over_a_week,
-              COUNT(*) FILTER (WHERE l.next_follow_up_at < date_trunc('day', NOW())
+              COUNT(*) FILTER (WHERE ${FOLLOW_UP_LISTED} AND l.next_follow_up_at < date_trunc('day', NOW()) - INTERVAL '7 days')::int AS over_a_week,
+              COUNT(*) FILTER (WHERE ${FOLLOW_UP_LISTED} AND l.next_follow_up_at < date_trunc('day', NOW())
                                  AND l.next_follow_up_at >= date_trunc('day', NOW()) - INTERVAL '7 days')::int AS this_week,
-              COUNT(*) FILTER (WHERE l.next_follow_up_at >= date_trunc('day', NOW())
+              COUNT(*) FILTER (WHERE ${FOLLOW_UP_LISTED} AND l.next_follow_up_at >= date_trunc('day', NOW())
                                  AND l.next_follow_up_at <  date_trunc('day', NOW()) + INTERVAL '1 day')::int AS due_today,
-              COUNT(*) FILTER (WHERE l.next_follow_up_at >= date_trunc('day', NOW()) + INTERVAL '1 day')::int AS upcoming,
+              COUNT(*) FILTER (WHERE ${FOLLOW_UP_LISTED} AND l.next_follow_up_at >= date_trunc('day', NOW()) + INTERVAL '1 day')::int AS upcoming,
               COUNT(*) FILTER (WHERE l.next_follow_up_at IS NULL)::int AS unscheduled,
               MIN(l.next_follow_up_at) AS oldest_due
          FROM leads l

@@ -590,7 +590,10 @@ function CallScreen({
       }
       setSaving(d.slug);
       try {
-        const res = await apiClient.post<{ activity: { id: string } }>(`/api/crm/leads/${lead.id}/call`, {
+        const res = await apiClient.post<{
+          activity: { id: string };
+          lead?: { auto_closed?: boolean; unanswered_streak?: number };
+        }>(`/api/crm/leads/${lead.id}/call`, {
           ...form.payload(),
           disposition: d.slug,
           // They rang us. Left out for an ordinary call, which the server
@@ -611,6 +614,14 @@ function CallScreen({
           body: inbound ? `${lc.name} · they called you` : lc.name,
           action: { label: "Undo", onClick: () => void undo(lc) },
         });
+        // The system closed it for them: say so, or the lead just vanishes and
+        // the caller wonders where it went. Nothing is deleted.
+        if (res.lead?.auto_closed) {
+          toast.info(
+            "Closed: Not reachable",
+            `${res.lead.unanswered_streak ?? ""} unanswered attempts in a row. It is off Follow-ups; reopen it from Leads if needed.`
+          );
+        }
         resetForm();
         setPicked(null);
         clearDialled();
