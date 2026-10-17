@@ -43,7 +43,8 @@
     "test:qrdate": "tsx scripts/test-qr-donation-date.ts",
     "fix:qrdates": "tsx scripts/fix-qr-donation-dates.ts",
     "test:followups": "tsx scripts/test-follow-up-rules.ts",
-    "test:nolivesites": "tsx scripts/test-no-live-sites.ts"
+    "test:nolivesites": "tsx scripts/test-no-live-sites.ts",
+    "fix:retrydates": "tsx scripts/fix-retry-dates.ts"
   },
   "keywords": [],
   "author": "",
