@@ -1127,7 +1127,7 @@ router.get('/search', async (req, res) => {
                 -- so a search by name shows "called yesterday" either way.
                 pl.id AS lead_id, pl.last_contacted_at, pl.converted_at, pl.do_not_call,
                 pl.next_follow_up_at, pld.label AS last_outcome_label
-           FROM people p
+           FROM live_people p
            LEFT JOIN leads pl ON pl.phone = right(regexp_replace(p.phone, '\\D', '', 'g'), 10)
            LEFT JOIN crm_dispositions pld ON pld.slug = pl.last_outcome
           WHERE (CASE WHEN $4::boolean THEN regexp_replace(p.phone, '\\D', '', 'g') LIKE $2::text

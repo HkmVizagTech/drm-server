@@ -2733,3 +2733,43 @@ BEGIN
       FOR EACH ROW EXECUTE FUNCTION leads_clear_follow_up_auto();
   END IF;
 END $$;
+
+
+/* =========================================================================
+   HIDING A DONOR WITHOUT DELETING THEM
+   =========================================================================
+
+   A person can be marked hidden. They stay in the database exactly as they are -
+   the donor row, every donation and receipt, their names - and every screen
+   that lists donors or adds up money stops showing them.
+
+   WHY NOT DELETE
+   Donations carry receipt numbers from the 80G series. A record that has a
+   receipt number is something an auditor can ask about, so "make it go away" is
+   the wrong tool; "do not show it in the working screens" is the right one.
+
+   Two test runs raised real receipts for made-up donors on the live site (see
+   hkmvClient.ts blockedFromTests). Those two are the first thing this hides.
+
+   THE HIDING SITS IN TWO VIEWS, NOT IN EVERY QUERY
+   The screens that list donors or total money read live_people and
+   live_donations instead of the tables. A hidden donor's donations are left out
+   of live_donations too, so a total cannot count money from a donor the People
+   page does not show. Writes, lookups by id and the site sync all still use the
+   real tables, so nothing about how a record is created or updated changes - and
+   the site's sync cannot un-hide anybody, because it never writes these columns.
+
+   KEEP THE VIEWS LAST IN THIS FILE. A view written as `SELECT *` takes the
+   columns the table has when the view is created. They are re-created on every
+   boot, so a column added anywhere ABOVE them appears at once; one added below
+   would not appear until the following boot. */
+ALTER TABLE people ADD COLUMN IF NOT EXISTS hidden_at TIMESTAMPTZ;
+ALTER TABLE people ADD COLUMN IF NOT EXISTS hidden_reason VARCHAR(200);
+CREATE INDEX IF NOT EXISTS idx_people_hidden ON people(id) WHERE hidden_at IS NOT NULL;
+
+CREATE OR REPLACE VIEW live_people AS
+  SELECT * FROM people WHERE hidden_at IS NULL;
+
+CREATE OR REPLACE VIEW live_donations AS
+  SELECT d.* FROM donations d
+   WHERE NOT EXISTS (SELECT 1 FROM people hp WHERE hp.id = d.person_id AND hp.hidden_at IS NOT NULL);

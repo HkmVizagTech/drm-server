@@ -1,3 +1,6 @@
+// Every query in this file is a display or a total, so every one reads live_people and
+// live_donations: a donor marked hidden is not shown here and their money is not
+// added up. See HIDING A DONOR WITHOUT DELETING THEM in db/schema.sql.
 import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
@@ -32,7 +35,7 @@ router.get('/donations/period', async (req, res) => {
   }
 
   let query = `SELECT ${groupBy} as period, purpose, SUM(amount) as total, COUNT(*) as count
-               FROM donations`;
+               FROM live_donations`;
   const values: unknown[] = [];
   if (purpose) {
     query += ' WHERE purpose = $1';
@@ -47,7 +50,7 @@ router.get('/donations/period', async (req, res) => {
 router.get('/donors/top', async (req, res) => {
   const { limit = '10', period } = req.query;
   let query = `SELECT p.id, p.name, p.phone, SUM(d.amount) as total_donated, COUNT(d.id) as donation_count
-               FROM people p JOIN donations d ON p.id = d.person_id`;
+               FROM live_people p JOIN live_donations d ON p.id = d.person_id`;
   const values: unknown[] = [];
   if (period) {
     // Parameterised, and a number rather than text.
@@ -65,7 +68,12 @@ router.get('/donors/top', async (req, res) => {
     query += ` WHERE d.created_at >= NOW() - make_interval(months => $${values.length + 1}::int)`;
     values.push(months);
   }
-  query += ` GROUP BY p.id ORDER BY total_donated DESC LIMIT $${values.length + 1}`;
+  // Grouped by every column selected, not just p.id. Postgres lets a query select
+  // p.name and p.phone while grouping only by p.id when p is a TABLE, because the
+  // primary key decides them. A view has no primary key to rely on, so reading
+  // live_people with the shorter form is an error - which is what took this and
+  // the dashboard's own top-donors list down when they were moved onto the view.
+  query += ` GROUP BY p.id, p.name, p.phone ORDER BY total_donated DESC LIMIT $${values.length + 1}`;
   values.push(Math.min(500, Math.max(1, Number(limit) || 10)));
   const result = await pool.query(query, values);
   res.json(result.rows);
@@ -75,7 +83,7 @@ router.get('/donors/top', async (req, res) => {
 router.get('/people/roles', async (_req, res) => {
   const result = await pool.query(`
     SELECT unnest(roles) as role, COUNT(*) as count
-    FROM people
+    FROM live_people
     GROUP BY role
     ORDER BY count DESC
   `);
@@ -124,21 +132,21 @@ router.get('/dashboard', async (_req, res) => {
       SELECT COUNT(*) AS total,
              COUNT(*) FILTER (WHERE 'donor' = ANY(roles)) AS donors,
              COUNT(*) FILTER (WHERE created_at >= date_trunc('month', NOW())) AS new_this_month
-      FROM people
+      FROM live_people
     `),
     pool.query(`
       SELECT COALESCE(SUM(amount), 0) AS total,
              COUNT(*) AS count,
              COALESCE(AVG(amount), 0) AS avg_gift
-      FROM donations
+      FROM live_donations
     `),
     pool.query(`
       SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
-      FROM donations WHERE created_at >= date_trunc('month', NOW())
+      FROM live_donations WHERE created_at >= date_trunc('month', NOW())
     `),
     pool.query(`
       SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
-      FROM donations
+      FROM live_donations
       WHERE created_at >= date_trunc('month', NOW()) - INTERVAL '1 month'
         AND created_at <  date_trunc('month', NOW())
     `),
@@ -151,7 +159,7 @@ router.get('/dashboard', async (_req, res) => {
     pool.query(`
       SELECT
         (SELECT COUNT(*) FROM prasadam_deliveries WHERE status IN ('pending', 'packed')) AS prasadam_pending,
-        (SELECT COUNT(*) FROM donations WHERE receipt_generated = false) AS receipts_pending,
+        (SELECT COUNT(*) FROM live_donations WHERE receipt_generated = false) AS receipts_pending,
         (SELECT COUNT(*) FROM events WHERE date_end >= NOW()) AS upcoming_events,
         (SELECT COUNT(*) FROM triggers WHERE status = 'pending') AS pending_triggers
     `),
@@ -166,7 +174,7 @@ router.get('/dashboard', async (_req, res) => {
              date_trunc('month', NOW()),
              INTERVAL '1 month'
            ) AS m(month)
-      LEFT JOIN donations d ON date_trunc('month', d.created_at) = m.month
+      LEFT JOIN live_donations d ON date_trunc('month', d.created_at) = m.month
       GROUP BY m.month
       ORDER BY m.month
     `),
@@ -182,22 +190,22 @@ router.get('/dashboard', async (_req, res) => {
       SELECT lower(${displayPurposeSql('purpose', 'source_page')}) AS purpose,
              COALESCE(SUM(amount), 0) AS total,
              COUNT(*) AS count
-      FROM donations
+      FROM live_donations
       GROUP BY lower(${displayPurposeSql('purpose', 'source_page')})
       ORDER BY total DESC LIMIT 8
     `),
     pool.query(`
       SELECT p.id, p.name, p.phone,
              SUM(d.amount) AS total, COUNT(d.id) AS count
-      FROM people p JOIN donations d ON d.person_id = p.id
-      GROUP BY p.id ORDER BY total DESC LIMIT 8
+      FROM live_people p JOIN live_donations d ON d.person_id = p.id
+      GROUP BY p.id, p.name, p.phone ORDER BY total DESC LIMIT 8
     `),
     pool.query(`
       SELECT d.id, d.amount, d.purpose, d.created_at, d.receipt_number,
              d.source_site, d.source_page, d.campaign,
              ${displayPurposeSql('d.purpose', 'd.source_page')} AS display_purpose,
              p.id AS person_id, p.name AS donor_name, p.phone AS donor_phone
-      FROM donations d JOIN people p ON d.person_id = p.id
+      FROM live_donations d JOIN live_people p ON d.person_id = p.id
       ORDER BY d.created_at DESC LIMIT 8
     `),
     // Totals per donation site - the main site and the annadan site are
@@ -207,7 +215,7 @@ router.get('/dashboard', async (_req, res) => {
              COALESCE(SUM(amount), 0) AS total,
              COUNT(*) AS count,
              COALESCE(SUM(amount) FILTER (WHERE created_at >= date_trunc('month', NOW())), 0) AS this_month
-      FROM donations
+      FROM live_donations
       GROUP BY source_site
       ORDER BY total DESC
     `),
@@ -220,7 +228,7 @@ router.get('/dashboard', async (_req, res) => {
              COALESCE(SUM(amount), 0) AS total,
              COUNT(*) AS count,
              COALESCE(SUM(amount) FILTER (WHERE created_at >= date_trunc('month', NOW())), 0) AS this_month
-      FROM donations
+      FROM live_donations
       GROUP BY source_site, COALESCE(${CANON_PAGE}, '(not recorded)')
       ORDER BY total DESC
       LIMIT 40
@@ -237,7 +245,7 @@ router.get('/dashboard', async (_req, res) => {
              COALESCE(SUM(amount) FILTER (WHERE created_at >= date_trunc('month', NOW()) - INTERVAL '1 month'
                                             AND created_at <  date_trunc('month', NOW())), 0) AS last_month,
              MAX(created_at) AS last_gift_at
-      FROM donations
+      FROM live_donations
       WHERE source_site = 'hkmv'
       GROUP BY ${PAGE_GROUP}
     `),
@@ -360,13 +368,13 @@ router.get('/pages', async (_req, res) => {
                                             AND created_at <  date_trunc('month', NOW())), 0) AS last_month,
              MIN(created_at) AS first_gift_at,
              MAX(created_at) AS last_gift_at
-      FROM donations
+      FROM live_donations
       GROUP BY ${PAGE_GROUP}, COALESCE(${CANON_PAGE}, '(not recorded)'), source_site
       ORDER BY total DESC
     `),
     pool.query(`
       SELECT source_site, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
-      FROM donations GROUP BY source_site
+      FROM live_donations GROUP BY source_site
     `),
   ]);
 

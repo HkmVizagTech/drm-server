@@ -107,7 +107,8 @@ const PEOPLE_SELECT = `p.*,
               g.last_donation_at,
               COALESCE(s.active_subscriptions, 0) AS active_subscriptions`;
 
-const PEOPLE_FROM = `FROM people p
+// live_people: a donor marked hidden is not listed, counted or exported.
+const PEOPLE_FROM = `FROM live_people p
        LEFT JOIN LATERAL (
          SELECT COUNT(*) AS donation_count,
                 SUM(amount) AS lifetime_total,
@@ -141,7 +142,7 @@ router.get('/', async (req, res) => {
        LIMIT $${f.next} OFFSET $${f.next + 1}`,
       [...f.values, limit, offset]
     ),
-    pool.query(`SELECT COUNT(*) FROM people p ${f.where}`, f.values),
+    pool.query(`SELECT COUNT(*) FROM live_people p ${f.where}`, f.values),
   ]);
 
   const total = Number(count.rows[0].count);

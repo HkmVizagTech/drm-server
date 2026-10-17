@@ -45,6 +45,7 @@ type Db = { query: PoolClient['query'] };
 import type { PoolClient } from 'pg';
 import { alignQrDonationDate } from '../services/qrDonationDate';
 import { greetName } from '../utils/greetName';
+import { bookQrFollowUp } from '../services/qrFollowUp';
 
 const router = Router();
 
@@ -379,6 +380,17 @@ const shareQrToLead: RequestHandler = async (req, res) => {
         `Opened WhatsApp with the ${q.label} QR${amount ? ` for ₹${Number(amount).toLocaleString('en-IN')}` : ''}.`,
         str(req.body?.session_id, 36),
       ]
+    );
+
+    /* The QR has gone out, so the lead comes back and somebody checks it was paid.
+
+       Without this a QR sent with no call outcome logged - or an outcome logged
+       with no date - left the lead with nothing to bring it back: waiting on
+       money nobody would ask about. See services/qrFollowUp.ts. Non-fatal: the
+       share is already recorded and the message built, and a failure here must
+       not stop the caller sending the QR they are on the phone about. */
+    await bookQrFollowUp(pool, l.id).catch((e) =>
+      console.error('crm.shareQr could not book the follow-up (non-fatal):', (e as Error).message)
     );
 
     res.status(201).json({

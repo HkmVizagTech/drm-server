@@ -264,7 +264,10 @@ function buildDonationFilters(q: Record<string, unknown>): DonationFilters {
 const DONATION_SELECT = `d.*, p.name AS donor_name, p.phone as donor_phone,
               ${displayPurposeSql('d.purpose', 'd.source_page')} AS display_purpose`;
 
-const DONATION_FROM = `FROM donations d JOIN people p ON d.person_id = p.id`;
+/* live_donations and live_people, not the tables: a donor marked hidden (and so
+   their donations) is left out of the list, its count, its total and the export.
+   See HIDING A DONOR WITHOUT DELETING THEM in db/schema.sql. */
+const DONATION_FROM = `FROM live_donations d JOIN live_people p ON d.person_id = p.id`;
 
 // List donations with filters
 router.get('/', async (req, res) => {
@@ -309,7 +312,7 @@ router.get('/', async (req, res) => {
 router.get('/purposes', async (_req, res) => {
   const result = await pool.query(`
     SELECT lower(${displayPurposeSql('purpose', 'source_page')}) AS purpose, COUNT(*) AS count
-    FROM donations
+    FROM live_donations
     GROUP BY lower(${displayPurposeSql('purpose', 'source_page')})
     ORDER BY count DESC
   `);
@@ -323,7 +326,7 @@ router.get('/sources', async (_req, res) => {
   const [sites, pages] = await Promise.all([
     pool.query(`
       SELECT source_site, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS total
-      FROM donations GROUP BY source_site ORDER BY total DESC
+      FROM live_donations GROUP BY source_site ORDER BY total DESC
     `),
     // Canonicalised, so the dropdown offers "/donations" once rather than
     // "donations" and "/donations" as two entries that each show half the rows.
@@ -332,7 +335,7 @@ router.get('/sources', async (_req, res) => {
              '/' || btrim(lower(btrim(source_page)), '/') AS source_page,
              COUNT(*) AS count,
              COALESCE(SUM(amount), 0) AS total
-      FROM donations
+      FROM live_donations
       WHERE source_page IS NOT NULL AND btrim(source_page) <> ''
       GROUP BY source_site, '/' || btrim(lower(btrim(source_page)), '/')
       ORDER BY count DESC
@@ -431,7 +434,7 @@ router.get('/summary', async (_req, res) => {
       purpose,
       SUM(amount) as total,
       COUNT(*) as count
-    FROM donations
+    FROM live_donations
     WHERE receipt_generated = false
     GROUP BY purpose
   `);
