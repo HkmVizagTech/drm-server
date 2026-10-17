@@ -129,6 +129,8 @@ export interface ReceiptOutcome {
   receipt_number: string | null;
   external_donation_id: string | null;
   credited: boolean;
+  /** The mobile the receipt was sent to. */
+  sent_to?: string | null;
 }
 
 /**
@@ -433,7 +435,7 @@ export function ReceiptDialog({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [shown, setShown] = useState(false);
-  const [sent, setSent] = useState<{ receiptNo: string | null; message: string } | null>(null);
+  const [sent, setSent] = useState<{ receiptNo: string | null; message: string; sentTo: string | null } | null>(null);
   const [v, setV] = useState<ReceiptValues>(emptyReceipt());
   const set = (patch: Partial<ReceiptValues>) => setV((x) => ({ ...x, ...patch }));
   void currentUserName;
@@ -521,6 +523,7 @@ export function ReceiptDialog({
         setSent({
           receiptNo: r.receipt_number,
           message: `Receipt ${r.receipt_number ?? ""} sent for ${currency(Number(payment.amount))}.`,
+          sentTo: r.sent_to ?? digits10(v.mobile),
         });
         return;
       }
@@ -538,6 +541,13 @@ export function ReceiptDialog({
       <ReceiptSent
         amount={Number(payment.amount)}
         receiptNo={sent.receiptNo}
+        sentTo={sent.sentTo}
+        resend={() =>
+          apiClient.post<{ sentTo: string | null; receiptNumber: string | null }>(
+            `/api/crm/qr/payments/${payment.id}/resend-receipt`,
+            {}
+          )
+        }
         onClose={() => onDone(sent.message)}
       />
     );

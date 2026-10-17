@@ -48,7 +48,9 @@
     "hide:testdonors": "tsx scripts/hide-test-donors.ts",
     "test:hidden": "tsx scripts/test-hidden-donors.ts",
     "fix:qrfollowups": "tsx scripts/fix-qr-follow-ups.ts",
-    "test:qrfollowup": "tsx scripts/test-qr-follow-up.ts"
+    "test:qrfollowup": "tsx scripts/test-qr-follow-up.ts",
+    "fix:qrreceipts": "tsx scripts/fix-qr-receipt-numbers.ts",
+    "test:qrreceipt": "tsx scripts/test-qr-receipt-number.ts"
   },
   "keywords": [],
   "author": "",

@@ -31,7 +31,7 @@ import crypto from 'crypto';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import * as storage from '../services/storage';
-import { createOfflineDonation, type SiteKey } from '../services/hkmvClient';
+import { createOfflineDonation, resendReceipt, type SiteKey } from '../services/hkmvClient';
 import {
   describeFilters,
   sendExport,
@@ -46,6 +46,7 @@ import type { PoolClient } from 'pg';
 import { alignQrDonationDate } from '../services/qrDonationDate';
 import { greetName } from '../utils/greetName';
 import { bookQrFollowUp } from '../services/qrFollowUp';
+import { adoptReceiptNumber } from '../services/qrReceiptNumber';
 
 const router = Router();
 
@@ -1191,7 +1192,9 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
     await pool.query(
       `UPDATE qr_payments SET
          receipt_status = 'issued',
-         receipt_number = $2,
+         -- COALESCE: a null from the site ("Receipt No. will show soon") must not
+         -- erase a number that is already stored, e.g. one adopted from the donation.
+         receipt_number = COALESCE($2, qr_payments.receipt_number),
          external_donation_id = $3,
          receipt_site = $4,
          receipt_error = NULL
@@ -1215,6 +1218,17 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
         console.error('crm.qrReceipt could not align the donation date (non-fatal):', (e as Error).message)
       );
     }
+
+    /* The site did not return a number (it will allocate it a moment later), but
+       the donation may already be in DRM with one: keep it on the payment, so the
+       Money raised page and the payment screen show it. When it is not in DRM
+       yet, the sync fills it in the moment the donation arrives
+       (adoptReceiptNumber in hkmvSync.ts). */
+    if (!result.receiptNumber) {
+      await adoptReceiptNumber(pool, { paymentId: paymentRowId }).catch((e) =>
+        console.error('crm.qrReceipt could not adopt the receipt number (non-fatal):', (e as Error).message)
+      );
+    }
   } catch (e) {
     const err = e as Error & { status?: number };
     // A duplicate reference means the receipt already exists on that site,
@@ -1226,6 +1240,15 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
       `UPDATE qr_payments SET receipt_status = $2, receipt_error = $3 WHERE id = $1`,
       [paymentRowId, duplicate ? 'issued' : 'failed', duplicate ? null : err.message]
     );
+    /* "Already exists" means the site has the donation - usually a website gift the
+       donor started at checkout - so it has a receipt number too. DRM kept none,
+       because none came back with the refusal. Take it from the donation DRM holds
+       for this payment. */
+    if (duplicate) {
+      await adoptReceiptNumber(pool, { paymentId: paymentRowId }).catch((e) =>
+        console.error('crm.qrReceipt could not adopt the receipt number (non-fatal):', (e as Error).message)
+      );
+    }
   }
 }
 
@@ -1775,6 +1798,37 @@ router.get('/qr/payments/:id', authenticate, async (req, res) => {
  * caller helping with a donor who is not theirs gets the receipt out and
  * takes no credit for it - which is exactly what was asked for.
  */
+/**
+ * POST /qr/payments/:id/resend-receipt - send the receipt to the donor again.
+ *
+ * For "she says it never arrived". DRM does not build or send the receipt: the
+ * site that issued it owns the template, the number and the PDF, so this asks that
+ * site to send it again. The site answers with the number it actually sent to,
+ * which is passed back so the caller can read it out and be sure.
+ *
+ * The site refuses on purpose when one went out moments ago (429) or when there is
+ * no receipt yet (409). Those are reported as what they are, not as an outage.
+ */
+router.post('/qr/payments/:id/resend-receipt', authenticate, async (req, res) => {
+  try {
+    const pay = await paymentFor(String(req.params.id), req.user);
+    if (!pay) return res.status(404).json({ error: 'Payment not found.' });
+    if (pay.receipt_status !== 'issued' || !pay.external_donation_id || !pay.receipt_site) {
+      return res.status(400).json({ error: 'There is no receipt for this payment to send yet.' });
+    }
+    const outcome = await resendReceipt(pay.receipt_site as SiteKey, pay.external_donation_id);
+    res.json({
+      resent: true,
+      sentTo: outcome.sentTo ?? null,
+      receiptNumber: outcome.receiptNumber ?? pay.receipt_number ?? null,
+    });
+  } catch (err) {
+    const e = err as Error & { status?: number; alreadySent?: boolean };
+    const status = e.status === 409 || e.status === 429 ? e.status : 502;
+    res.status(status).json({ error: e.message, alreadySent: Boolean(e.alreadySent) });
+  }
+});
+
 router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
   const b = req.body ?? {};
   const donorName = str(b.donor_name, 160);
@@ -1917,6 +1971,9 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
       receipt_error: outcome?.receipt_error ?? null,
       receipt_number: outcome?.receipt_number ?? null,
       external_donation_id: outcome?.external_donation_id ?? null,
+      // The mobile DRM handed the site to send the receipt to - the number picked
+      // in "Who paid" - so the screen can say where it went instead of "sent".
+      sent_to: donorPhone,
       // null means "already credited to somebody" as well as "not asked for",
       // so the screen says what happened rather than implying a silent success.
       credited: !!credited,

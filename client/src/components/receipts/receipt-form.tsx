@@ -148,24 +148,67 @@ export function DonorFields({
   );
 }
 
-/** "Receipt sent" - shared by both paths. */
+/**
+ * "Receipt sent" - shared by both paths.
+ *
+ * `sentTo` is the mobile the receipt was sent to, so the caller can read it back to
+ * the donor ("I have sent it to 98765 43210") instead of trusting a bare "sent".
+ *
+ * `resend`, when given, shows "Send again" - for "it never arrived". It asks the site
+ * that issued the receipt to send it once more and returns the number the site
+ * actually used, which replaces the one shown: that one is the site's own word, not
+ * DRM's guess. The site refuses a second send moments after the first; that comes
+ * back as a message here, not as a failure.
+ */
 export function ReceiptSent({
   amount,
   receiptNo,
+  sentTo,
+  resend,
   onClose,
   onAnother,
 }: {
   amount: number;
   receiptNo: string | null;
+  sentTo?: string | null;
+  resend?: () => Promise<{ sentTo: string | null; receiptNumber: string | null }>;
   onClose: () => void;
   onAnother?: () => void;
 }) {
+  const [number, setNumber] = useState(receiptNo);
+  const [to, setTo] = useState(sentTo ?? null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ tone: "good" | "danger" | "info"; text: string } | null>(null);
+
+  async function again() {
+    if (!resend) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await resend();
+      if (r.sentTo) setTo(r.sentTo);
+      if (r.receiptNumber) setNumber(r.receiptNumber);
+      setNote({ tone: "good", text: `Sent again${r.sentTo ? ` to ${r.sentTo}` : ""}.` });
+    } catch (e) {
+      const text = e instanceof Error ? e.message : "Could not send it again. Try again.";
+      // The site's own "just sent" guard is information, not a fault.
+      setNote({ tone: /moment|just|already/i.test(text) ? "info" : "danger", text });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <Modal
       title="Receipt sent"
       onClose={onClose}
       footer={
         <>
+          {resend && (
+            <Button variant="secondary" onClick={() => void again()} loading={busy}>
+              Send again
+            </Button>
+          )}
           {onAnother && (
             <Button variant="secondary" onClick={onAnother}>
               Send another
@@ -177,14 +220,24 @@ export function ReceiptSent({
     >
       <div className="py-2 text-center">
         <p className="text-3xl font-semibold tabular-nums text-ink">{currency(amount)}</p>
-        {receiptNo ? (
+        {number ? (
           <p className="mt-2 text-sm text-ink-muted">
-            Receipt No. <span className="font-mono font-semibold text-brand-700">{receiptNo}</span>
+            Receipt No. <span className="font-mono font-semibold text-brand-700">{number}</span>
           </p>
         ) : (
           <p className="mt-2 text-sm text-ink-muted">Receipt No. will show soon.</p>
         )}
+        {to && (
+          <p className="mt-1 text-sm text-ink-muted">
+            Sent to <span className="font-medium tabular-nums text-ink">{to}</span>
+          </p>
+        )}
       </div>
+      {note && (
+        <Alert tone={note.tone} className="mt-3">
+          {note.text}
+        </Alert>
+      )}
     </Modal>
   );
 }

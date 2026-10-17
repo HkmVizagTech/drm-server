@@ -23,6 +23,7 @@ import { refreshSankalpFromPerson } from './sankalpDays';
 import { decideName } from './profileSync';
 import { registerName } from './personNames';
 import { alignQrDonationDate } from './qrDonationDate';
+import { adoptReceiptNumber } from './qrReceiptNumber';
 import { recordCredit } from './credits';
 import { addressValues, fromHkmvSaved } from '../utils/address';
 import { creditLinkSend, creditUtmLink } from './linkCredits';
@@ -405,6 +406,10 @@ async function upsertDonation(
   try {
     await client.query('SAVEPOINT qr_date');
     occurredAt = (await alignQrDonationDate(client, { donationId })) ?? occurredAt;
+    // And the receipt number: when the site allocated it after the QR receipt was
+    // raised, it arrives here on the donation, and the payment - which the Money
+    // raised page and the payment screen read - would otherwise stay blank.
+    await adoptReceiptNumber(client, { donationId });
     await client.query('RELEASE SAVEPOINT qr_date');
   } catch (e) {
     await client.query('ROLLBACK TO SAVEPOINT qr_date').catch(() => undefined);

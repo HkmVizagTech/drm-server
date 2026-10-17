@@ -665,13 +665,20 @@ const CREDIT_ROWS_SQL = (where: string) => `
          c.verified_at, c.user_id,
          u.name AS caller_name,
          p.payment_id    AS payment_reference,
-         d.receipt_number,
+         -- The receipt number lives in three places, depending on how the money
+         -- came in: on the donation (a link or a website gift), on the QR payment
+         -- (a receipt raised from the QR screen), and on the collection (money
+         -- collected by hand). This read only the first, so every QR credit - the
+         -- number stored on the payment itself - showed a blank: 74 of 76 on
+         -- production, with the numbers sitting right there.
+         COALESCE(d.receipt_number, p.receipt_number, col.receipt_number) AS receipt_number,
          l.name          AS lead_name,
          k.label         AS link_label
     FROM caller_credits c
     JOIN users u ON u.id = c.user_id
     LEFT JOIN qr_payments p ON p.id = c.qr_payment_id
     LEFT JOIN donations   d ON d.id = c.donation_id
+    LEFT JOIN collections col ON col.credit_id = c.id
     LEFT JOIN leads       l ON l.id = c.lead_id
     LEFT JOIN crm_links   k ON k.id = c.link_id
    WHERE ${where}
