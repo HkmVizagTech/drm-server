@@ -700,15 +700,41 @@ router.post('/offline', async (req, res) => {
     console.error('donations.offline sync-back failed (non-fatal):', (err as Error).message);
   }
 
+  /* The site sometimes answers before it has numbered the receipt, so the
+     reply carries no number and the popup said "will show soon". The snapshot
+     pulled above usually already has it, so read it from the donation row, and
+     if it is still empty ask the site once more after a short pause. Only ever
+     fills a missing number; a number the site returned is never replaced. */
+  let receiptNumber = issued.receiptNumber;
+  const numberFromRow = async () => {
+    if (!issued.externalId) return null;
+    const r = await pool.query(
+      'SELECT receipt_number FROM donations WHERE external_ref = $1 AND receipt_number IS NOT NULL LIMIT 1',
+      [issued.externalId]
+    );
+    return (r.rows[0]?.receipt_number as string | undefined) ?? null;
+  };
+  try {
+    if (!receiptNumber) receiptNumber = await numberFromRow();
+    if (!receiptNumber && issued.externalId) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const again = await fetchDonorSnapshot(siteKey, String(donor_mobile));
+      if (again?.found) await upsertDonorSnapshot(again, siteKey);
+      receiptNumber = await numberFromRow();
+    }
+  } catch (e) {
+    console.error('donations.offline receipt number lookup failed (non-fatal):', (e as Error).message);
+  }
+
   res.status(201).json({
     site: siteKey,
-    receiptNumber: issued.receiptNumber,
+    receiptNumber,
     externalId: issued.externalId,
     donorName: issued.donorName,
     amount: issued.amount,
     synced,
-    message: issued.receiptNumber
-      ? `Receipt ${issued.receiptNumber} issued by the ${siteKey === 'annadan' ? 'annadan' : 'main'} site.` +
+    message: receiptNumber
+      ? `Receipt ${receiptNumber} issued by the ${siteKey === 'annadan' ? 'annadan' : 'main'} site.` +
         (synced ? '' : ' It will show here soon.')
       : 'Donation saved. Receipt No. will show soon.',
   });
