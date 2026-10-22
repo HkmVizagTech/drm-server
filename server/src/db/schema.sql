@@ -2803,6 +2803,11 @@ ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS last_call_at      TIMESTAMP
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS follow_up_on      DATE;
 -- Who asked to be reminded, and the day the reminder was last raised, so each
 -- follow-up day alerts that caller once and a refresh does not repeat it.
+-- "WhatsApp sent" is its own fact, separate from whether the donor was reached:
+-- a caller may message the donor and then fail to get them on the phone. The brick
+-- is finished (status 'sent') only when BOTH are true - messaged and reached.
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS whatsapp_sent_at TIMESTAMPTZ;
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS whatsapp_sent_by UUID REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS follow_up_by UUID REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS follow_up_alerted_on DATE;
 -- Added after the table first shipped locally; harmless where the CREATE already had them.

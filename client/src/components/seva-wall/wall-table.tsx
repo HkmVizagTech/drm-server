@@ -67,6 +67,8 @@ interface Row {
   reviewed_at?: string | null;
   called_at?: string | null;
   called_by_name?: string | null;
+  /** The message and picture went out on WhatsApp. Separate from whether the donor was reached. */
+  whatsapp_sent_at?: string | null;
   call_attempts?: number;
   last_call_outcome?: "answered" | "no_answer" | null;
   last_call_note?: string | null;
@@ -117,7 +119,7 @@ const TITLES: Record<WallView, { title: string; subtitle: string }> = {
   contact: {
     title: "Seva wall",
     subtitle:
-      "Bricks whose picture is ready. Call the donor and log how it went (with a note and the day to call again), send the picture on WhatsApp, then mark it sent. Bricks nobody has reached come first, then donors already called. A day you pick to call again reminds you in the notification bell.",
+      "Bricks whose picture is ready. Call the donor and log how it went (with a note and the day to call again), send the picture on WhatsApp, then mark it sent. A brick is done when the donor has been reached and the WhatsApp is sent. Bricks nobody has reached come first, then donors already called. A day you pick to call again reminds you in the notification bell.",
   },
   print: {
     title: "Bricks to print",
@@ -204,7 +206,7 @@ const WHATSAPP_PATH =
  */
 function thanksMessage(r: Row): string {
   const lines = [
-    "Hare Krishna 🙏",
+    "Hare Krishna,",
     "",
     r.donor_name ? `Dear ${r.donor_name},` : "Dear devotee,",
     "",
@@ -314,18 +316,32 @@ function StatusBadge({ row, waitingForReview = false }: { row: Row; waitingForRe
       return <Badge tone="neutral" dot>To print</Badge>;
     case "needs_reprint":
       return <Badge tone="danger" dot>Needs reprint</Badge>;
-    case "in_review":
+    case "in_review": {
       if (waitingForReview) return <Badge tone="info" dot>Waiting for review</Badge>;
-      if (row.called_at) return <Badge tone="info" dot>Called - picture not sent</Badge>;
-      return row.last_call_outcome === "no_answer" ? (
+      // Two separate facts, both shown: was the donor reached, and did the WhatsApp
+      // go out. A caller can message a donor and still not get them on the phone.
+      const reached = row.called_at ? (
+        <Badge tone="good" dot>Answered</Badge>
+      ) : row.last_call_outcome === "no_answer" ? (
         <Badge tone="warn" dot>
           Did not answer{(row.call_attempts ?? 0) > 1 ? ` (${row.call_attempts} tries)` : ""}
         </Badge>
       ) : (
         <Badge tone="warn" dot>Not called yet</Badge>
       );
+      return (
+        <span className="flex flex-wrap gap-1">
+          {row.whatsapp_sent_at ? (
+            <Badge tone="good" dot>WhatsApp sent</Badge>
+          ) : (
+            <Badge tone="neutral" dot>WhatsApp not sent</Badge>
+          )}
+          {reached}
+        </span>
+      );
+    }
     case "sent":
-      return <Badge tone="good" dot>Picture sent</Badge>;
+      return <Badge tone="good" dot>Done</Badge>;
   }
 }
 
@@ -485,9 +501,9 @@ export default function WallTable({ view }: { view: WallView }) {
 
   const stageTabs = [
     { key: "", label: "All", count: (counts.to_call ?? 0) + (counts.called ?? 0) + (counts.sent ?? 0) },
-    { key: "to_call", label: "Not called yet", count: counts.to_call ?? 0 },
+    { key: "to_call", label: "Not reached yet", count: counts.to_call ?? 0 },
     { key: "called", label: "Called - not sent", count: counts.called ?? 0 },
-    { key: "sent", label: "Picture sent", count: counts.sent ?? 0 },
+    { key: "sent", label: "Done", count: counts.sent ?? 0 },
   ];
 
   return (
@@ -744,29 +760,35 @@ export default function WallTable({ view }: { view: WallView }) {
                           <Button size="xs" variant="secondary" icon="check" onClick={() => setLogging(r)}>
                             Answered
                           </Button>
-                          <Button
-                            size="xs"
-                            variant="ghost"
-                            icon="phoneMissed"
-                            loading={busy === r.ref}
-                            onClick={() => void act(r.ref, "call", { outcome: "no_answer" }, "Marked: not answered")}
-                          >
-                            Not answered
-                          </Button>
-                          <Button
-                            size="xs"
-                            variant="whatsapp"
-                            loading={busy === r.ref}
-                            onClick={() => void act(r.ref, "mark-sent", {}, "Marked: picture sent")}
-                          >
-                            WhatsApp sent
-                          </Button>
+                          {/* Once the WhatsApp has gone out, the only thing left to record is the
+                              donor answering - so that is the only button. */}
+                          {!r.whatsapp_sent_at && (
+                            <>
+                              <Button
+                                size="xs"
+                                variant="ghost"
+                                icon="phoneMissed"
+                                loading={busy === r.ref}
+                                onClick={() => void act(r.ref, "call", { outcome: "no_answer" }, "Marked: not answered")}
+                              >
+                                Not answered
+                              </Button>
+                              <Button
+                                size="xs"
+                                variant="whatsapp"
+                                loading={busy === r.ref}
+                                onClick={() => void act(r.ref, "mark-sent", {}, "Marked: WhatsApp sent")}
+                              >
+                                WhatsApp sent
+                              </Button>
+                            </>
+                          )}
                           <Button size="xs" variant="ghost" icon="arrowLeft" onClick={() => setSendingBack(r)}>
                             Send back
                           </Button>
                         </div>
                       ) : (
-                        <span className="text-ink-faint">Done</span>
+                        <Badge tone="good" icon="checkCircle">Done</Badge>
                       )}
                     </Td>
                   )}

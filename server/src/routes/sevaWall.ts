@@ -17,8 +17,13 @@
 //   accountant, coordinator  can look at everything, change nothing
 //
 // STATUS
-//   to_print -> in_review (printer uploads) -> sent (picture sent on WhatsApp)
-//                  |  "call answered" is a mark on in_review, not a status
+//   to_print -> in_review (printer uploads) -> sent (finished)
+//                  |  two marks on in_review, each its own fact:
+//                  |    - "call answered"  (the donor was reached; with what they said)
+//                  |    - "WhatsApp sent"  (the message and picture went out)
+//                  |  finished = BOTH. A caller may message a donor and then not get
+//                  |  them on the phone; the brick stays open, with "WhatsApp sent" and
+//                  |  "did not answer" showing, until a later call is answered.
 //                  \-> needs_reprint (sent back with a reason) -> in_review ...
 //
 // THE SEVA WALL TABLE ORDER (what a caller works through, top to bottom)
@@ -130,7 +135,8 @@ const DERIVED = `
          COALESCE(i.priority, 'medium')::text        AS priority,
          COALESCE(i.status, 'to_print')::text        AS status,
          i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token,
-         COALESCE(i.call_attempts, 0) AS call_attempts, i.last_call_outcome, i.last_call_note, i.last_call_at, i.follow_up_on
+         COALESCE(i.call_attempts, 0) AS call_attempts, i.last_call_outcome, i.last_call_note, i.last_call_at, i.follow_up_on,
+         i.whatsapp_sent_at
     FROM live_donations d
     JOIN live_people p ON p.id = d.person_id
     LEFT JOIN seva_wall_items i ON i.donation_id = d.id
@@ -143,7 +149,8 @@ const MANUAL = `
          i.donor_name, i.honoree_name, i.phone, i.amount::float8, i.receipt_number,
          i.kind::text, COALESCE(i.donated_on::timestamptz, i.created_at),
          i.priority::text, i.status::text, i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token,
-         i.call_attempts, i.last_call_outcome, i.last_call_note, i.last_call_at, i.follow_up_on
+         i.call_attempts, i.last_call_outcome, i.last_call_note, i.last_call_at, i.follow_up_on,
+         i.whatsapp_sent_at
     FROM seva_wall_items i
    WHERE i.donation_id IS NULL`;
 
@@ -764,14 +771,11 @@ router.get('/:ref/image', allow(...LOOK), async (req, res) => {
   }
 });
 
-// "WhatsApp message sent": the picture has gone to the donor. DRM cannot see
-// WhatsApp, so this is the caller's own word, recorded with who and when - which
-// is why it is a button they press and not something the WhatsApp link does by
-// itself. It does not need a call first: some donors are simply messaged.
 // LOG A CALL. The caller says how it went - the donor answered or did not - and
 // may leave a note ("wants to give another brick", "ring after Diwali") and the
-// day to call again. On that day the brick comes back to the top of the caller's
-// list. Each call is kept in the events log; the item holds the latest.
+// day to call again. That morning a notification appears in the bell (see
+// raiseWallReminders); the brick does not move in the table. Each call is kept in
+// the events log; the item holds the latest.
 //
 //   answered     the donor was reached: the brick is now "called, picture not
 //                sent yet". Logging a later call clears an earlier follow-up day
@@ -800,7 +804,13 @@ router.post('/:ref/call', allow(...REVIEW), async (req, res) => {
     if (!item) return notFound(res);
     const r = await pool.query(
       `UPDATE seva_wall_items
-          SET called_at         = CASE WHEN $2 = 'answered' THEN COALESCE(called_at, NOW()) ELSE called_at END,
+          SET status            = CASE WHEN $2 = 'answered' AND whatsapp_sent_at IS NOT NULL AND NULLIF($5, '') IS NULL
+                                       THEN 'sent' ELSE status END,
+              sent_at           = CASE WHEN $2 = 'answered' AND whatsapp_sent_at IS NOT NULL AND NULLIF($5, '') IS NULL
+                                       THEN whatsapp_sent_at ELSE sent_at END,
+              sent_by           = CASE WHEN $2 = 'answered' AND whatsapp_sent_at IS NOT NULL AND NULLIF($5, '') IS NULL
+                                       THEN whatsapp_sent_by ELSE sent_by END,
+              called_at         = CASE WHEN $2 = 'answered' THEN COALESCE(called_at, NOW()) ELSE called_at END,
               called_by         = CASE WHEN $2 = 'answered' THEN COALESCE(called_by, $3) ELSE called_by END,
               call_attempts     = call_attempts + 1,
               last_call_outcome = $2,
@@ -811,7 +821,7 @@ router.post('/:ref/call', allow(...REVIEW), async (req, res) => {
               follow_up_alerted_on = NULL,
               updated_at        = NOW()
         WHERE id = $1 AND status = 'in_review'
-        RETURNING call_attempts, follow_up_on`,
+        RETURNING call_attempts, follow_up_on, status`,
       [item.id, outcome, req.user?.userId ?? null, note, day]
     );
     if (!r.rowCount) return res.status(409).json({ error: 'Only a brick whose picture is waiting to be sent can have a call logged.' });
@@ -820,10 +830,11 @@ router.post('/:ref/call', allow(...REVIEW), async (req, res) => {
         'INSERT INTO seva_wall_events (item_id, action, note, by_user, follow_up_on) VALUES ($1, $2, NULLIF($3, \'\'), $4, NULLIF($5, \'\')::date)',
         [item.id, outcome === 'answered' ? 'called' : 'no_answer', note, req.user?.userId ?? null, day]
       );
+      if (r.rows[0].status === 'sent') await logEvent(pool, item.id, 'sent', req.user?.userId);
     } catch (e) {
       console.error('seva-wall event log failed (non-fatal):', (e as Error).message);
     }
-    res.json({ ref: String(req.params.ref), outcome, attempts: r.rows[0].call_attempts, follow_up_on: r.rows[0].follow_up_on });
+    res.json({ ref: String(req.params.ref), outcome, attempts: r.rows[0].call_attempts, follow_up_on: r.rows[0].follow_up_on, status: r.rows[0].status });
   } catch (err) {
     console.error('seva-wall call error:', (err as Error).message);
     res.status(500).json({ error: 'Could not log the call.' });
@@ -901,20 +912,32 @@ router.post('/:ref/called', allow(...REVIEW), async (req, res) => {
   }
 });
 
+// "WhatsApp sent": the message and picture have gone to the donor. DRM cannot see
+// WhatsApp, so this is the caller's own word, recorded with who and when - which is
+// why it is a button they press and not something the WhatsApp link does itself.
 router.post('/:ref/mark-sent', allow(...REVIEW), async (req, res) => {
   try {
     const item = await itemFor(String(req.params.ref));
     if (!item) return notFound(res);
+    // Records that the message went out. The brick is FINISHED only if the donor has
+    // also been reached and no call-again day is pending; otherwise it stays open
+    // with "WhatsApp sent" on it, waiting for an answered call.
     const r = await pool.query(
       `UPDATE seva_wall_items
-          SET status = 'sent', sent_by = $2, sent_at = NOW(), follow_up_on = NULL, follow_up_by = NULL, updated_at = NOW()
+          SET whatsapp_sent_at = COALESCE(whatsapp_sent_at, NOW()),
+              whatsapp_sent_by = COALESCE(whatsapp_sent_by, $2),
+              status  = CASE WHEN called_at IS NOT NULL AND follow_up_on IS NULL THEN 'sent' ELSE status END,
+              sent_at = CASE WHEN called_at IS NOT NULL AND follow_up_on IS NULL THEN COALESCE(whatsapp_sent_at, NOW()) ELSE sent_at END,
+              sent_by = CASE WHEN called_at IS NOT NULL AND follow_up_on IS NULL THEN COALESCE(whatsapp_sent_by, $2) ELSE sent_by END,
+              updated_at = NOW()
         WHERE id = $1 AND status = 'in_review'
-        RETURNING id`,
+        RETURNING status`,
       [item.id, req.user?.userId ?? null]
     );
-    if (!r.rowCount) return res.status(409).json({ error: 'Only a brick whose picture is uploaded can be marked sent.' });
-    await logEvent(pool, item.id, 'sent', req.user?.userId);
-    res.json({ ref: String(req.params.ref), status: 'sent' });
+    if (!r.rowCount) return res.status(409).json({ error: 'Only a brick whose picture is waiting to be sent can be marked sent.' });
+    await logEvent(pool, item.id, 'whatsapp_sent', req.user?.userId);
+    if (r.rows[0].status === 'sent') await logEvent(pool, item.id, 'sent', req.user?.userId);
+    res.json({ ref: String(req.params.ref), status: r.rows[0].status, finished: r.rows[0].status === 'sent' });
   } catch (err) {
     console.error('seva-wall mark-sent error:', (err as Error).message);
     res.status(500).json({ error: 'Could not mark it sent.' });
@@ -937,7 +960,7 @@ router.post('/:ref/send-back', allow(...REVIEW), async (req, res) => {
       const moved = await client.query(
         `UPDATE seva_wall_items
             SET status = 'needs_reprint', review_note = $2, reviewed_by = $3, reviewed_at = NOW(),
-                called_at = NULL, called_by = NULL, call_attempts = 0, last_call_outcome = NULL,
+                called_at = NULL, called_by = NULL, call_attempts = 0, whatsapp_sent_at = NULL, whatsapp_sent_by = NULL, last_call_outcome = NULL,
                 last_call_note = NULL, last_call_at = NULL, follow_up_on = NULL, follow_up_by = NULL, updated_at = NOW()
           WHERE id = $1 AND status = 'in_review'
           RETURNING id`,
