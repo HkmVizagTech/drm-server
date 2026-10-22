@@ -77,7 +77,9 @@ interface Row {
   sent_by_name?: string | null;
   has_image?: boolean;
   uploaded_at?: string | null;
-  /** The page the donor opens from the WhatsApp message; WhatsApp shows it as a preview card with the picture. */
+  /** The picture's own Cloudflare address. This is what the WhatsApp message carries. */
+  image_url?: string | null;
+  /** A DRM page showing the picture; only the fallback when the picture is not in Cloudflare. */
   share_url?: string | null;
 }
 
@@ -198,8 +200,7 @@ const WHATSAPP_PATH =
  *
  * The temple's own wording, with the seva (Brick seva, Square foot seva, Mandir
  * nirmana seva) filled in from what this donor gave. The link is the donor's brick
- * page: WhatsApp turns it into a preview card showing the picture, so it sits right
- * after the thank-you, where the donor is looking.
+ * picture's own link, so WhatsApp shows the picture, right after the thank-you.
  */
 function thanksMessage(r: Row): string {
   const lines = [
@@ -209,7 +210,9 @@ function thanksMessage(r: Row): string {
     "",
     `Thank you for your generous support towards our ${KIND_LABEL[r.kind]}. We are deeply grateful for your contribution to the construction of the Sri Srinivasa Govinda Temple.`,
   ];
-  if (r.share_url) lines.push("", "Here is a picture of your brick with your name printed:", r.share_url);
+  // The image's own link, so the message shows the picture and no DRM address.
+  const link = r.image_url ?? r.share_url;
+  if (link) lines.push("", "Here is a picture of your brick with your name printed:", link);
   lines.push(
     "",
     "Should it be convenient, we humbly invite you to offer a further contribution towards the Temple Construction Seva. Every offering, however small, becomes part of a sacred place of worship for generations to come.",

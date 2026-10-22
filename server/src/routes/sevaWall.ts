@@ -45,7 +45,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
-import { isConfigured, putObject, getObject, deleteObject } from '../services/storage';
+import { isConfigured, putObject, getObject, deleteObject, publicUrl } from '../services/storage';
 import { notify } from '../services/notifications';
 import type { UserRole } from '../types';
 
@@ -280,7 +280,6 @@ router.get('/', allow(...LOOK), async (req, res) => {
     const shaped = rows.rows.map((r) => {
       const { r2_key, picture_id, picture_at, item_id: _item, share_token, ...row } = r;
       void _item;
-      void r2_key;
       const full = {
         ...row,
         has_image: !!picture_id,
@@ -290,6 +289,11 @@ router.get('/', allow(...LOOK), async (req, res) => {
         // how a plain wa.me link can show a picture at all. Only while there is a
         // current picture: a brick sent back has nothing to show.
         share_url: picture_id && share_token ? `${baseUrl}/b/${share_token}` : null,
+        // The picture's own address in Cloudflare, when it is stored there and the
+        // bucket is public. This is what the WhatsApp message carries: just the
+        // image, not a DRM address. share_url is the fallback for a picture that is
+        // only in the database.
+        image_url: picture_id && r2_key ? publicUrl(r2_key) : null,
       };
       return role === 'brick_printer' ? forPrinter(full) : full;
     });
