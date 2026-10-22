@@ -52,7 +52,7 @@ export interface ConversionAlert {
 /** One entry in the bell's feed: nearly gave and Sankalpam, as they happen. */
 export interface DrmNotification {
   id: string;
-  kind: "nearly_gave" | "sankalpam";
+  kind: "nearly_gave" | "sankalpam" | "seva_wall";
   title: string;
   body: string | null;
   link: string | null;

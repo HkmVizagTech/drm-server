@@ -128,7 +128,7 @@ function PopupCard({ n, onClose }: { n: DrmNotification; onClose: () => void }) 
             failed ? "bg-danger/10 text-danger" : ng ? "bg-warn-wash text-warn" : "bg-amber-100 text-amber-800"
           }`}
         >
-          <Icon name={ng ? "phone" : "sparkle"} size={15} />
+          <Icon name={ng ? "phone" : n.kind === "seva_wall" ? "calendar" : "sparkle"} size={15} />
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-ink">{n.title}</p>

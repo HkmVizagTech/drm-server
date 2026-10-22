@@ -67,6 +67,12 @@ interface Row {
   reviewed_at?: string | null;
   called_at?: string | null;
   called_by_name?: string | null;
+  call_attempts?: number;
+  last_call_outcome?: "answered" | "no_answer" | null;
+  last_call_note?: string | null;
+  last_call_at?: string | null;
+  /** YYYY-MM-DD: the day the caller said they would ring again. */
+  follow_up_on?: string | null;
   sent_at?: string | null;
   sent_by_name?: string | null;
   has_image?: boolean;
@@ -85,7 +91,7 @@ interface Response {
   limit: number;
   total_pages: number;
   min_amount: number;
-  counts: Partial<Record<"to_print" | "needs_reprint" | "uploaded" | "to_call" | "called" | "sent", number>>;
+  counts: Partial<Record<"to_print" | "needs_reprint" | "uploaded" | "to_call" | "called" | "sent" | "due", number>>;
 }
 
 const KIND_LABEL: Record<Kind, string> = {
@@ -109,7 +115,7 @@ const TITLES: Record<WallView, { title: string; subtitle: string }> = {
   contact: {
     title: "Seva wall",
     subtitle:
-      "Bricks whose picture is ready. Call the donor, send the picture on WhatsApp, and record each step. Pictures nobody has acted on come first, then donors already called.",
+      "Bricks whose picture is ready. Call the donor and log how it went (with a note and the day to call again), send the picture on WhatsApp, then mark it sent. Bricks nobody has reached come first, then donors already called. A day you pick to call again reminds you in the notification bell.",
   },
   print: {
     title: "Bricks to print",
@@ -166,6 +172,13 @@ async function shrink(file: File): Promise<File> {
   } catch {
     return file;
   }
+}
+
+const todayIST = () => new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+
+/** "28 Oct" from a YYYY-MM-DD, without letting the browser's timezone shift the day. */
+function dayLabel(ymd: string): string {
+  return new Date(`${ymd}T12:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
 function daysSince(iso: string): number {
@@ -286,8 +299,11 @@ function StatusBadge({ row, waitingForReview = false }: { row: Row; waitingForRe
       return <Badge tone="danger" dot>Needs reprint</Badge>;
     case "in_review":
       if (waitingForReview) return <Badge tone="info" dot>Waiting for review</Badge>;
-      return row.called_at ? (
-        <Badge tone="info" dot>Called - picture not sent</Badge>
+      if (row.called_at) return <Badge tone="info" dot>Called - picture not sent</Badge>;
+      return row.last_call_outcome === "no_answer" ? (
+        <Badge tone="warn" dot>
+          Did not answer{(row.call_attempts ?? 0) > 1 ? ` (${row.call_attempts} tries)` : ""}
+        </Badge>
       ) : (
         <Badge tone="warn" dot>Not called yet</Badge>
       );
@@ -311,8 +327,12 @@ export default function WallTable({ view }: { view: WallView }) {
   const [stage, setStage] = useState("");
   const [kind, setKind] = useState("");
   const [priority, setPriority] = useState("");
-  const [search, setSearch] = useState("");
-  const [query, setQuery] = useState("");
+  // A notification opens this page as /seva-wall?search=<phone>, so the brick it is
+  // about is already there. Read once; nothing renders until the person is known,
+  // so the server's empty first render cannot disagree with this.
+  const fromLink = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("search") ?? "";
+  const [search, setSearch] = useState(fromLink);
+  const [query, setQuery] = useState(fromLink.trim());
   const [page, setPage] = useState(1);
   const [data, setData] = useState<Response | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -320,6 +340,7 @@ export default function WallTable({ view }: { view: WallView }) {
   const [adding, setAdding] = useState(false);
   const [bulk, setBulk] = useState(false);
   const [sendingBack, setSendingBack] = useState<Row | null>(null);
+  const [logging, setLogging] = useState<Row | null>(null);
   // A picture chosen but not yet sent: shown for checking first.
   const [pending, setPending] = useState<{ row: Row; file: File; url: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -676,6 +697,16 @@ export default function WallTable({ view }: { view: WallView }) {
                     {r.status === "in_review" && r.called_at && r.called_by_name && (
                       <span className="mt-1 block text-xs text-ink-muted">Called by {r.called_by_name}</span>
                     )}
+                    {r.status === "in_review" && view !== "print" && r.last_call_note && (
+                      <span className="mt-1 block max-w-xs text-xs text-ink-soft">"{r.last_call_note}"</span>
+                    )}
+                    {r.status === "in_review" && view !== "print" && r.follow_up_on && (
+                      <span className="mt-1 block">
+                        <Badge tone="info" icon="calendar">
+                          {r.follow_up_on <= todayIST() ? "Call again today" : `Call again ${dayLabel(r.follow_up_on)}`}
+                        </Badge>
+                      </span>
+                    )}
                     {r.status === "sent" && (
                       <span className="mt-1 block text-xs text-ink-muted">
                         {r.sent_by_name ? `by ${r.sent_by_name}` : ""}
@@ -693,17 +724,18 @@ export default function WallTable({ view }: { view: WallView }) {
                     <Td>
                       {r.status === "in_review" ? (
                         <div className="flex flex-wrap items-center gap-2">
-                          {!r.called_at && (
-                            <Button
-                              size="xs"
-                              variant="secondary"
-                              icon="phone"
-                              loading={busy === r.ref}
-                              onClick={() => void act(r.ref, "called", {}, "Marked: call answered")}
-                            >
-                              Call answered
-                            </Button>
-                          )}
+                          <Button size="xs" variant="secondary" icon="check" onClick={() => setLogging(r)}>
+                            Answered
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            icon="phoneMissed"
+                            loading={busy === r.ref}
+                            onClick={() => void act(r.ref, "call", { outcome: "no_answer" }, "Marked: not answered")}
+                          >
+                            Not answered
+                          </Button>
                           <Button
                             size="xs"
                             variant="whatsapp"
@@ -770,6 +802,17 @@ export default function WallTable({ view }: { view: WallView }) {
         )}
       </TableShell>
 
+      {logging && (
+        <LogCall
+          row={logging}
+          onClose={() => setLogging(null)}
+          onDone={() => {
+            setLogging(null);
+            toast.success("Call logged");
+            void load();
+          }}
+        />
+      )}
       {pending && (
         <Modal
           title={pending.row.status === "in_review" ? "Replace the picture" : "Check the picture"}
@@ -1157,6 +1200,77 @@ function BulkUpload({ onClose, onDone }: { onClose: () => void; onDone: (added: 
           )}
         </>
       )}
+    </Modal>
+  );
+}
+
+/**
+ * The donor ANSWERED: write down what they said, and - if they asked to be called
+ * again - the day. That day the caller gets a reminder and the brick comes back to
+ * the top of the list. (A call nobody answered is not a dialog: it is one tap on
+ * "Not answered", which only updates the status.)
+ */
+function LogCall({ row, onClose, onDone }: { row: Row; onClose: () => void; onDone: () => void }) {
+  const [note, setNote] = useState("");
+  const [day, setDay] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    if (!note.trim()) return setError("Write what the donor said.");
+    setBusy(true);
+    setError(null);
+    try {
+      await apiClient.post(`/api/seva-wall/${row.ref}/call`, { outcome: "answered", note: note.trim(), follow_up_on: day });
+      onDone();
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title="Call answered"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button icon="check" loading={busy} onClick={() => void save()}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <p className="mb-3 text-sm text-ink-muted">
+        {row.donor_name} - {KIND_LABEL[row.kind]}
+        {row.phone ? ` - ${row.phone}` : ""}
+      </p>
+      {row.last_call_note && (
+        <p className="mb-3 rounded-control bg-sunken px-3 py-2 text-sm text-ink-soft">
+          Last time: "{row.last_call_note}"
+        </p>
+      )}
+      {error && (
+        <div className="mb-3">
+          <Alert tone="danger">{error}</Alert>
+        </div>
+      )}
+      <div className="grid gap-4">
+        <Field label="What did the donor say?" required>
+          <Textarea
+            value={note}
+            maxLength={500}
+            placeholder="For example: wants to give another brick, will pay next week, asked for the picture on WhatsApp"
+            onChange={(e) => setNote(e.target.value)}
+          />
+        </Field>
+        <Field label="Call again on" hint="Optional - you get a reminder that morning, and the brick moves to the top of your list">
+          <Input type="date" min={todayIST()} value={day} onChange={(e) => setDay(e.target.value)} />
+        </Field>
+      </div>
     </Modal>
   );
 }

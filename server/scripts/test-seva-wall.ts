@@ -5,12 +5,14 @@
  *   NODE_ENV=development DATABASE_URL=...drm_test npx tsx scripts/test-seva-wall.ts
  */
 import '../src/bootTimezone';
+// Reminders wait until 9am in real use; the test must not depend on the clock.
+process.env.SEVA_REMINDER_FROM_HOUR = '0';
 import express from 'express';
 import http from 'http';
 import pool from '../src/db/pool';
 import { generateToken, confineRole } from '../src/middleware/auth';
 import { runMigrations } from '../src/db/migrate';
-import sevaWallRoutes from '../src/routes/sevaWall';
+import sevaWallRoutes, { raiseWallReminders } from '../src/routes/sevaWall';
 import sevaWallPublic from '../src/routes/sevaWallPublic';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
@@ -100,7 +102,7 @@ async function main() {
   const m = await runMigrations();
   check('the migration applies', m.ok, true);
 
-  await pool.query(`TRUNCATE seva_wall_items, donations, person_names, people, users RESTART IDENTITY CASCADE`);
+  await pool.query(`TRUNCATE drm_notifications, seva_wall_items, donations, person_names, people, users RESTART IDENTITY CASCADE`);
   for (const [role, id] of Object.entries(ids)) {
     await pool.query(`INSERT INTO users (id, name, email, password_hash, role) VALUES ($1,$2,$3,'x',$4)`,
       [id, role, `${role}@t`, role === 'printer' ? 'brick_printer' : role]);
@@ -278,14 +280,69 @@ async function main() {
   check('stage: not called yet', (await call('caller', 'GET', '/api/seva-wall?stage=to_call')).total, 2);
   check('stage: called, picture not sent', (await call('caller', 'GET', '/api/seva-wall?stage=called')).total, 1);
   check('stage: sent', (await call('caller', 'GET', '/api/seva-wall?stage=sent')).total, 1);
-  check('a caller\'s counts', r.counts, { to_call: 2, called: 1, sent: 1 });
+  check('a caller\'s counts', r.counts, { to_call: 2, called: 1, sent: 1, due: 0 });
   check('the print list no longer has them', (await call('printer', 'GET', '/api/seva-wall')).total, 1);
+
+  console.log('\n--- logging a call: answered or not, a note, and the day to call again ---');
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const inDays = (n: number) => new Date(Date.now() + n * 86_400_000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const logCall = (as: any, id: string, b: unknown) => call(as, 'POST', `/api/seva-wall/${id}/call`, b);
+  check('the outcome is required', (await logCall('caller', midSqft, { note: 'x' })).http, 400);
+  check('a printer cannot log a call', (await logCall('printer', midSqft, { outcome: 'answered' })).http, 403);
+  check('a follow-up day in the past is refused', (await logCall('caller', midSqft, { outcome: 'no_answer', follow_up_on: '2020-01-01' })).http, 400);
+  check('a malformed date is refused', (await logCall('caller', midSqft, { outcome: 'no_answer', follow_up_on: 'soon' })).http, 400);
+  check('a brick with no picture cannot have a call logged', (await logCall('caller', added.ref, { outcome: 'answered', note: 'x' })).http, 409);
+  check('an answered call needs what the donor said', (await logCall('caller', midSqft, { outcome: 'answered', note: '  ' })).http, 400);
+  check('a call nobody answered needs no details', (await logCall('caller', newBrick, { outcome: 'no_answer' })).http, 200);
+
+  const noAns = await logCall('caller', mandir, { outcome: 'no_answer', note: 'Phone off. Try after 5pm', follow_up_on: inDays(3) });
+  check('did not answer: counted as a try', [noAns.http, noAns.outcome, noAns.attempts], [200, 'no_answer', 1]);
+  r = await call('caller', 'GET', '/api/seva-wall');
+  let mm = r.rows.find((x: any) => x.ref === mandir);
+  check('it is NOT marked called, and keeps the note and the day',
+    [!!mm.called_at, mm.last_call_outcome, mm.last_call_note, mm.follow_up_on, mm.call_attempts], [false, 'no_answer', 'Phone off. Try after 5pm', inDays(3), 1]);
+  check('a day to call again does not move the brick: not called, called, then sent',
+    r.rows.map((x: any) => x.ref), [midSqft, mandir, newBrick, oldBrick]);
+
+  const noAns2 = await logCall('caller', midSqft, { outcome: 'no_answer' });
+  check('no answer, no day given: another try, still to call', [noAns2.attempts, (await call('caller', 'GET', '/api/seva-wall?stage=to_call')).total], [1, 2]);
+
+  const ans = await logCall('caller', midSqft, { outcome: 'answered', note: 'Wants to donate another brick', follow_up_on: today });
+  check('answered, with a note and today as the day to call back', [ans.http, ans.outcome, ans.attempts], [200, 'answered', 2]);
+  r = await call('caller', 'GET', '/api/seva-wall');
+  check('a follow-up that has come due is NOT pinned to the top: it is called now, so it sits with the called ones',
+    r.rows.map((x: any) => x.ref), [mandir, midSqft, newBrick, oldBrick]);
+  mm = r.rows.find((x: any) => x.ref === midSqft);
+  check('...and is now marked called, with the note', [!!mm.called_at, mm.last_call_note, mm.follow_up_on], [true, 'Wants to donate another brick', today]);
+  check('the due stage and count', [(await call('caller', 'GET', '/api/seva-wall?stage=due')).total, r.counts.due], [1, 1]);
+
+  console.log('\n--- the reminder comes to the notification bell ---');
+  process.env.SEVA_REMINDER_FROM_HOUR = '24';
+  check('nothing is raised before the morning hour', await raiseWallReminders(), 0);
+  process.env.SEVA_REMINDER_FROM_HOUR = '0';
+  check('the follow-up that has come due is raised once', await raiseWallReminders(), 1);
+  const bell = (await pool.query(`SELECT kind, title, body, link, phone FROM drm_notifications WHERE kind = 'seva_wall'`)).rows;
+  check('as a bell notification with the donor, what they said and who asked',
+    bell, [{ kind: 'seva_wall', title: 'Call Bala K today', body: 'Square foot seva - Wants to donate another brick (asked by caller)', link: '/seva-wall?search=9000000002', phone: '9000000002' }]);
+  check('running it again raises nothing new', [await raiseWallReminders(), (await pool.query(`SELECT COUNT(*)::int AS n FROM drm_notifications`)).rows[0].n], [0, 1]);
+  check('a day that has not come yet is not raised (the one set for 3 days ahead)', bell.some((n: any) => /Phone off/.test(n.body ?? '')), false);
+
+  const kept = await logCall('caller', midSqft, { outcome: 'answered', note: 'Told him the picture is on its way' });
+  check('a later call with no new day clears the old follow-up (the promise was kept)', [kept.http, kept.follow_up_on], [200, null]);
+  check('so it is no longer due', (await call('caller', 'GET', '/api/seva-wall?stage=due')).total, 0);
+  check('...and nothing more is raised', await raiseWallReminders(), 0);
+  check('every call is on record, with who and when',
+    (await pool.query(`SELECT e.action FROM seva_wall_events e JOIN seva_wall_items i ON i.id = e.item_id
+                        WHERE i.donation_id = $1 ORDER BY e.id`, [midSqft])).rows.map((x: any) => x.action),
+    ['uploaded', 'no_answer', 'called', 'called']);
+  check('and sending it clears any follow-up day', (await call('caller', 'POST', `/api/seva-wall/${mandir}/mark-sent`)).http, 200);
+  check('...the follow-up is gone', (await pool.query(`SELECT follow_up_on FROM seva_wall_items WHERE donation_id = $1`, [mandir])).rows[0].follow_up_on, null);
 
   console.log('\n--- everyone else ---');
   check('an accountant can look', (await call('accountant', 'GET', '/api/seva-wall?view=all')).total, 5);
   check('but not upload', (await call('accountant', 'POST', `/api/seva-wall/${midSqft}/image`, pic)).http, 403);
   r = await call('admin', 'GET', '/api/seva-wall?view=all');
-  check('the counts say where everything is', r.counts, { to_print: 1, needs_reprint: 0, to_call: 2, called: 1, sent: 1 });
+  check('the counts say where everything is', r.counts, { to_print: 1, needs_reprint: 0, to_call: 0, called: 2, sent: 2, due: 0 });
   check('filter by seva', (await call('admin', 'GET', '/api/seva-wall?view=all&kind=mandir')).total, 1);
   check('filter by priority', (await call('admin', 'GET', '/api/seva-wall?view=all&priority=high')).total, 2);
   check('search by receipt number', (await call('admin', 'GET', '/api/seva-wall?view=all&search=BOOK-77')).total, 1);

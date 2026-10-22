@@ -339,7 +339,7 @@ function Updates({
                   ng ? "bg-warn-wash text-warn" : "bg-amber-100 text-amber-800"
                 }`}
               >
-                <Icon name={ng ? "inbox" : "sparkle"} size={14} />
+                <Icon name={ng ? "inbox" : n.kind === "seva_wall" ? "calendar" : "sparkle"} size={14} />
               </span>
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-ink">{n.title}</p>

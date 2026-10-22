@@ -115,6 +115,13 @@ export function scheduleNotifications(store: (site: SiteKey, d: AbandonedDonatio
   cron.schedule('* * * * *', () => {
     void pollNearlyGave(store).catch((e) => console.error('[CRON] nearly gave poll:', (e as Error).message));
   }, opts);
+  // Seva wall: a caller asked to ring a donor again on a day - tell the bell when it comes.
+  const wallReminders = () =>
+    void import('../routes/sevaWall')
+      .then((m) => m.raiseWallReminders())
+      .catch((e) => console.error('[CRON] seva wall reminders:', (e as Error).message));
+  cron.schedule('*/10 * * * *', wallReminders, opts);
+  wallReminders();
   cron.schedule('45 6 * * *', () => {
     void sankalpMorning().catch((e) => console.error('[CRON] sankalpam morning:', (e as Error).message));
   }, opts);

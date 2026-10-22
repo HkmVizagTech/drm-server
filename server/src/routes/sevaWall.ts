@@ -46,6 +46,7 @@ import { createHash, randomBytes, randomUUID } from 'crypto';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { isConfigured, putObject, getObject, deleteObject } from '../services/storage';
+import { notify } from '../services/notifications';
 import type { UserRole } from '../types';
 
 const router = Router();
@@ -106,7 +107,7 @@ const VIEW_STATUSES: Record<View, string[] | null> = {
   print: ['to_print', 'needs_reprint'],
   contact: ['in_review', 'sent'],
 };
-const STAGES = ['to_call', 'called', 'sent', 'uploaded'] as const;
+const STAGES = ['due', 'to_call', 'called', 'sent', 'uploaded'] as const;
 
 /** Which views a role may open, and which one it gets by default. */
 function viewsFor(role: UserRole): { allowed: View[]; fallback: View } {
@@ -128,7 +129,8 @@ const DERIVED = `
          d.created_at                                AS donated_at,
          COALESCE(i.priority, 'medium')::text        AS priority,
          COALESCE(i.status, 'to_print')::text        AS status,
-         i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token
+         i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token,
+         COALESCE(i.call_attempts, 0) AS call_attempts, i.last_call_outcome, i.last_call_note, i.last_call_at, i.follow_up_on
     FROM live_donations d
     JOIN live_people p ON p.id = d.person_id
     LEFT JOIN seva_wall_items i ON i.donation_id = d.id
@@ -140,7 +142,8 @@ const MANUAL = `
   SELECT i.id AS ref, i.id AS item_id, 'manual'::text AS origin,
          i.donor_name, i.honoree_name, i.phone, i.amount::float8, i.receipt_number,
          i.kind::text, COALESCE(i.donated_on::timestamptz, i.created_at),
-         i.priority::text, i.status::text, i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token
+         i.priority::text, i.status::text, i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token,
+         i.call_attempts, i.last_call_outcome, i.last_call_note, i.last_call_at, i.follow_up_on
     FROM seva_wall_items i
    WHERE i.donation_id IS NULL`;
 
@@ -196,6 +199,7 @@ router.get('/', allow(...LOOK), async (req, res) => {
     values.push(statuses);
     where.push(`w.status = ANY($${values.length}::text[])`);
   }
+  if (stage === 'due') where.push(`w.status = 'in_review' AND w.follow_up_on <= CURRENT_DATE`);
   if (stage === 'to_call' || uploadedTab) where.push(`w.status = 'in_review' AND w.called_at IS NULL`);
   if (stage === 'called') where.push(`w.status = 'in_review' AND w.called_at IS NOT NULL`);
   if (stage === 'sent') where.push(`w.status = 'sent'`);
@@ -224,9 +228,12 @@ router.get('/', allow(...LOOK), async (req, res) => {
   // the most urgent, and within the same urgency the OLDEST donation first, so a
   // brick promised a month ago never sits behind one that came in this morning.
   //
-  // The Seva wall table is what a caller works through top to bottom: pictures
-  // nobody has acted on, then donors already called whose picture still has to go
-  // out, then everything already sent. Longest waiting first inside each.
+  // The Seva wall table is what a caller works through top to bottom:
+  //   1. pictures nobody has reached the donor about yet (incl. "did not answer")
+  //   2. donors reached, picture still to be sent
+  //   3. sent
+  // Longest waiting first inside each. A "call again on" day does NOT move a brick
+  // up the table - the reminder arrives in the notification bell instead.
   const order =
     uploadedTab
       ? `pic.uploaded_at DESC NULLS LAST, w.ref`
@@ -255,15 +262,19 @@ router.get('/', allow(...LOOK), async (req, res) => {
       // Counts ignore the view's own filters on purpose: they say how much work
       // is in each stage, not how big the current list is.
       pool.query(
-        `SELECT w.status, (w.called_at IS NOT NULL) AS called, COUNT(*)::int AS n FROM ${WALL} GROUP BY 1, 2`
+        `SELECT w.status, (w.called_at IS NOT NULL) AS called, COUNT(*)::int AS n,
+                COUNT(*) FILTER (WHERE w.follow_up_on <= CURRENT_DATE)::int AS due
+           FROM ${WALL} GROUP BY 1, 2`
       ),
     ]);
 
     const baseUrl = publicBase(req);
-    const counts: Record<string, number> = { to_print: 0, needs_reprint: 0, to_call: 0, called: 0, sent: 0 };
+    const counts: Record<string, number> = { to_print: 0, needs_reprint: 0, to_call: 0, called: 0, sent: 0, due: 0 };
     for (const r of tally.rows) {
-      if (r.status === 'in_review') counts[r.called ? 'called' : 'to_call'] += r.n;
-      else counts[r.status] += r.n;
+      if (r.status === 'in_review') {
+        counts[r.called ? 'called' : 'to_call'] += r.n;
+        counts.due += r.due;
+      } else counts[r.status] += r.n;
     }
 
     const shaped = rows.rows.map((r) => {
@@ -298,7 +309,7 @@ router.get('/', allow(...LOOK), async (req, res) => {
         role === 'brick_printer'
           ? { to_print: counts.to_print, needs_reprint: counts.needs_reprint, uploaded: counts.to_call }
           : role === 'caller'
-          ? { to_call: counts.to_call, called: counts.called, sent: counts.sent }
+          ? { to_call: counts.to_call, called: counts.called, sent: counts.sent, due: counts.due }
           : counts,
     });
   } catch (err) {
@@ -753,6 +764,116 @@ router.get('/:ref/image', allow(...LOOK), async (req, res) => {
 // WhatsApp, so this is the caller's own word, recorded with who and when - which
 // is why it is a button they press and not something the WhatsApp link does by
 // itself. It does not need a call first: some donors are simply messaged.
+// LOG A CALL. The caller says how it went - the donor answered or did not - and
+// may leave a note ("wants to give another brick", "ring after Diwali") and the
+// day to call again. On that day the brick comes back to the top of the caller's
+// list. Each call is kept in the events log; the item holds the latest.
+//
+//   answered     the donor was reached: the brick is now "called, picture not
+//                sent yet". Logging a later call clears an earlier follow-up day
+//                unless a new one is given - the promise was kept.
+//   no_answer    nobody picked up: it stays among the bricks still to call, with
+//                a count of tries, so it is not mistaken for one that was reached.
+router.post('/:ref/call', allow(...REVIEW), async (req, res) => {
+  const outcome = String(req.body?.outcome ?? '');
+  if (!['answered', 'no_answer'].includes(outcome)) {
+    return res.status(400).json({ error: 'Say whether the donor answered or not.' });
+  }
+  const note = String(req.body?.note ?? '').trim().slice(0, 500);
+  const day = String(req.body?.follow_up_on ?? '').trim();
+  // An answered call has something to record - what the donor said. A call nobody
+  // picked up needs nothing: it is one tap.
+  if (outcome === 'answered' && !note) {
+    return res.status(400).json({ error: 'Write what the donor said.' });
+  }
+  if (day && !/^\d{4}-\d{2}-\d{2}$/.test(day)) return res.status(400).json({ error: 'The follow-up date is not valid.' });
+  try {
+    if (day) {
+      const ok = await pool.query(`SELECT ($1::date >= CURRENT_DATE) AS ok`, [day]);
+      if (!ok.rows[0].ok) return res.status(400).json({ error: 'Pick today or a day after today to call again.' });
+    }
+    const item = await itemFor(String(req.params.ref));
+    if (!item) return notFound(res);
+    const r = await pool.query(
+      `UPDATE seva_wall_items
+          SET called_at         = CASE WHEN $2 = 'answered' THEN COALESCE(called_at, NOW()) ELSE called_at END,
+              called_by         = CASE WHEN $2 = 'answered' THEN COALESCE(called_by, $3) ELSE called_by END,
+              call_attempts     = call_attempts + 1,
+              last_call_outcome = $2,
+              last_call_note    = NULLIF($4, ''),
+              last_call_at      = NOW(),
+              follow_up_on      = NULLIF($5, '')::date,
+              follow_up_by      = CASE WHEN NULLIF($5, '') IS NULL THEN NULL ELSE $3 END,
+              follow_up_alerted_on = NULL,
+              updated_at        = NOW()
+        WHERE id = $1 AND status = 'in_review'
+        RETURNING call_attempts, follow_up_on`,
+      [item.id, outcome, req.user?.userId ?? null, note, day]
+    );
+    if (!r.rowCount) return res.status(409).json({ error: 'Only a brick whose picture is waiting to be sent can have a call logged.' });
+    try {
+      await pool.query(
+        'INSERT INTO seva_wall_events (item_id, action, note, by_user, follow_up_on) VALUES ($1, $2, NULLIF($3, \'\'), $4, NULLIF($5, \'\')::date)',
+        [item.id, outcome === 'answered' ? 'called' : 'no_answer', note, req.user?.userId ?? null, day]
+      );
+    } catch (e) {
+      console.error('seva-wall event log failed (non-fatal):', (e as Error).message);
+    }
+    res.json({ ref: String(req.params.ref), outcome, attempts: r.rows[0].call_attempts, follow_up_on: r.rows[0].follow_up_on });
+  } catch (err) {
+    console.error('seva-wall call error:', (err as Error).message);
+    res.status(500).json({ error: 'Could not log the call.' });
+  }
+});
+
+/**
+ * Raise the bell notification for every follow-up day that has come.
+ *
+ * When a caller logs a call and picks a day to ring the donor again, that morning
+ * (from 9, India time) a notification appears in the bell - once, whatever the
+ * number of tabs or refreshes, because ref_key is unique and the item remembers
+ * the day it was raised for. It runs from a timer, so it does not depend on
+ * anybody having DRM open. The brick itself is not moved in the table.
+ */
+export async function raiseWallReminders(): Promise<number> {
+  const hour = Number((await pool.query(`SELECT EXTRACT(HOUR FROM NOW())::int AS h`)).rows[0].h);
+  if (hour < Number(process.env.SEVA_REMINDER_FROM_HOUR ?? 9)) return 0;
+  const due = await pool.query(
+    `SELECT i.id, COALESCE(i.donation_id, i.id) AS ref, i.follow_up_on, i.last_call_note, u.name AS set_by
+       FROM seva_wall_items i
+       LEFT JOIN users u ON u.id = i.follow_up_by
+      WHERE i.status = 'in_review' AND i.follow_up_on <= CURRENT_DATE
+        AND i.follow_up_alerted_on IS DISTINCT FROM i.follow_up_on`
+  );
+  if (!due.rowCount) return 0;
+  const people = await pool.query(
+    `SELECT w.ref, w.donor_name, w.kind, w.phone FROM ${WALL} WHERE w.ref = ANY($1::uuid[])`,
+    [due.rows.map((r) => r.ref)]
+  );
+  const byRef = new Map(people.rows.map((p) => [p.ref, p]));
+  const KIND: Record<string, string> = { brick: 'Brick seva', square: 'Square foot seva', mandir: 'Mandir nirmana seva' };
+  let raised = 0;
+  for (const r of due.rows) {
+    const p = byRef.get(r.ref);
+    const body =
+      [p?.kind ? KIND[p.kind] : '', r.last_call_note ?? ''].filter(Boolean).join(' - ') +
+      (r.set_by ? ` (asked by ${r.set_by})` : '');
+
+    const fresh = await notify({
+      kind: 'seva_wall',
+      title: `Call ${p?.donor_name ?? 'the donor'} today`,
+      body: body || null,
+      // Opens the Seva wall already searched for this donor, so the brick is right there.
+      link: p?.phone ? `/seva-wall?search=${p.phone}` : '/seva-wall',
+      phone: p?.phone ?? null,
+      refKey: `sw:${r.id}:${r.follow_up_on}`,
+    });
+    await pool.query('UPDATE seva_wall_items SET follow_up_alerted_on = follow_up_on WHERE id = $1', [r.id]);
+    if (fresh) raised++;
+  }
+  return raised;
+}
+
 // "Call answered": the caller reached the donor. It is a mark on a brick that is
 // waiting to be sent, not a status of its own, and it is what moves the row from
 // "not called" to "called, picture not sent yet" in the Seva wall table.
@@ -782,7 +903,7 @@ router.post('/:ref/mark-sent', allow(...REVIEW), async (req, res) => {
     if (!item) return notFound(res);
     const r = await pool.query(
       `UPDATE seva_wall_items
-          SET status = 'sent', sent_by = $2, sent_at = NOW(), updated_at = NOW()
+          SET status = 'sent', sent_by = $2, sent_at = NOW(), follow_up_on = NULL, follow_up_by = NULL, updated_at = NOW()
         WHERE id = $1 AND status = 'in_review'
         RETURNING id`,
       [item.id, req.user?.userId ?? null]
@@ -812,7 +933,8 @@ router.post('/:ref/send-back', allow(...REVIEW), async (req, res) => {
       const moved = await client.query(
         `UPDATE seva_wall_items
             SET status = 'needs_reprint', review_note = $2, reviewed_by = $3, reviewed_at = NOW(),
-                called_at = NULL, called_by = NULL, updated_at = NOW()
+                called_at = NULL, called_by = NULL, call_attempts = 0, last_call_outcome = NULL,
+                last_call_note = NULL, last_call_at = NULL, follow_up_on = NULL, follow_up_by = NULL, updated_at = NOW()
           WHERE id = $1 AND status = 'in_review'
           RETURNING id`,
         [item.id, note, req.user?.userId ?? null]

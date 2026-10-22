@@ -2793,6 +2793,18 @@ ALTER TABLE seva_wall_items ADD CONSTRAINT seva_wall_manual_complete CHECK (
 -- opens from the WhatsApp message, and the preview card WhatsApp builds from it.
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS share_token CHAR(32);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_seva_wall_share_token ON seva_wall_items (share_token) WHERE share_token IS NOT NULL;
+-- What the last call said. A caller logs each call: answered or not, a note (the
+-- donor wants another brick, will pay later...), and the day they asked to be
+-- called again - that day the brick comes back to the top of the caller's list.
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS call_attempts     INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS last_call_outcome VARCHAR(12);
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS last_call_note    TEXT;
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS last_call_at      TIMESTAMPTZ;
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS follow_up_on      DATE;
+-- Who asked to be reminded, and the day the reminder was last raised, so each
+-- follow-up day alerts that caller once and a refresh does not repeat it.
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS follow_up_by UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS follow_up_alerted_on DATE;
 -- Added after the table first shipped locally; harmless where the CREATE already had them.
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS called_by UUID REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS called_at TIMESTAMPTZ;
@@ -2835,6 +2847,7 @@ CREATE TABLE IF NOT EXISTS seva_wall_events (
   by_user    UUID REFERENCES users(id) ON DELETE SET NULL,
   at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE seva_wall_events ADD COLUMN IF NOT EXISTS follow_up_on DATE;
 CREATE INDEX IF NOT EXISTS idx_seva_wall_events_item ON seva_wall_events (item_id, at);
 
 /* =========================================================================
