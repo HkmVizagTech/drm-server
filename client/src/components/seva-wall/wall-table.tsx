@@ -730,7 +730,9 @@ export default function WallTable({ view }: { view: WallView }) {
                     {r.status === "in_review" && r.called_at && r.called_by_name && (
                       <span className="mt-1 block text-xs text-ink-muted">Called by {r.called_by_name}</span>
                     )}
-                    {r.status === "in_review" && view !== "print" && r.last_call_note && (
+                    {/* What the donor said when they answered: kept on the row while it is open
+                        and shown beside "Done" once it is finished. */}
+                    {(r.status === "in_review" || r.status === "sent") && view !== "print" && r.last_call_note && (
                       <span className="mt-1 block max-w-xs text-xs text-ink-soft">"{r.last_call_note}"</span>
                     )}
                     {r.status === "in_review" && view !== "print" && r.follow_up_on && (
