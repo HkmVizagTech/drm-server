@@ -77,6 +77,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 /** Where a person lands after signing in: a caller on their calls, everyone else on the dashboard. */
 export function homeFor(role: string): string {
+  if (role === "brick_printer") return "/seva-wall/print";
   return role === "caller" ? "/calling/start" : "/dashboard";
 }
 

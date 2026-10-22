@@ -21,7 +21,8 @@
 // answer does not scroll away.
 
 import { ReactNode, useEffect, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useAuth } from "@/lib/auth-context";
 import Link from "next/link";
 import { Sidebar, navLocation } from "./sidebar";
 import { ReminderBell } from "./reminder-bell";
@@ -72,6 +73,16 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   // On a phone the search box takes the whole bar, so it opens on demand.
   const [searching, setSearching] = useState(false);
   const pathname = usePathname();
+  const router = useRouter();
+  const { user } = useAuth();
+  const isPrinter = user?.role === "brick_printer";
+
+  // A brick printer has one screen. Anywhere else in the admin shell, send them
+  // back to it - and do not mount the shell at all, because it starts polling
+  // endpoints they are refused.
+  useEffect(() => {
+    if (isPrinter) router.replace("/seva-wall/print");
+  }, [isPrinter, router]);
 
   // Close on navigation. Without this, tapping a link on a phone leaves the
   // drawer covering the page you just asked for.
@@ -91,6 +102,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
       document.body.style.overflow = "";
     };
   }, [open]);
+
+  if (isPrinter) return null;
 
   return (
     // One provider around the whole shell: the bell, the nav count and the

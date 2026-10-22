@@ -45,6 +45,7 @@ import {
 import { currency, number, percentChange } from "@/lib/format";
 import { Icon, Spinner, type IconName } from "./icons";
 import NextLink from "next/link";
+import { createPortal } from "react-dom";
 
 export { Icon, Spinner };
 export type { IconName };
@@ -1333,6 +1334,12 @@ export function Select({
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const typed = useRef({ buffer: "", at: 0 });
+  // Where the list sits, in viewport coordinates. It is drawn in a portal on
+  // <body>, NOT inside this component: a dialog (or any scroller) clips its
+  // children, so a list drawn in place was cut off at the dialog's edge and the
+  // last options could not be reached. Fixed positioning on <body> escapes every
+  // such clip, and the list flips upward when there is no room below.
+  const [pos, setPos] = useState<{ left: number; width: number; top?: number; bottom?: number; maxHeight: number } | null>(null);
 
   const selectedIndex = opts.findIndex((o) => o.value === value);
   const selected = selectedIndex >= 0 ? opts[selectedIndex] : null;
@@ -1342,10 +1349,41 @@ export function Select({
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      // The list lives in a portal (below), so it is not inside rootRef.
+      if (rootRef.current?.contains(t) || listRef.current?.contains(t)) return;
+      setOpen(false);
     };
     document.addEventListener("pointerdown", onDown);
     return () => document.removeEventListener("pointerdown", onDown);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const r = rootRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const below = window.innerHeight - r.bottom - 12;
+      const above = r.top - 12;
+      const up = below < 200 && above > below;
+      setPos(
+        up
+          ? { left: r.left, width: r.width, bottom: window.innerHeight - r.top + 4, maxHeight: Math.min(256, above) }
+          : { left: r.left, width: r.width, top: r.bottom + 4, maxHeight: Math.min(256, Math.max(120, below)) }
+      );
+    };
+    place();
+    // Anything scrolling or resizing moves the button, so the list follows it.
+    const onScroll = (e: Event) => {
+      if (listRef.current?.contains(e.target as Node)) return; // scrolling the list itself
+      place();
+    };
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", onScroll, true);
+    };
   }, [open]);
 
   // Open on the current choice, not at the top: a list of twenty stages should
@@ -1435,13 +1473,14 @@ export function Select({
         />
       </button>
 
-      {open && (
+      {open && pos && typeof document !== "undefined" && createPortal(
         <ul
           ref={listRef}
           role="listbox"
           aria-label={ariaLabel}
           tabIndex={-1}
-          className="fade-rise absolute z-50 mt-1 max-h-64 w-full overflow-y-auto rounded-control border border-line-strong bg-surface py-1 shadow-float"
+          style={{ position: "fixed", left: pos.left, width: pos.width, top: pos.top, bottom: pos.bottom, maxHeight: pos.maxHeight }}
+          className="fade-rise z-[200] overflow-y-auto rounded-control border border-line-strong bg-surface py-1 shadow-float"
         >
           {!opts.length && <li className="px-3 py-2 text-sm text-ink-faint">No options</li>}
           {opts.map((o, i) => {
@@ -1480,7 +1519,8 @@ export function Select({
               </Fragment>
             );
           })}
-        </ul>
+        </ul>,
+        document.body
       )}
     </div>
   );

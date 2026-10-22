@@ -58,6 +58,39 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
   }
 }
 
+/**
+ * Confine a role to a short list of API areas.
+ *
+ * WHY THIS EXISTS INSTEAD OF MORE denyRole() CALLS
+ * Most of the API is protected by naming the roles that may NOT enter (callers
+ * out of donations, out of reports...). That works while the set of roles is
+ * known, but a new role is in none of those lists, so it would walk into every
+ * router that only has `authenticate`. A role that must see one screen cannot be
+ * kept out by remembering to add it to forty guards.
+ *
+ * So this runs once, ahead of every router: if the request carries a valid token
+ * for the confined role and the path is not on its list, it is refused. Requests
+ * with no token (login, the site webhooks, health) are not touched here - they
+ * were never this role's to begin with, and each router still authenticates for
+ * itself.
+ */
+export function confineRole(role: UserRole, allowedPrefixes: string[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const header = req.headers.authorization;
+    if (!header?.startsWith('Bearer ')) return next();
+    let decoded: AuthPayload;
+    try {
+      decoded = jwt.verify(header.split(' ')[1], JWT_SECRET) as AuthPayload;
+    } catch {
+      return next();
+    }
+    if (decoded.role !== role) return next();
+    const path = req.path;
+    if (allowedPrefixes.some((p) => path === p || path.startsWith(`${p}/`))) return next();
+    return res.status(403).json({ error: 'Your account does not have access to that part of DRM.' });
+  };
+}
+
 export function authorize(...roles: UserRole[]) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (!req.user || !roles.includes(req.user.role)) {

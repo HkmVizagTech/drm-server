@@ -70,6 +70,19 @@ export const navGroups: NavGroup[] = [
     ],
   },
   {
+    // The names on the temple's bricks: donors of Rs 1,500+ to Mandir nirmana,
+    // Brick and Square foot seva, from "to print" to "picture sent to the donor".
+    // Its own group so each table is one click away. Callers work the Seva wall
+    // table and nothing else here; the printer has no sidebar at all.
+    heading: "Seva wall",
+    roles: ["admin", "accountant", "volunteer_coordinator", "caller"],
+    items: [
+      { href: "/seva-wall", label: "Seva wall", icon: "sheet", roles: ["admin", "accountant", "volunteer_coordinator", "caller"] },
+      { href: "/seva-wall/print", label: "Bricks to print", icon: "box", roles: ["admin", "accountant", "volunteer_coordinator"] },
+      { href: "/seva-wall/all", label: "All records", icon: "list", roles: ["admin", "accountant", "volunteer_coordinator"] },
+    ],
+  },
+  {
     // Phone outreach. Its own group rather than tucked under Donors, because it
     // is a different job done by different people - a caller lives on these
     // three screens all day and never opens the donation list.

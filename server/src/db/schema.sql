@@ -2735,6 +2735,96 @@ BEGIN
 END $$;
 
 
+-- SEVA WALL
+-- Which donations belong on the wall is a query (routes/sevaWall.ts): Mandir
+-- nirmana / Brick / Square foot seva of Rs 1,500 or more. This table holds only
+-- what cannot be derived - where each brick is in its life, how urgent it is,
+-- and the records an admin adds by hand for donations DRM never saw.
+--
+--   donation_id set    -> the row belongs to a donation; the name, phone, amount
+--                         and receipt come from that donation, not from here.
+--   donation_id NULL   -> a hand-entered record; those fields are stored here.
+--
+-- status: to_print -> in_review (the printer uploaded; a caller now contacts the
+-- donor - called_at records "call answered") -> sent (the picture went to the donor
+-- on WhatsApp). A caller can send it back instead: needs_reprint, and the printer
+-- uploads a new picture.
+CREATE TABLE IF NOT EXISTS seva_wall_items (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  donation_id UUID UNIQUE REFERENCES donations(id) ON DELETE CASCADE,
+  donor_name     VARCHAR(255),
+  honoree_name   VARCHAR(255),
+  phone          VARCHAR(20),
+  amount         NUMERIC(12, 2),
+  receipt_number VARCHAR(80),
+  kind           VARCHAR(12),
+  donated_on     DATE,
+  priority    VARCHAR(8)  NOT NULL DEFAULT 'medium',
+  status      VARCHAR(16) NOT NULL DEFAULT 'to_print',
+  review_note TEXT,
+  reviewed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  reviewed_at TIMESTAMPTZ,
+  called_by   UUID REFERENCES users(id) ON DELETE SET NULL,
+  called_at   TIMESTAMPTZ,
+  sent_by     UUID REFERENCES users(id) ON DELETE SET NULL,
+  sent_at     TIMESTAMPTZ,
+  created_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT seva_wall_priority_ok CHECK (priority IN ('high', 'medium', 'low')),
+  CONSTRAINT seva_wall_status_ok   CHECK (status IN ('to_print', 'needs_reprint', 'in_review', 'sent')),
+  CONSTRAINT seva_wall_kind_ok     CHECK (kind IS NULL OR kind IN ('brick', 'square', 'mandir')),
+  -- A hand-entered record must carry what a donation would have supplied.
+  CONSTRAINT seva_wall_manual_complete CHECK (
+    donation_id IS NOT NULL
+    OR (donor_name IS NOT NULL AND phone IS NOT NULL AND amount IS NOT NULL
+        AND receipt_number IS NOT NULL AND kind IS NOT NULL)
+  )
+);
+-- Added after the table first shipped locally; harmless where the CREATE already had them.
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS called_by UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS called_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_seva_wall_manual_receipt
+  ON seva_wall_items (lower(receipt_number)) WHERE donation_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_seva_wall_status ON seva_wall_items (status);
+
+-- The picture of a brick. There is only ever ONE per brick: a new upload replaces
+-- the old one and the old file is deleted (from R2 too) so storage does not fill
+-- with pictures nobody will look at. What happened - uploaded, replaced, sent
+-- back and why - stays in seva_wall_events and on the item.
+-- The file is in Cloudflare R2 (r2_key) when R2 is configured; the bytes are kept
+-- here only when it is not, so an upload is never lost over storage.
+CREATE TABLE IF NOT EXISTS seva_wall_pictures (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  item_id     UUID NOT NULL REFERENCES seva_wall_items(id) ON DELETE CASCADE,
+  mime        VARCHAR(40) NOT NULL,
+  data        BYTEA,
+  r2_key      TEXT,
+  size_bytes  INTEGER NOT NULL,
+  state       VARCHAR(10) NOT NULL DEFAULT 'current',
+  sent_back_note TEXT,
+  uploaded_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT seva_wall_picture_state_ok CHECK (state IN ('current', 'sent_back'))
+);
+-- sha256 of the file, so the same picture cannot be uploaded again for a brick.
+ALTER TABLE seva_wall_pictures ADD COLUMN IF NOT EXISTS sha256 CHAR(64);
+CREATE INDEX IF NOT EXISTS idx_seva_wall_pictures_item ON seva_wall_pictures (item_id, uploaded_at DESC);
+
+-- Every step a brick goes through, who did it and when: uploaded, called,
+-- sent back (with the reason), sent. The item row only says where it is NOW; this
+-- is how anyone finds out how it got there - and it is why clearing the "called"
+-- mark when a brick is sent back loses nothing.
+CREATE TABLE IF NOT EXISTS seva_wall_events (
+  id         BIGSERIAL PRIMARY KEY,
+  item_id    UUID NOT NULL REFERENCES seva_wall_items(id) ON DELETE CASCADE,
+  action     VARCHAR(20) NOT NULL,
+  note       TEXT,
+  by_user    UUID REFERENCES users(id) ON DELETE SET NULL,
+  at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_seva_wall_events_item ON seva_wall_events (item_id, at);
+
 /* =========================================================================
    HIDING A DONOR WITHOUT DELETING THEM
    =========================================================================

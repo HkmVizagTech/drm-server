@@ -22,7 +22,7 @@ import { CALL_EVENTS } from '../services/callEvents';
 
 const router = Router();
 
-const ROLES: UserRole[] = ['admin', 'accountant', 'volunteer_coordinator', 'caller'];
+const ROLES: UserRole[] = ['admin', 'accountant', 'volunteer_coordinator', 'caller', 'brick_printer'];
 
 // Eight characters is not a strong password, but it is a floor, and a floor
 // that staff will actually clear beats a rule that gets worked around with

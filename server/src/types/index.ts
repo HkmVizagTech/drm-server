@@ -22,7 +22,12 @@ export type TriggerStatus = 'pending' | 'sent' | 'failed';
 // 'caller' is the phone team: the Calling section, plus donor records they can
 // read but not change. Everything else — donations, prasadam, settings, making
 // other accounts — is closed to them, in the nav and at the route.
-export type UserRole = 'admin' | 'accountant' | 'volunteer_coordinator' | 'caller';
+export type UserRole = 'admin' | 'accountant' | 'volunteer_coordinator' | 'caller' | 'brick_printer';
+
+// 'brick_printer' prints donors' names on bricks and uploads the picture. It sees
+// ONE screen - the Seva wall print list - and nothing else in DRM. Unlike the
+// others it is closed in a whitelist at the door (confineRole in middleware/auth),
+// because most routers only deny specific roles and would let a new one straight in.
 
 /** Who may create, edit and deactivate accounts. */
 export const ADMIN_ROLES: UserRole[] = ['admin'];

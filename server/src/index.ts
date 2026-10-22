@@ -26,6 +26,7 @@ import authRoutes from './routes/auth';
 import peopleRoutes from './routes/people';
 import donationsRoutes from './routes/donations';
 import sevaRoutes from './routes/seva';
+import sevaWallRoutes from './routes/sevaWall';
 import eventsRoutes from './routes/events';
 import triggersRoutes from './routes/triggers';
 import reportsRoutes from './routes/reports';
@@ -46,7 +47,7 @@ import sankalpamRoutes from './routes/sankalpam';
 import crmQrRoutes, { webhookRouter as razorpayWebhook } from './routes/crmQr';
 import profilesRoutes from './routes/profiles';
 import filesRoutes from './routes/files';
-import { denyRole, readOnlyFor } from './middleware/auth';
+import { confineRole, denyRole, readOnlyFor } from './middleware/auth';
 import { scheduleBirthdayAnniversaryCheck, scheduleNotifications, schedulePhoneCallLinks, scheduleWhatsAppThanks } from './utils/cron';
 import notificationsRoutes from './routes/notifications';
 import waThanksRoutes from './routes/waThanks';
@@ -171,6 +172,8 @@ app.get('/health', (_req, res) => {
 });
 
 // Routes
+// A brick printer reaches the Seva wall and nothing else. Must stay ahead of every router.
+app.use('/api', confineRole('brick_printer', ['/seva-wall', '/auth/me', '/auth/change-password']));
 app.use('/api/auth', authRoutes);
 // A caller may open People and Donations to look a donor up, and may not
 // change anything there. Enforced here, ahead of the routers, rather than on
@@ -221,6 +224,8 @@ app.use('/api/people', readOnlyFor('caller'), peopleRoutes);
 app.use('/api/profiles', denyRole('caller'), profilesRoutes);
 app.use('/api/donations', readOnlyFor('caller'), donationsRoutes);
 app.use('/api/seva', denyRole('caller'), sevaRoutes);
+// Roles are decided inside the router: callers review, printers upload, admins manage.
+app.use('/api/seva-wall', sevaWallRoutes);
 app.use('/api/events', denyRole('caller'), eventsRoutes);
 app.use('/api/triggers', denyRole('caller'), triggersRoutes);
 app.use('/api/reports', denyRole('caller'), reportsRoutes);

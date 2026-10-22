@@ -73,6 +73,11 @@ const ROLES: { value: string; label: string; blurb: string }[] = [
     blurb: "Seva, events and people.",
   },
   {
+    value: "brick_printer",
+    label: "Brick printer",
+    blurb: "Prints names on bricks and uploads the picture. Sees only the print list.",
+  },
+  {
     value: "admin",
     label: "Administrator",
     blurb: "Everything, including accounts and settings.",
