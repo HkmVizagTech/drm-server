@@ -43,6 +43,7 @@ import {
   Thead,
 } from "@/components/ui";
 import { Icon } from "@/components/icons";
+import { downloadSample, readSpreadsheet, SPREADSHEET_ACCEPT, type ParsedSheet } from "@/lib/spreadsheet";
 import { toast } from "@/components/toast";
 
 export type WallView = "contact" | "print" | "all";
@@ -280,6 +281,7 @@ export default function WallTable({ view }: { view: WallView }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [bulk, setBulk] = useState(false);
   const [sendingBack, setSendingBack] = useState<Row | null>(null);
   // A picture chosen but not yet sent: shown for checking first.
   const [pending, setPending] = useState<{ row: Row; file: File; url: string } | null>(null);
@@ -418,9 +420,14 @@ export default function WallTable({ view }: { view: WallView }) {
         subtitle={subtitle}
         actions={
           isAdmin ? (
-            <Button icon="plus" onClick={() => setAdding(true)}>
-              Add record
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="secondary" icon="upload" onClick={() => setBulk(true)}>
+                Bulk upload
+              </Button>
+              <Button icon="plus" onClick={() => setAdding(true)}>
+                Add record
+              </Button>
+            </div>
           ) : undefined
         }
       />
@@ -754,6 +761,16 @@ export default function WallTable({ view }: { view: WallView }) {
           <img src={pending.url} alt="Picture to upload" className="mx-auto max-h-[60vh] w-auto rounded-control ring-1 ring-line-soft" />
         </Modal>
       )}
+      {bulk && (
+        <BulkUpload
+          onClose={() => setBulk(false)}
+          onDone={(added) => {
+            setBulk(false);
+            toast.success(`${added} record${added === 1 ? "" : "s"} added`, "They are on the print list.");
+            void load();
+          }}
+        />
+      )}
       {adding && (
         <AddRecord
           onClose={() => setAdding(false)}
@@ -802,7 +819,6 @@ function AddRecord({ onClose, onAdded }: { onClose: () => void; onAdded: () => v
     donor_name: !f.donor_name.trim(),
     phone: phone.length < 10,
     amount: !(Number(f.amount) >= 1500),
-    receipt_number: !f.receipt_number.trim(),
     kind: !f.kind,
   };
   const invalid = Object.values(missing).some(Boolean);
@@ -859,8 +875,8 @@ function AddRecord({ onClose, onAdded }: { onClose: () => void; onAdded: () => v
         <Field label="Amount donated" required error={shown && missing.amount ? "Enter 1500 or more." : undefined}>
           <Input inputMode="numeric" value={f.amount} onChange={(e) => set({ amount: e.target.value })} invalid={shown && missing.amount} />
         </Field>
-        <Field label="Donation receipt no." required error={shown && missing.receipt_number ? "Enter the receipt number." : undefined}>
-          <Input value={f.receipt_number} onChange={(e) => set({ receipt_number: e.target.value })} invalid={shown && missing.receipt_number} />
+        <Field label="Donation receipt no." hint="Optional for now">
+          <Input value={f.receipt_number} onChange={(e) => set({ receipt_number: e.target.value })} />
         </Field>
         <Field label="Seva" required error={shown && missing.kind ? "Choose the seva." : undefined}>
           <Select value={f.kind} onChange={(v) => set({ kind: v })} placeholder="Choose…" ariaLabel="Seva">
@@ -935,6 +951,174 @@ function SendBack({ row, onClose, onDone }: { row: Row; onClose: () => void; onD
           onChange={(e) => setNote(e.target.value)}
         />
       </Field>
+    </Modal>
+  );
+}
+
+interface BulkResult {
+  dry_run: boolean;
+  ready: number;
+  added: number;
+  problems: number;
+  duplicates: number;
+  issues: { row: number; status: "error" | "duplicate"; message?: string; donor_name?: string }[];
+}
+
+/**
+ * Add many records from a sheet. The file is read, then CHECKED without writing
+ * anything, so the person sees how many are ready and which rows have a problem
+ * (and why) before they press Import. Good rows go in and bad rows are skipped;
+ * one bad row never blocks the rest.
+ */
+function BulkUpload({ onClose, onDone }: { onClose: () => void; onDone: (added: number) => void }) {
+  const [sheet, setSheet] = useState<ParsedSheet | null>(null);
+  const [fileName, setFileName] = useState("");
+  const [result, setResult] = useState<BulkResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const send = (s: ParsedSheet, dryRun: boolean) =>
+    apiClient.post<BulkResult>("/api/seva-wall/bulk", {
+      headers: s.headers,
+      rows: s.rows,
+      row_numbers: s.rowNumbers,
+      dry_run: dryRun,
+    });
+
+  async function choose(file: File | undefined) {
+    if (inputRef.current) inputRef.current.value = "";
+    if (!file) return;
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      const sheets = await readSpreadsheet(file);
+      const first = sheets[0];
+      setSheet(first);
+      setFileName(file.name);
+      setResult(await send(first, true));
+    } catch (e) {
+      setSheet(null);
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importNow() {
+    if (!sheet) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await send(sheet, false);
+      onDone(r.added);
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title="Bulk upload"
+      onClose={onClose}
+      wide
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button icon="upload" disabled={!result || result.ready === 0} loading={busy} onClick={() => void importNow()}>
+            {result && result.ready > 0 ? `Add ${result.ready} record${result.ready === 1 ? "" : "s"}` : "Add records"}
+          </Button>
+        </>
+      }
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept={SPREADSHEET_ACCEPT}
+        className="hidden"
+        onChange={(e) => void choose(e.target.files?.[0])}
+      />
+      <div className="mb-4 space-y-2 text-sm text-ink-muted">
+        <p>
+          Upload a CSV or Excel file. It needs the columns <b className="text-ink">Donor name, Phone, Amount, Seva</b>.
+          These are optional: <b className="text-ink">Honoree name, Receipt no., Priority, Date</b>. A missing or blank
+          priority becomes Medium. Only donations of Rs 1,500 or more are added.
+        </p>
+        <p>The file is checked first and nothing is added until you press the button.</p>
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <Button variant="secondary" icon="file" loading={busy && !result} onClick={() => inputRef.current?.click()}>
+          {sheet ? "Choose another file" : "Choose file"}
+        </Button>
+        <Button
+          variant="ghost"
+          icon="download"
+          onClick={() =>
+            downloadSample("seva-wall-sample.csv", [
+              ["Donor Name", "Honoree Name", "Phone", "Amount", "Receipt No", "Seva", "Priority", "Date"],
+              ["Asha Rao", "Late Sri Rao", "9876543210", "1500", "", "Brick seva", "Medium", "21/10/2026"],
+              ["Bala Krishna", "", "9876543211", "5000", "HKMI/2026/1", "Square foot seva", "High", ""],
+            ])
+          }
+        >
+          Download sample
+        </Button>
+        {fileName && <span className="text-sm text-ink-muted">{fileName}</span>}
+      </div>
+
+      {error && (
+        <div className="mb-4">
+          <Alert tone="danger">{error}</Alert>
+        </div>
+      )}
+
+      {result && (
+        <>
+          <div className="mb-4 flex flex-wrap gap-2">
+            <Badge tone="good" dot>
+              {number(result.ready)} ready to add
+            </Badge>
+            {result.problems > 0 && (
+              <Badge tone="danger" dot>
+                {number(result.problems)} with a problem
+              </Badge>
+            )}
+            {result.duplicates > 0 && (
+              <Badge tone="warn" dot>
+                {number(result.duplicates)} already there
+              </Badge>
+            )}
+          </div>
+          {result.issues.length > 0 && (
+            <div className="max-h-64 overflow-y-auto rounded-control ring-1 ring-line-soft">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-sunken text-left text-2xs uppercase tracking-[0.06em] text-ink-muted">
+                  <tr>
+                    <th className="px-3 py-2">Row</th>
+                    <th className="px-3 py-2">Donor</th>
+                    <th className="px-3 py-2">Why it is skipped</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line-soft">
+                  {result.issues.map((x) => (
+                    <tr key={x.row}>
+                      <td className="px-3 py-2 tabular-nums">{x.row}</td>
+                      <td className="px-3 py-2">{x.donor_name || "-"}</td>
+                      <td className="px-3 py-2 text-ink-soft">
+                        {x.message ? x.message[0].toUpperCase() + x.message.slice(1) : ""}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
     </Modal>
   );
 }

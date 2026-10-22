@@ -300,58 +300,253 @@ router.get('/', allow(...LOOK), async (req, res) => {
 
 // A hand-entered record: a donation DRM never saw (cash at the temple, a receipt
 // book). It joins the wall and the print queue, and touches nothing else - no
-// donation, no receipt, no total. The receipt number is required so the brick can
-// always be traced back to the receipt, and a number that already belongs to a
-// donation in DRM is refused so one gift cannot be on the wall twice.
-router.post('/', allow(...MANAGE), async (req, res) => {
-  const b = req.body ?? {};
-  const donor = String(b.donor_name ?? '').trim();
-  const honoree = String(b.honoree_name ?? '').trim();
-  const phone = String(b.phone ?? '').replace(/\D/g, '').slice(-10);
-  const amount = Number(b.amount);
-  const receipt = String(b.receipt_number ?? '').trim();
-  const kind = String(b.kind ?? '');
-  const priority = String(b.priority ?? 'medium');
-  const on = String(b.donated_on ?? '').trim();
+// donation, no receipt, no total. The receipt number is optional for now; when it
+// is given and already belongs to a donation in DRM, the record is refused so one
+// gift cannot be on the wall twice. One record by hand, or many from a sheet.
 
-  const errors: string[] = [];
-  if (!donor) errors.push('Enter the donor name.');
-  if (phone.length !== 10) errors.push('Enter the 10-digit phone number.');
-  if (!Number.isFinite(amount) || amount < WALL_MIN_AMOUNT) {
-    errors.push(`Enter the amount donated (${WALL_MIN_AMOUNT} or more).`);
+interface NewRecord {
+  donor_name: string;
+  honoree_name: string;
+  phone: string;
+  amount: number;
+  receipt_number: string;
+  kind: string;
+  priority: string;
+  donated_on: string;
+}
+
+/** What a column heading may be called in a sheet, after lower-casing and dropping punctuation. */
+const HEADINGS: Record<keyof NewRecord, string[]> = {
+  donor_name: ['donorname', 'donor', 'name', 'devoteename', 'nameonreceipt', 'fullname'],
+  honoree_name: ['honoreename', 'honoree', 'onthenameof', 'inthenameof', 'nametoprint', 'sevakname'],
+  phone: ['phone', 'phonenumber', 'mobile', 'mobilenumber', 'mobileno', 'contact', 'whatsapp'],
+  amount: ['amount', 'amountdonated', 'donation', 'donationamount', 'amountrs', 'rs', 'rupees'],
+  receipt_number: ['receiptno', 'receiptnumber', 'receipt', 'donationreceiptno', 'receiptid'],
+  kind: ['seva', 'sevatype', 'kind', 'type', 'category', 'sevaname'],
+  priority: ['priority'],
+  donated_on: ['date', 'donationdate', 'donatedon', 'paiddate', 'dateofdonation'],
+};
+const REQUIRED_COLUMNS: (keyof NewRecord)[] = ['donor_name', 'phone', 'amount', 'kind'];
+const COLUMN_LABEL: Record<keyof NewRecord, string> = {
+  donor_name: 'Donor name', honoree_name: 'Honoree name', phone: 'Phone', amount: 'Amount',
+  receipt_number: 'Receipt no.', kind: 'Seva', priority: 'Priority', donated_on: 'Date',
+};
+
+const squash = (v: unknown) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+function kindOf(text: string): string {
+  const t = text.toLowerCase();
+  if (/brick/.test(t)) return 'brick';
+  if (/square|sq\.? ?f|sqft/.test(t)) return 'square';
+  if (/mandir|mandhir/.test(t)) return 'mandir';
+  return '';
+}
+
+function priorityOf(text: string): string {
+  const t = text.trim().toLowerCase();
+  if (['high', 'h', '1', 'urgent'].includes(t)) return 'high';
+  if (['low', 'l', '3'].includes(t)) return 'low';
+  return 'medium'; // blank, "medium", or anything not recognised
+}
+
+function dateOf(text: string): string | null {
+  const t = text.trim();
+  if (!t) return '';
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(t);
+  if (!m) {
+    const d = /^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})$/.exec(t);
+    if (d) m = [d[0], d[3], d[2].padStart(2, '0'), d[1].padStart(2, '0')] as unknown as RegExpExecArray;
   }
-  if (!receipt) errors.push('Enter the donation receipt number.');
-  if (!(KINDS as readonly string[]).includes(kind)) errors.push('Choose the seva.');
-  if (!(PRIORITIES as readonly string[]).includes(priority)) errors.push('Choose a priority.');
-  if (on && !/^\d{4}-\d{2}-\d{2}$/.test(on)) errors.push('The donation date is not valid.');
-  if (errors.length) return res.status(400).json({ error: errors.join(' ') });
+  if (!m) return null;
+  const iso = `${m[1]}-${m[2]}-${m[3]}`;
+  const parsed = new Date(`${iso}T00:00:00Z`);
+  return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== iso ? null : iso;
+}
 
-  try {
-    const dup = await pool.query(
+/** Clean one record's raw values, or say what is wrong with it. */
+function cleanRecord(raw: Partial<Record<keyof NewRecord, unknown>>): { record?: NewRecord; error?: string } {
+  const problems: string[] = [];
+  const donor = String(raw.donor_name ?? '').trim();
+  const phone = String(raw.phone ?? '').replace(/\D/g, '').slice(-10);
+  const amount = Number(String(raw.amount ?? '').replace(/[^0-9.]/g, ''));
+  const kind = kindOf(String(raw.kind ?? ''));
+  const date = dateOf(String(raw.donated_on ?? ''));
+  if (!donor) problems.push('no donor name');
+  if (phone.length !== 10) problems.push('phone is not 10 digits');
+  if (!Number.isFinite(amount) || amount < WALL_MIN_AMOUNT) problems.push(`amount is below ${WALL_MIN_AMOUNT}`);
+  if (!kind) problems.push('seva is not Brick, Square foot or Mandir');
+  if (date === null) problems.push('date is not valid (use DD/MM/YYYY)');
+  if (problems.length) return { error: problems.join(', ') };
+  return {
+    record: {
+      donor_name: donor,
+      honoree_name: String(raw.honoree_name ?? '').trim(),
+      phone,
+      amount,
+      receipt_number: String(raw.receipt_number ?? '').trim(),
+      kind,
+      priority: priorityOf(String(raw.priority ?? '')),
+      donated_on: date ?? '',
+    },
+  };
+}
+
+type Db = { query: (sql: string, values?: unknown[]) => Promise<{ rowCount: number | null; rows: any[] }> };
+
+/** Why this record should not be added again, or null if it is new. */
+async function duplicateOf(q: Db, r: NewRecord, opts: { againstDonations: boolean }): Promise<string | null> {
+  if (r.receipt_number) {
+    const hit = await q.query(
       `SELECT 1 FROM donations WHERE lower(btrim(receipt_number)) = lower($1)
        UNION ALL
        SELECT 1 FROM seva_wall_items WHERE donation_id IS NULL AND lower(receipt_number) = lower($1)`,
-      [receipt]
+      [r.receipt_number]
     );
-    if (dup.rowCount) {
-      return res.status(409).json({
-        error: 'That receipt number is already in DRM. If the donation is on the wall, it does not need adding.',
-      });
-    }
-    const r = await pool.query(
-      `INSERT INTO seva_wall_items
-         (donor_name, honoree_name, phone, amount, receipt_number, kind, donated_on, priority, created_by)
-       VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, NULLIF($7, '')::date, $8, $9)
-       RETURNING id`,
-      [donor, honoree, phone, amount, receipt, kind, on, priority, req.user?.userId ?? null]
+    if (hit.rowCount) return 'that receipt number is already in DRM';
+  }
+  const same = await q.query(
+    `SELECT 1 FROM seva_wall_items
+      WHERE donation_id IS NULL AND lower(donor_name) = lower($1) AND phone = $2 AND amount = $3 AND kind = $4
+        AND donated_on IS NOT DISTINCT FROM NULLIF($5, '')::date`,
+    [r.donor_name, r.phone, r.amount, r.kind, r.donated_on]
+  );
+  if (same.rowCount) return 'the same record was already added';
+  if (opts.againstDonations) {
+    // A donation DRM already has, for the same phone, amount and seva, is almost
+    // certainly this one: it is on the wall already.
+    const onWall = await q.query(
+      `SELECT 1 FROM (${DERIVED}) w WHERE w.phone = $1 AND w.amount = $2 AND w.kind = $3 LIMIT 1`,
+      [r.phone, r.amount, r.kind]
     );
-    res.status(201).json({ ref: r.rows[0].id });
+    if (onWall.rowCount) return 'a donation with this phone, amount and seva is already on the wall';
+  }
+  return null;
+}
+
+async function insertRecord(q: Db, r: NewRecord, userId: string | null) {
+  const res = await q.query(
+    `INSERT INTO seva_wall_items
+       (donor_name, honoree_name, phone, amount, receipt_number, kind, donated_on, priority, created_by)
+     VALUES ($1, NULLIF($2, ''), $3, $4, NULLIF($5, ''), $6, NULLIF($7, '')::date, $8, $9)
+     RETURNING id`,
+    [r.donor_name, r.honoree_name, r.phone, r.amount, r.receipt_number, r.kind, r.donated_on, r.priority, userId]
+  );
+  return res.rows[0].id as string;
+}
+
+router.post('/', allow(...MANAGE), async (req, res) => {
+  const b = req.body ?? {};
+  const cleaned = cleanRecord({ ...b, priority: PRIORITIES.includes(String(b.priority) as never) ? b.priority : 'medium' });
+  if (!cleaned.record) {
+    const text = cleaned.error!;
+    return res.status(400).json({ error: text[0].toUpperCase() + text.slice(1) + '.' });
+  }
+  try {
+    const why = await duplicateOf(pool, cleaned.record, { againstDonations: false });
+    if (why) return res.status(409).json({ error: why[0].toUpperCase() + why.slice(1) + '.' });
+    res.status(201).json({ ref: await insertRecord(pool, cleaned.record, req.user?.userId ?? null) });
   } catch (err) {
     if ((err as { code?: string }).code === '23505') {
       return res.status(409).json({ error: 'That receipt number is already on the wall.' });
     }
     console.error('seva-wall add error:', (err as Error).message);
     res.status(500).json({ error: 'Could not add the record.' });
+  }
+});
+
+// Many records from a sheet. The caller sends the sheet as it read it (headings
+// plus rows of text); the headings are matched to the fields here, so the rule for
+// "what counts as a Phone column" lives in one place. With dry_run the rows are
+// only checked, so the person sees what would happen before anything is written.
+// Good rows are added and bad rows are reported with their sheet row number - one
+// bad row never blocks the rest.
+router.post('/bulk', allow(...MANAGE), async (req, res) => {
+  const headers: string[] = Array.isArray(req.body?.headers) ? req.body.headers.map(String) : [];
+  const rows: unknown[][] = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  const numbers: number[] = Array.isArray(req.body?.row_numbers) ? req.body.row_numbers.map(Number) : [];
+  const dryRun = req.body?.dry_run !== false;
+  if (!headers.length || !rows.length) return res.status(400).json({ error: 'The file has no rows.' });
+  if (rows.length > 2000) return res.status(400).json({ error: 'Upload 2,000 rows or fewer at a time.' });
+
+  // Which column is which field.
+  const column: Partial<Record<keyof NewRecord, number>> = {};
+  headers.forEach((h, i) => {
+    const key = squash(h);
+    for (const field of Object.keys(HEADINGS) as (keyof NewRecord)[]) {
+      if (column[field] === undefined && HEADINGS[field].includes(key)) column[field] = i;
+    }
+  });
+  const missing = REQUIRED_COLUMNS.filter((f) => column[f] === undefined);
+  if (missing.length) {
+    return res.status(400).json({
+      error: `The file needs a column for: ${missing.map((f) => COLUMN_LABEL[f]).join(', ')}.`,
+      missing: missing.map((f) => COLUMN_LABEL[f]),
+    });
+  }
+
+  type Outcome = { row: number; status: 'ok' | 'error' | 'duplicate'; message?: string; donor_name?: string };
+  const outcomes: Outcome[] = [];
+  const good: { record: NewRecord; at: number }[] = [];
+  const seen = new Map<string, number>();
+
+  try {
+    for (let i = 0; i < rows.length; i++) {
+      const at = numbers[i] ?? i + 2; // sheet row number: headings are row 1
+      const raw: Partial<Record<keyof NewRecord, unknown>> = {};
+      for (const f of Object.keys(column) as (keyof NewRecord)[]) raw[f] = rows[i][column[f]!];
+      if (Object.values(raw).every((v) => !String(v ?? '').trim())) continue; // a blank line
+      const cleaned = cleanRecord(raw);
+      if (!cleaned.record) {
+        outcomes.push({ row: at, status: 'error', message: cleaned.error, donor_name: String(raw.donor_name ?? '').trim() });
+        continue;
+      }
+      const r = cleaned.record;
+      const key = [r.donor_name.toLowerCase(), r.phone, r.amount, r.kind, r.donated_on, r.receipt_number.toLowerCase()].join('|');
+      const dupRow = seen.get(key);
+      if (dupRow) {
+        outcomes.push({ row: at, status: 'duplicate', message: `repeated in this file (same as row ${dupRow})`, donor_name: r.donor_name });
+        continue;
+      }
+      seen.set(key, at);
+      const why = await duplicateOf(pool, r, { againstDonations: true });
+      if (why) {
+        outcomes.push({ row: at, status: 'duplicate', message: why, donor_name: r.donor_name });
+        continue;
+      }
+      good.push({ record: r, at });
+      outcomes.push({ row: at, status: 'ok', donor_name: r.donor_name });
+    }
+
+    let added = 0;
+    if (!dryRun && good.length) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const g of good) {
+          await insertRecord(client, g.record, req.user?.userId ?? null);
+          added++;
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        client.release();
+      }
+    }
+
+    res.json({
+      dry_run: dryRun,
+      ready: good.length,
+      added,
+      problems: outcomes.filter((o) => o.status === 'error').length,
+      duplicates: outcomes.filter((o) => o.status === 'duplicate').length,
+      // Only the rows that need a look, so a 2,000-row sheet does not come back as 2,000 lines.
+      issues: outcomes.filter((o) => o.status !== 'ok').slice(0, 200),
+    });
+  } catch (err) {
+    console.error('seva-wall bulk error:', (err as Error).message);
+    res.status(500).json({ error: 'Could not add the records. Nothing was added.' });
   }
 });
 

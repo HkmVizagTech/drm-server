@@ -2774,12 +2774,20 @@ CREATE TABLE IF NOT EXISTS seva_wall_items (
   CONSTRAINT seva_wall_priority_ok CHECK (priority IN ('high', 'medium', 'low')),
   CONSTRAINT seva_wall_status_ok   CHECK (status IN ('to_print', 'needs_reprint', 'in_review', 'sent')),
   CONSTRAINT seva_wall_kind_ok     CHECK (kind IS NULL OR kind IN ('brick', 'square', 'mandir')),
-  -- A hand-entered record must carry what a donation would have supplied.
+  -- A hand-entered record must carry what a donation would have supplied. The
+  -- receipt number is optional for now (records are being added in bulk from a
+  -- sheet that does not always have one).
   CONSTRAINT seva_wall_manual_complete CHECK (
     donation_id IS NOT NULL
-    OR (donor_name IS NOT NULL AND phone IS NOT NULL AND amount IS NOT NULL
-        AND receipt_number IS NOT NULL AND kind IS NOT NULL)
+    OR (donor_name IS NOT NULL AND phone IS NOT NULL AND amount IS NOT NULL AND kind IS NOT NULL)
   )
+);
+-- Where the table was made with the receipt number required, relax it. Harmless
+-- on a table that already has the relaxed rule.
+ALTER TABLE seva_wall_items DROP CONSTRAINT IF EXISTS seva_wall_manual_complete;
+ALTER TABLE seva_wall_items ADD CONSTRAINT seva_wall_manual_complete CHECK (
+  donation_id IS NOT NULL
+  OR (donor_name IS NOT NULL AND phone IS NOT NULL AND amount IS NOT NULL AND kind IS NOT NULL)
 );
 -- Added after the table first shipped locally; harmless where the CREATE already had them.
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS called_by UUID REFERENCES users(id) ON DELETE SET NULL;

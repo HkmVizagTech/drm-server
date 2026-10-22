@@ -129,7 +129,6 @@ async function main() {
 
   console.log('\n--- add a record by hand ---');
   const good = { donor_name: 'Walk In', phone: '98 76 54 32 10', amount: 2500, receipt_number: 'BOOK-77', kind: 'brick', priority: 'high' };
-  check('needs the receipt number', (await call('admin', 'POST', '/api/seva-wall', { ...good, receipt_number: '' })).http, 400);
   check('needs the amount', (await call('admin', 'POST', '/api/seva-wall', { ...good, amount: '' })).http, 400);
   check('below Rs 1,500 is refused', (await call('admin', 'POST', '/api/seva-wall', { ...good, amount: 1000 })).http, 400);
   check('needs a 10-digit phone', (await call('admin', 'POST', '/api/seva-wall', { ...good, phone: '123' })).http, 400);
@@ -258,6 +257,46 @@ async function main() {
   check('filter by seva', (await call('admin', 'GET', '/api/seva-wall?view=all&kind=mandir')).total, 1);
   check('filter by priority', (await call('admin', 'GET', '/api/seva-wall?view=all&priority=high')).total, 2);
   check('search by receipt number', (await call('admin', 'GET', '/api/seva-wall?view=all&search=BOOK-77')).total, 1);
+
+  console.log('\n--- a record without a receipt number ---');
+  const noReceipt = await call('admin', 'POST', '/api/seva-wall', { donor_name: 'No Receipt', phone: '9222222222', amount: 1800, kind: 'square', priority: 'low' });
+  check('the receipt number is optional', noReceipt.http, 201);
+  check('the same record again is refused', (await call('admin', 'POST', '/api/seva-wall', { donor_name: 'no receipt', phone: '9222222222', amount: 1800, kind: 'square' })).http, 409);
+  check('it still needs a name, phone, amount and seva', (await call('admin', 'POST', '/api/seva-wall', { donor_name: 'x', phone: '9222222223', amount: 1800 })).http, 400);
+
+  console.log('\n--- bulk upload ---');
+  const headers = ['Donor Name', 'Honoree', 'Mobile', 'Amount', 'Receipt No', 'Seva', 'Priority', 'Date'];
+  const sheet = [
+    ['Ravi Kumar', '', '98111 11111', '3,000', '', 'Brick seva', '', ''],            // 2: good, no priority -> medium
+    ['Sita Devi', 'Late Ram', '9222222224', 'Rs 2500', 'B-1', 'Square foot', 'High', '05/09/2026'], // 3: good
+    ['Bad Phone', '', '123', '2000', '', 'Brick', '', ''],                              // 4
+    ['Low Amount', '', '9333333333', '1000', '', 'Brick', '', ''],                      // 5
+    ['Wrong Seva', '', '9333333334', '2000', '', 'Annadan', '', ''],                    // 6
+    ['Ravi Kumar', '', '9811111111', '3000', '', 'Brick', '', ''],                      // 7: repeat of row 2
+    ['Has Receipt', '', '9333333335', '2000', 'r-1', 'Brick', '', ''],                  // 8: receipt already a donation
+    ['Already There', '', '9000000002', '5000', '', 'Square foot', '', ''],             // 9: a donation is already on the wall
+    ['', '', '', '', '', '', '', ''],                                                    // 10: blank line
+  ];
+  const body = (dry: boolean, h = headers, rows = sheet) => ({ headers: h, rows, dry_run: dry });
+  check('only an admin can bulk upload', (await call('caller', 'POST', '/api/seva-wall/bulk', body(true))).http, 403);
+  const noCols = await call('admin', 'POST', '/api/seva-wall/bulk', body(true, ['Donor Name', 'Mobile'], [['a', '1']]));
+  check('a sheet missing columns says which', [noCols.http, noCols.missing], [400, ['Amount', 'Seva']]);
+  const before = (await pool.query(`SELECT COUNT(*)::int AS n FROM seva_wall_items WHERE donation_id IS NULL`)).rows[0].n;
+  const dry = await call('admin', 'POST', '/api/seva-wall/bulk', body(true));
+  check('a dry run counts what would happen', [dry.ready, dry.problems, dry.duplicates], [2, 3, 3]);
+  check('and says which sheet rows and why', dry.issues.map((x: any) => x.row), [4, 5, 6, 7, 8, 9]);
+  check('...a repeat is called a repeat', dry.issues.find((x: any) => x.row === 7).message.startsWith('repeated in this file'), true);
+  check('a dry run writes nothing', (await pool.query(`SELECT COUNT(*)::int AS n FROM seva_wall_items WHERE donation_id IS NULL`)).rows[0].n, before);
+  const real = await call('admin', 'POST', '/api/seva-wall/bulk', body(false));
+  check('the real upload adds the good rows only', [real.added, real.problems, real.duplicates], [2, 3, 3]);
+  r = await call('admin', 'GET', '/api/seva-wall?view=all&search=Ravi');
+  check('no priority column value -> medium, no receipt', [r.total, r.rows[0].priority, r.rows[0].receipt_number], [1, 'medium', null]);
+  r = await call('admin', 'GET', '/api/seva-wall?view=all&search=Sita');
+  check('the priority column is used when given', [r.rows[0].priority, r.rows[0].receipt_number, r.rows[0].honoree_name], ['high', 'B-1', 'Late Ram']);
+  check('uploading the same sheet again adds nothing', (await call('admin', 'POST', '/api/seva-wall/bulk', body(false))).added, 0);
+  const noPriority = await call('admin', 'POST', '/api/seva-wall/bulk', body(false, ['Name', 'Phone', 'Amount', 'Seva'], [['Plain Row', '9444444444', '2000', 'Mandir']]));
+  check('a sheet with no priority column at all works, as medium', noPriority.added, 1);
+  check('...and a Mandir row is Mandir', (await call('admin', 'GET', '/api/seva-wall?view=all&search=Plain')).rows[0].kind, 'mandir');
 
   console.log('\n--- nothing was deleted ---');
   check('every step is on record, in order',
