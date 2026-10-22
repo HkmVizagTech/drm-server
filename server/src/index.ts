@@ -27,6 +27,7 @@ import peopleRoutes from './routes/people';
 import donationsRoutes from './routes/donations';
 import sevaRoutes from './routes/seva';
 import sevaWallRoutes from './routes/sevaWall';
+import sevaWallPublic from './routes/sevaWallPublic';
 import eventsRoutes from './routes/events';
 import triggersRoutes from './routes/triggers';
 import reportsRoutes from './routes/reports';
@@ -226,6 +227,8 @@ app.use('/api/donations', readOnlyFor('caller'), donationsRoutes);
 app.use('/api/seva', denyRole('caller'), sevaRoutes);
 // Roles are decided inside the router: callers review, printers upload, admins manage.
 app.use('/api/seva-wall', sevaWallRoutes);
+// The donor-facing brick page and its picture. No login: protected by an unguessable token.
+app.use(sevaWallPublic);
 app.use('/api/events', denyRole('caller'), eventsRoutes);
 app.use('/api/triggers', denyRole('caller'), triggersRoutes);
 app.use('/api/reports', denyRole('caller'), reportsRoutes);

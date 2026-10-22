@@ -71,8 +71,8 @@ interface Row {
   sent_by_name?: string | null;
   has_image?: boolean;
   uploaded_at?: string | null;
-  /** Public link to the picture, when it is stored where a donor can open it. */
-  image_url?: string | null;
+  /** The page the donor opens from the WhatsApp message; WhatsApp shows it as a preview card with the picture. */
+  share_url?: string | null;
 }
 
 interface Response {
@@ -141,6 +141,33 @@ function printName(r: Row): string {
   return r.honoree_name || r.donor_name || "-";
 }
 
+/**
+ * Shrink a picture before it is uploaded: at most 1600 px on the long side, as a
+ * JPEG. A phone photo is 3 to 6 MB, which is heavy to store and too big for
+ * WhatsApp to build a preview card from (it wants a small image). If anything
+ * about this fails, or it would not make the file smaller, the original is used.
+ */
+async function shrink(file: File): Promise<File> {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return file;
+    ctx.fillStyle = "#fff"; // a PNG with transparency would otherwise turn black
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close?.();
+    const blob = await new Promise<Blob | null>((ok) => canvas.toBlob(ok, "image/jpeg", 0.85));
+    if (!blob || blob.size >= file.size) return file;
+    return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+  } catch {
+    return file;
+  }
+}
+
 function daysSince(iso: string): number {
   return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000));
 }
@@ -162,7 +189,9 @@ function thanksMessage(r: Row): string {
       r.honoree_name ? ` It is offered in the name of ${r.honoree_name}.` : ""
     }`,
   ];
-  if (r.image_url) lines.push("", "Here is the picture with your name printed:", r.image_url);
+  // The link carries the picture: WhatsApp turns it into a preview card showing
+  // the brick, so the donor sees the picture and this message together.
+  if (r.share_url) lines.push("", "Here is your brick with the name printed:", r.share_url);
   lines.push("", "Hare Krishna!");
   return lines.join("\n");
 }
@@ -366,11 +395,13 @@ export default function WallTable({ view }: { view: WallView }) {
   }
 
   /** A file was chosen: check it, then show it for a look before anything is sent. */
-  function onFile(file: File | undefined) {
+  async function onFile(picked: File | undefined) {
     const row = targetRow.current;
     if (fileRef.current) fileRef.current.value = "";
-    if (!file || !row) return;
-    if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return toast.error("Use a JPG, PNG or WebP picture.");
+    if (!picked || !row) return;
+    if (!/^image\/(jpeg|png|webp)$/.test(picked.type)) return toast.error("Use a JPG, PNG or WebP picture.");
+    // Shrunk first, so the preview shows exactly what will be stored and sent.
+    const file = await shrink(picked);
     if (file.size > MAX_BYTES) return toast.error("That picture is over 5 MB. Use a smaller one.");
     setPending((p) => {
       if (p) URL.revokeObjectURL(p.url);
@@ -445,7 +476,7 @@ export default function WallTable({ view }: { view: WallView }) {
         type="file"
         accept="image/jpeg,image/png,image/webp"
         className="hidden"
-        onChange={(e) => onFile(e.target.files?.[0])}
+        onChange={(e) => void onFile(e.target.files?.[0])}
       />
 
       {view === "print" && data && stage === "" && (

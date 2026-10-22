@@ -42,10 +42,10 @@
 // sent back and why) stays in seva_wall_events.
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
-import { isConfigured, putObject, getObject, deleteObject, publicUrl } from '../services/storage';
+import { isConfigured, putObject, getObject, deleteObject } from '../services/storage';
 import type { UserRole } from '../types';
 
 const router = Router();
@@ -75,6 +75,14 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const onTestDatabase = (): boolean =>
   /_test$/.test((process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '');
+
+/** The address donors reach DRM at, for links sent to them. PUBLIC_APP_URL wins; otherwise the address of this request. */
+function publicBase(req: Request): string {
+  const fixed = (process.env.PUBLIC_APP_URL ?? '').replace(/\/+$/, '');
+  if (fixed) return fixed;
+  const proto = String(req.get('x-forwarded-proto') ?? req.protocol).split(',')[0];
+  return `${proto}://${req.get('host')}`;
+}
 
 /* ------------------------------------------------------------------ roles */
 
@@ -120,7 +128,7 @@ const DERIVED = `
          d.created_at                                AS donated_at,
          COALESCE(i.priority, 'medium')::text        AS priority,
          COALESCE(i.status, 'to_print')::text        AS status,
-         i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by
+         i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token
     FROM live_donations d
     JOIN live_people p ON p.id = d.person_id
     LEFT JOIN seva_wall_items i ON i.donation_id = d.id
@@ -132,7 +140,7 @@ const MANUAL = `
   SELECT i.id AS ref, i.id AS item_id, 'manual'::text AS origin,
          i.donor_name, i.honoree_name, i.phone, i.amount::float8, i.receipt_number,
          i.kind::text, COALESCE(i.donated_on::timestamptz, i.created_at),
-         i.priority::text, i.status::text, i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by
+         i.priority::text, i.status::text, i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token
     FROM seva_wall_items i
    WHERE i.donation_id IS NULL`;
 
@@ -251,6 +259,7 @@ router.get('/', allow(...LOOK), async (req, res) => {
       ),
     ]);
 
+    const baseUrl = publicBase(req);
     const counts: Record<string, number> = { to_print: 0, needs_reprint: 0, to_call: 0, called: 0, sent: 0 };
     for (const r of tally.rows) {
       if (r.status === 'in_review') counts[r.called ? 'called' : 'to_call'] += r.n;
@@ -258,16 +267,18 @@ router.get('/', allow(...LOOK), async (req, res) => {
     }
 
     const shaped = rows.rows.map((r) => {
-      const { r2_key, picture_id, picture_at, item_id: _item, ...row } = r;
+      const { r2_key, picture_id, picture_at, item_id: _item, share_token, ...row } = r;
       void _item;
+      void r2_key;
       const full = {
         ...row,
         has_image: !!picture_id,
         uploaded_at: picture_at ?? null,
-        // The public link, for the WhatsApp message. Null when the picture is
-        // only in the database (R2 not configured), in which case the message
-        // goes without it.
-        image_url: r2_key ? publicUrl(r2_key) : null,
+        // The link the donor opens from the WhatsApp message. WhatsApp builds a
+        // preview card (the brick picture and a title) from this page, which is
+        // how a plain wa.me link can show a picture at all. Only while there is a
+        // current picture: a brick sent back has nothing to show.
+        share_url: picture_id && share_token ? `${baseUrl}/b/${share_token}` : null,
       };
       return role === 'brick_printer' ? forPrinter(full) : full;
     });
@@ -684,8 +695,11 @@ router.post('/:ref/image', allow(...UPLOAD), async (req, res) => {
         [pictureId, item.id, mime, r2Key ? null : bytes, r2Key, bytes.length, hash, req.user?.userId ?? null]
       );
       await client.query(
-        `UPDATE seva_wall_items SET status = 'in_review', review_note = NULL, updated_at = NOW() WHERE id = $1`,
-        [item.id]
+        `UPDATE seva_wall_items
+            SET status = 'in_review', review_note = NULL,
+                share_token = COALESCE(share_token, $2), updated_at = NOW()
+          WHERE id = $1`,
+        [item.id, randomBytes(16).toString('hex')]
       );
       await client.query('COMMIT');
     } catch (e) {
@@ -826,5 +840,35 @@ router.post('/:ref/send-back', allow(...REVIEW), async (req, res) => {
     res.status(500).json({ error: 'Could not send it back.' });
   }
 });
+
+/**
+ * What the public share page needs for a token: the name on the brick, the seva,
+ * and the current picture - and nothing that identifies the donor beyond that
+ * (no phone, amount or receipt). Null unless the brick has a current picture and
+ * is waiting for, or past, review: a brick sent back or not yet printed has
+ * nothing to show.
+ */
+export async function brickByToken(token: string) {
+  if (!/^[0-9a-f]{32}$/.test(token)) return null;
+  const r = await pool.query(
+    `SELECT w.donor_name, w.honoree_name, w.kind, pic.mime, pic.data, pic.r2_key
+       FROM ${WALL}
+       JOIN LATERAL (
+         SELECT sp.mime, sp.data, sp.r2_key FROM seva_wall_pictures sp
+          WHERE sp.item_id = w.item_id AND sp.state = 'current'
+          ORDER BY sp.uploaded_at DESC LIMIT 1
+       ) pic ON TRUE
+      WHERE w.share_token = $1 AND w.status IN ('in_review', 'sent')`,
+    [token]
+  );
+  const row = r.rows[0];
+  if (!row) return null;
+  return {
+    name: String(row.honoree_name || row.donor_name || ''),
+    kind: String(row.kind),
+    mime: String(row.mime),
+    load: async (): Promise<Buffer | null> => (row.r2_key ? getObject(row.r2_key) : (row.data as Buffer | null)),
+  };
+}
 
 export default router;

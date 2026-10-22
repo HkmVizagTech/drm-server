@@ -2789,6 +2789,10 @@ ALTER TABLE seva_wall_items ADD CONSTRAINT seva_wall_manual_complete CHECK (
   donation_id IS NOT NULL
   OR (donor_name IS NOT NULL AND phone IS NOT NULL AND amount IS NOT NULL AND kind IS NOT NULL)
 );
+-- The unguessable token in a brick's share link (/b/<token>): the page a donor
+-- opens from the WhatsApp message, and the preview card WhatsApp builds from it.
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS share_token CHAR(32);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_seva_wall_share_token ON seva_wall_items (share_token) WHERE share_token IS NOT NULL;
 -- Added after the table first shipped locally; harmless where the CREATE already had them.
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS called_by UUID REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS called_at TIMESTAMPTZ;

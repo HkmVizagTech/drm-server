@@ -11,6 +11,7 @@ import pool from '../src/db/pool';
 import { generateToken, confineRole } from '../src/middleware/auth';
 import { runMigrations } from '../src/db/migrate';
 import sevaWallRoutes from '../src/routes/sevaWall';
+import sevaWallPublic from '../src/routes/sevaWallPublic';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
 if (!/_test$/.test(dbName)) {
@@ -22,6 +23,7 @@ const app = express();
 app.use(express.json({ limit: '25mb' }));
 app.use('/api', confineRole('brick_printer', ['/seva-wall', '/auth/me']));
 app.use('/api/seva-wall', sevaWallRoutes);
+app.use(sevaWallPublic);
 // Stands in for "any other part of DRM" to prove the printer cannot reach it.
 app.get('/api/people', (_req, res) => res.json({ people: ['secret'] }));
 let base = '';
@@ -66,6 +68,20 @@ const call = (as: keyof typeof ids | null, method: string, path: string, body?: 
     req.on('error', reject);
     if (data) req.write(data);
     req.end();
+  });
+
+/** A plain fetch of a public address: no login, the body as text. */
+const getRaw = (path: string) =>
+  new Promise<{ http: number; type: string; text: string; bytes: number }>((resolve, reject) => {
+    const u = new URL(path.startsWith('http') ? path : `${base}${path}`);
+    http.get({ hostname: u.hostname, port: u.port, path: u.pathname }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks);
+        resolve({ http: res.statusCode ?? 0, type: String(res.headers['content-type'] ?? ''), text: raw.toString('utf8'), bytes: raw.length });
+      });
+    }).on('error', reject);
   });
 
 let failures = 0;
@@ -201,6 +217,20 @@ async function main() {
   check('call answered is recorded', [called1.http, called1.called], [200, true]);
   r = await call('caller', 'GET', '/api/seva-wall');
   check('...with who called', [r.rows[0].called_by_name, !!r.rows[0].called_at], ['caller', true]);
+
+  console.log('\n--- the link the donor opens (WhatsApp preview card) ---');
+  const share: string = r.rows[0].share_url;
+  check('the caller gets a share link for a brick with a picture', /^http:\/\/127\.0\.0\.1:\d+\/b\/[0-9a-f]{32}$/.test(share), true);
+  const page = await getRaw(share);
+  check('it opens with no login', [page.http, page.type.startsWith('text/html')], [200, true]);
+  check('it carries the picture for the preview card', /<meta property="og:image" content="[^"]+\/b\/[0-9a-f]{32}\/image">/.test(page.text), true);
+  check('and the title, with the name on the brick and the seva', [page.text.includes('og:title'), page.text.includes('Late Sri Rao'), page.text.includes('Brick seva')], [true, true, true]);
+  check('but no phone, amount or receipt', ['9000000001', '1500', 'R-1'].some((x) => page.text.includes(x)), false);
+  const pic2 = await getRaw(`${share}/image`);
+  check('the picture is served without a login', [pic2.http, pic2.type, pic2.bytes], [200, 'image/png', Buffer.from('a better picture').length]);
+  check('a made-up link is a 404', (await getRaw('/b/' + '0'.repeat(32))).http, 404);
+  check('a malformed link is a 404', (await getRaw('/b/not-a-token')).http, 404);
+  check('the printer is never given the link', (await call('printer', 'GET', '/api/seva-wall?stage=uploaded')).rows.some((x: any) => 'share_url' in x), false);
   check('once a caller has called, the printer can no longer replace the picture',
     (await call('printer', 'POST', `/api/seva-wall/${oldBrick}/image`, { mime: 'image/png', base64: Buffer.from('too late').toString('base64') })).http, 409);
   check('...or look at it', (await call('printer', 'GET', `/api/seva-wall/${oldBrick}/image`)).http, 404);
@@ -217,6 +247,7 @@ async function main() {
   check('a new round of calling starts: the called mark is cleared',
     (await pool.query(`SELECT called_at FROM seva_wall_items WHERE donation_id = $1`, [oldBrick])).rows[0].called_at, null);
   check('it is not in review any more', (await call('caller', 'GET', '/api/seva-wall')).total, 0);
+  check('a brick sent back has nothing to show: its link is not available', (await getRaw(share)).http, 404);
   check('a brick that is not in review cannot be marked sent', (await call('caller', 'POST', `/api/seva-wall/${oldBrick}/mark-sent`)).http, 409);
   check('...or sent back again', (await call('caller', 'POST', `/api/seva-wall/${oldBrick}/send-back`, { note: 'x' })).http, 409);
 
@@ -229,6 +260,7 @@ async function main() {
 
   const sent = await call('caller', 'POST', `/api/seva-wall/${oldBrick}/mark-sent`);
   check('approved and sent', [sent.http, sent.status], [200, 'sent']);
+  check('the same link works again with the new picture, and after it is sent', (await getRaw(share)).http, 200);
   r = await call('caller', 'GET', '/api/seva-wall');
   check('it stays on the Seva wall table as sent, with who sent it', [r.total, r.rows[0].status, r.rows[0].sent_by_name], [1, 'sent', 'caller']);
   check('a sent brick cannot be uploaded over', (await call('admin', 'POST', `/api/seva-wall/${oldBrick}/image`, pic)).http, 409);
