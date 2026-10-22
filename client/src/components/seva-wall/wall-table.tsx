@@ -133,6 +133,14 @@ function readBase64(file: File): Promise<string> {
   });
 }
 
+/**
+ * The name that goes ON the brick. When the donor gave in someone else's name (a
+ * parent, a child), that name is printed; otherwise the donor's own.
+ */
+function printName(r: Row): string {
+  return r.honoree_name || r.donor_name || "-";
+}
+
 function daysSince(iso: string): number {
   return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000));
 }
@@ -404,7 +412,7 @@ export default function WallTable({ view }: { view: WallView }) {
   const counts = data?.counts ?? {};
   const { title, subtitle } = TITLES[view];
   const showMoney = !isPrinter; // phone, amount and receipt are not the printer's to see
-  const cols = view === "print" ? (isPrinter ? 6 : 10) : view === "contact" ? 10 : 11;
+  const cols = view === "print" ? (isPrinter ? 6 : 8) : view === "contact" ? 10 : 11;
 
   const stageTabs = [
     { key: "", label: "All", count: (counts.to_call ?? 0) + (counts.called ?? 0) + (counts.sent ?? 0) },
@@ -528,7 +536,7 @@ export default function WallTable({ view }: { view: WallView }) {
           {view === "contact" && <Th>Picture</Th>}
           {view !== "contact" && <Th>Priority</Th>}
           <Th>{view === "print" ? "Name to print" : "Donor name"}</Th>
-          {!(view === "print" && isPrinter) && <Th>Honoree name</Th>}
+          {view !== "print" && <Th>Honoree name</Th>}
           {showMoney && <Th>Phone</Th>}
           {showMoney && <Th align="right">Amount</Th>}
           {showMoney && <Th>Receipt no.</Th>}
@@ -596,19 +604,18 @@ export default function WallTable({ view }: { view: WallView }) {
                     </Td>
                   )}
                   <Td className="font-medium text-ink">
-                    {r.donor_name || "-"}
+                    {view === "print" ? printName(r) : r.donor_name || "-"}
                     {r.origin === "manual" && (
                       <span className="ml-2 align-middle">
                         <Badge tone="neutral">Added by hand</Badge>
                       </span>
                     )}
-                    {view === "print" && isPrinter && r.honoree_name && (
-                      <span className="mt-0.5 block text-xs font-normal text-ink-muted">
-                        in the name of {r.honoree_name}
-                      </span>
+                    {/* The honoree is what gets printed, so the donor is the small print. */}
+                    {view === "print" && r.honoree_name && r.donor_name && (
+                      <span className="mt-0.5 block text-xs font-normal text-ink-muted">Donor: {r.donor_name}</span>
                     )}
                   </Td>
-                  {!(view === "print" && isPrinter) && (
+                  {view !== "print" && (
                     <Td>{r.honoree_name || <span className="text-ink-faint">-</span>}</Td>
                   )}
                   {showMoney && <Td className="tabular-nums">{r.phone || "-"}</Td>}
@@ -752,7 +759,7 @@ export default function WallTable({ view }: { view: WallView }) {
           }
         >
           <p className="mb-3 text-sm text-ink-muted">
-            {pending.row.donor_name} - {KIND_LABEL[pending.row.kind]}.{" "}
+            {printName(pending.row)} - {KIND_LABEL[pending.row.kind]}.{" "}
             {pending.row.status === "in_review"
               ? "The current picture will be deleted and replaced by this one."
               : "Is the name clear and the whole brick in the picture? If not, choose another."}
