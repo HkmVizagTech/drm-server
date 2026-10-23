@@ -148,7 +148,7 @@ export function SevaPicker({
       >
         {subCategories.map((s) => (
           <option key={s.subCategoryId} value={String(s.subCategoryId)}>
-            {s.subCategory}
+            {`${s.subCategory} (${s.code})`}
           </option>
         ))}
       </Select>

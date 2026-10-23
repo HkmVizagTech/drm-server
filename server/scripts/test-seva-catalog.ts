@@ -14,7 +14,7 @@ import { generateToken } from '../src/middleware/auth';
 import { runMigrations } from '../src/db/migrate';
 import sevaCatalogRoutes from '../src/routes/sevaCatalog';
 import donationsRoutes from '../src/routes/donations';
-import { seedSevaCatalog, resolveSeva } from '../src/services/sevaCatalog';
+import { seedSevaCatalog, resolveSeva, dccSevaOf } from '../src/services/sevaCatalog';
 import { seedRows } from '../src/db/sevaCatalogSeed';
 import { buildOfflineBody } from '../src/services/hkmvClient';
 
@@ -161,6 +161,15 @@ async function main() {
   const body = (site: 'hkmv' | 'annadan', code: string | null) =>
     buildOfflineBody(site, { donorName: 'D', donorMobile: '9', amount: 1, paymentMode: 'cash', referenceNo: 'r', sevaName: 'Brick Seva', sevaCode: code });
   check('the main site gets the Seva Code', (body('hkmv', 'BSC') as any).sevaCode, 'BSC');
+  const dccBody = (site: 'hkmv' | 'annadan', seva: { category: number; subCategory: number; subCategoryCode: number | string } | null) =>
+    buildOfflineBody(site, { donorName: 'D', donorMobile: '9', amount: 1, paymentMode: 'cash', referenceNo: 'r', sevaName: 'x', dccSeva: seva }) as any;
+  const brickRow = (await resolveSeva(bsc))!, deepRow = (await resolveSeva(deepId))!;
+  check('Brick Seva: category 2, sub category 103, and its code text (it has no sub code)',
+    dccSevaOf(brickRow), { category: 2, subCategory: 103, subCategoryCode: 'BSC' });
+  check('Deepotsava - Annadana Seva: category 3, sub category 5, and the sub code ID',
+    dccSevaOf(deepRow), { category: 3, subCategory: 5, subCategoryCode: 1 });
+  check('the main site is sent those three values', ['dccSevaCategory', 'dccSevaSubCategory', 'dccSevaSubCategoryCode'].map((k) => dccBody('hkmv', dccSevaOf(deepRow))[k]), [3, 5, 1]);
+  check('annadan is not sent them', 'dccSevaCategory' in dccBody('annadan', dccSevaOf(deepRow)), false);
   check('no code, no field', 'sevaCode' in body('hkmv', null), false);
   check('annadan is never sent a Seva Code', 'sevaCode' in body('annadan', 'BSC'), false);
   process.env.SEVA_CODE_FIELD = 'seva_code';
@@ -176,6 +185,8 @@ async function main() {
   check('a cash receipt with a listed seva is issued', [r1.http, r1.receiptNumber], [201, 'HKMI|T|1']);
   check('and the site was sent the Seva Code and the seva name',
     [received[0]?.body.sevaCode, received[0]?.body.sevaName], ['DEEP', 'Deepotsava - Annadana Seva']);
+  check('and the three values DCC takes, from the seva that was picked',
+    [received[0]?.body.dccSevaCategory, received[0]?.body.dccSevaSubCategory, received[0]?.body.dccSevaSubCategoryCode], [3, 5, 1]);
   received.length = 0;
   const r2 = await offline({ seva_catalog_id: added });
   check('a seva that is switched off is refused, and nothing reaches the site', [r2.http, received.length], [400, 0]);

@@ -419,6 +419,13 @@ export interface OfflineDonationInput {
    * takes the seva as free text in `occasion`.
    */
   sevaCode?: string | null;
+  /**
+   * The same seva as the three values DCC takes (see dccSevaOf). The main site works
+   * the DCC category out for itself by looking for words in the seva name, which put
+   * most DRM receipts in a default category; with these it can use the seva that was
+   * actually chosen. A site that does not read them ignores them, as with sevaCode.
+   */
+  dccSeva?: { category: number; subCategory: number; subCategoryCode: number | string } | null;
   panNumber?: string | null;
   wantCertificate?: boolean;
   wantPrasadam?: boolean;
@@ -666,6 +673,13 @@ export function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Re
     // told to read; SEVA_CODE_FIELD changes it without a release if the site calls it
     // something else.
     ...(input.sevaCode ? { [process.env.SEVA_CODE_FIELD || 'sevaCode']: input.sevaCode } : {}),
+    ...(input.dccSeva
+      ? {
+          dccSevaCategory: input.dccSeva.category,
+          dccSevaSubCategory: input.dccSeva.subCategory,
+          dccSevaSubCategoryCode: input.dccSeva.subCategoryCode,
+        }
+      : {}),
     type: input.sevaName || 'Manual Entry',
     panNumber: input.panNumber ? input.panNumber.trim().toUpperCase() : undefined,
     certificate: !!input.wantCertificate,

@@ -21,6 +21,21 @@ export interface Seva {
 
 type Db = { query: (sql: string, values?: unknown[]) => Promise<{ rowCount: number | null; rows: any[] }> };
 
+/**
+ * The three values DCC's addDonation call takes for a seva - the same three the main
+ * site posts to DCC: the Seva Category ID, the Seva Sub Category ID, and the sub code
+ * ID where the seva has sub sevas (otherwise the Seva Code text, e.g. "BSC").
+ */
+export interface DccSeva {
+  category: number;
+  subCategory: number;
+  subCategoryCode: number | string;
+}
+
+export function dccSevaOf(s: Seva): DccSeva {
+  return { category: s.categoryId, subCategory: s.subCategoryId, subCategoryCode: s.subCodeId ?? s.code };
+}
+
 /** "Deepotsava - Annadana Seva", or just "Brick Seva" when there is no sub code. */
 export function sevaName(subCategory: string, subCode: string | null): string {
   return subCode ? `${subCategory} - ${subCode}` : subCategory;

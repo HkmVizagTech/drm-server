@@ -16,7 +16,7 @@ import { upsertDonorSnapshot } from '../services/hkmvSync';
 import { canonPage, canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 import { displayPurposeSql } from '../utils/donationLabel';
 import { registerName } from '../services/personNames';
-import { resolveSeva } from '../services/sevaCatalog';
+import { resolveSeva, dccSevaOf } from '../services/sevaCatalog';
 import {
   describeFilters,
   sendExport,
@@ -589,6 +589,7 @@ router.post('/offline', async (req, res) => {
       // and anything calling this API without the seva list).
       sevaName: chosenSeva ? chosenSeva.name : seva_name ? String(seva_name).trim() : null,
       sevaCode: siteKey === 'hkmv' && chosenSeva ? chosenSeva.code : null,
+      dccSeva: siteKey === 'hkmv' && chosenSeva ? dccSevaOf(chosenSeva) : null,
       panNumber: pan_number ? String(pan_number).trim() : null,
       wantCertificate: !!want_certificate,
       wantPrasadam: !!want_prasadam,

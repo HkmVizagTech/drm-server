@@ -38,7 +38,7 @@ import { leadForPayer, leadBefore, restoreLead, type LeadUndo } from '../service
 import { markLeadDonated } from './crmQr';
 import { parseDate, istDate } from '../bootTimezone';
 import { createOfflineDonation, type SiteKey } from '../services/hkmvClient';
-import { resolveSeva } from '../services/sevaCatalog';
+import { resolveSeva, dccSevaOf } from '../services/sevaCatalog';
 import { sendExport, formatFrom, describeFilters, EXPORT_ROW_CAP, type ExportFormat } from '../utils/export';
 
 const router = Router();
@@ -488,6 +488,7 @@ router.post('/collections/:creditId/receipt', async (req, res) => {
         paymentDate: new Date(c.occurred_at).toISOString(),
         sevaName: chosenSeva?.name || c.purpose || undefined,
         sevaCode: site === 'hkmv' && chosenSeva ? chosenSeva.code : null,
+        dccSeva: site === 'hkmv' && chosenSeva ? dccSevaOf(chosenSeva) : null,
         panNumber: want80G ? c.donor_pan || undefined : undefined,
         wantCertificate: want80G,
         wantPrasadam,
