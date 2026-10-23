@@ -2895,6 +2895,32 @@ CREATE INDEX IF NOT EXISTS idx_seva_catalog_code ON seva_catalog (code);
 ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS seva_catalog_id UUID REFERENCES seva_catalog(id);
 ALTER TABLE collections ADD COLUMN IF NOT EXISTS seva_catalog_id UUID REFERENCES seva_catalog(id);
 
+-- ===========================================================================
+-- SEVA WALL CALLS, TRACKED LIKE EVERY OTHER CALL
+--
+-- A call a caller logs on the Seva wall (answered / not answered) is also written
+-- to the ordinary call log (lead_activities) against the donor's lead - the same
+-- place Nearly gave and queue calls go - so it shows in My calls, the reports and
+-- the lead's history, counted for the caller who made it.
+--
+-- Two dispositions for it. INACTIVE on purpose: the calling screen lists only
+-- active ones, so callers never see them as buttons there. They move no lead
+-- status and book no follow-up (the Seva wall has its own "call again" day), so a
+-- brick call can never schedule a retry or close a lead as Not reachable.
+--
+-- A donor who has no lead yet gets one with this status, which is closed and
+-- neutral - not a win, not a loss - so it never lands in a calling queue or the
+-- follow-ups, and does not touch the conversion figures.
+-- ===========================================================================
+INSERT INTO crm_statuses (slug, label, tone, sort_order, is_won, is_lost, is_open) VALUES
+  ('seva_wall', 'Seva wall donor', 'slate', 56, FALSE, FALSE, FALSE)
+ON CONFLICT (slug) DO NOTHING;
+
+INSERT INTO crm_dispositions (slug, label, counts_connected, suggests_status, wants_follow_up, sort_order, active) VALUES
+  ('seva_wall_answered',   'Seva wall - answered',     TRUE,  NULL, FALSE, 120, FALSE),
+  ('seva_wall_no_answer',  'Seva wall - not answered', FALSE, NULL, FALSE, 130, FALSE)
+ON CONFLICT (slug) DO NOTHING;
+
 /* =========================================================================
    HIDING A DONOR WITHOUT DELETING THEM
    =========================================================================

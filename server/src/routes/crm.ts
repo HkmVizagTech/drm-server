@@ -1932,7 +1932,7 @@ router.get('/leads/:id', async (req, res) => {
  * typing in a number they were handed on a slip immediately sees that this is a
  * donor of eleven years rather than a stranger.
  */
-async function upsertLead(
+export async function upsertLead(
   input: Record<string, unknown>,
   userId: string | null
 ): Promise<{ lead: Record<string, unknown>; created: boolean }> {
@@ -2497,7 +2497,7 @@ router.put('/leads/:id', async (req, res) => {
  *
  * Throws with a `status` for the caller to translate; the routes below do.
  */
-async function logCallForLead(
+export async function logCallForLead(
   leadId: string,
   b: Record<string, unknown>,
   user: { userId?: string; role?: string } | null

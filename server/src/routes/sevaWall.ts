@@ -52,6 +52,7 @@ import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { isConfigured, putObject, getObject, deleteObject, publicUrl } from '../services/storage';
 import { notify } from '../services/notifications';
+import { upsertLead, logCallForLead } from './crm';
 import type { UserRole } from '../types';
 
 const router = Router();
@@ -169,7 +170,7 @@ const MANUAL = `
    WHERE i.donation_id IS NULL`;
 
 /** The wall's rows. `cut` false ignores the start day - only for what must work for any brick ever shared. */
-const wallSql = (cut = true) => `(${derivedSql(cut)} UNION ALL ${MANUAL}) w`;
+export const wallSql = (cut = true) => `(${derivedSql(cut)} UNION ALL ${MANUAL}) w`;
 
 const PICTURE = `
   LEFT JOIN LATERAL (
@@ -653,6 +654,55 @@ async function logEvent(
   }
 }
 
+/**
+ * Record a Seva wall call in the ordinary call log, the way Nearly gave and queue
+ * calls are recorded, so it counts in My calls, the reports and the donor's history.
+ *
+ * It goes against the donor's lead - the one they already have, or a new one made
+ * with the closed "Seva wall donor" status so it never joins a queue. The two
+ * dispositions used move no status and book no follow-up (see the schema note).
+ * Never fatal: the Seva wall's own record of the call has already been saved.
+ */
+async function trackCall(
+  ref: string,
+  outcome: string,
+  note: string,
+  user: { userId?: string; role?: string } | undefined
+) {
+  try {
+    const w = await pool.query(`SELECT w.donor_name, w.phone, w.kind FROM ${wallSql(false)} WHERE w.ref = $1`, [ref]);
+    const row = w.rows[0];
+    const phone = String(row?.phone ?? '').replace(/\D/g, '').slice(-10);
+    if (!row || phone.length !== 10) return;
+    const label = KIND_NAME[row.kind] ?? 'Seva';
+    const { lead } = await upsertLead(
+      {
+        phone,
+        name: row.donor_name,
+        source_detail: `Seva wall - ${label}`,
+        status: 'seva_wall',
+        // A caller's own calls belong to them, as with Nearly gave; an admin's leave it free.
+        assigned_to: user?.role === 'caller' ? user.userId ?? null : null,
+        tags: ['seva_wall'],
+      },
+      user?.userId ?? null
+    );
+    await logCallForLead(
+      String(lead.id),
+      {
+        disposition: outcome === 'answered' ? 'seva_wall_answered' : 'seva_wall_no_answer',
+        direction: 'outbound',
+        note: note ? `Seva wall (${label}): ${note}` : `Seva wall (${label})`,
+      },
+      user ? { userId: user.userId, role: user.role } : null
+    );
+  } catch (e) {
+    console.error('seva-wall call tracking failed (non-fatal):', (e as Error).message);
+  }
+}
+
+const KIND_NAME: Record<string, string> = { brick: 'Brick seva', square: 'Square foot seva', mandir: 'Mandir nirmana seva' };
+
 const notFound = (res: Response) => res.status(404).json({ error: 'That record is not on the seva wall.' });
 
 router.patch('/:ref', allow(...MANAGE), async (req, res) => {
@@ -852,6 +902,7 @@ router.post('/:ref/call', allow(...REVIEW), async (req, res) => {
         [item.id, outcome === 'answered' ? 'called' : 'no_answer', note, req.user?.userId ?? null, day]
       );
       if (r.rows[0].status === 'sent') await logEvent(pool, item.id, 'sent', req.user?.userId);
+      await trackCall(String(req.params.ref), outcome, note, req.user);
     } catch (e) {
       console.error('seva-wall event log failed (non-fatal):', (e as Error).message);
     }

@@ -104,7 +104,7 @@ async function main() {
   const m = await runMigrations();
   check('the migration applies', m.ok, true);
 
-  await pool.query(`TRUNCATE drm_notifications, seva_wall_items, donations, person_names, people, users RESTART IDENTITY CASCADE`);
+  await pool.query(`TRUNCATE drm_notifications, seva_wall_items, leads, donations, person_names, people, users RESTART IDENTITY CASCADE`);
   for (const [role, id] of Object.entries(ids)) {
     await pool.query(`INSERT INTO users (id, name, email, password_hash, role) VALUES ($1,$2,$3,'x',$4)`,
       [id, role, `${role}@t`, role === 'printer' ? 'brick_printer' : role]);
@@ -352,6 +352,9 @@ async function main() {
   console.log('\n--- WhatsApp sent, the donor did not answer, answered later ---');
   const untouched = await call('admin', 'POST', '/api/seva-wall', { donor_name: 'Untouched One', phone: '9333333302', amount: 2400, kind: 'brick' });
   await call('printer', 'POST', `/api/seva-wall/${untouched.ref}/image`, { mime: 'image/png', base64: Buffer.from('untouched picture').toString('base64') });
+  // This donor is ALREADY a lead in the normal calling system, in an open stage: the brick calls
+  // must be written to that lead and leave its stage alone.
+  await pool.query(`INSERT INTO leads (phone, name, status, assigned_to) VALUES ('9333333300', 'Later Answer', 'attempting', $1)`, [ids.admin]);
   const fresh = await call('admin', 'POST', '/api/seva-wall', { donor_name: 'Later Answer', phone: '9333333300', amount: 2200, kind: 'brick' });
   check('a brick is added and its picture uploaded', [fresh.http, (await call('printer', 'POST', `/api/seva-wall/${fresh.ref}/image`, { mime: 'image/png', base64: Buffer.from('later answer picture').toString('base64') })).http], [201, 201]);
   check('the caller sends the WhatsApp', (await call('caller', 'POST', `/api/seva-wall/${fresh.ref}/mark-sent`)).status, 'in_review');
@@ -424,6 +427,28 @@ async function main() {
   const noPriority = await call('admin', 'POST', '/api/seva-wall/bulk', body(false, ['Name', 'Phone', 'Amount', 'Seva'], [['Plain Row', '9444444444', '2000', 'Mandir']]));
   check('a sheet with no priority column at all works, as medium', noPriority.added, 1);
   check('...and a Mandir row is Mandir', (await call('admin', 'GET', '/api/seva-wall?view=all&search=Plain')).rows[0].kind, 'mandir');
+
+  console.log('\n--- Seva wall calls are tracked like every other call ---');
+  const lead = async (phone: string) => (await pool.query(`SELECT id, status, assigned_to, call_attempts, next_follow_up_at, last_outcome FROM leads WHERE phone = $1`, [phone])).rows[0];
+  const calls = async (leadId: string) =>
+    (await pool.query(`SELECT disposition, connected, user_id, note FROM lead_activities WHERE lead_id = $1 AND kind = 'call' ORDER BY occurred_at, id`, [leadId])).rows;
+  const bala = await lead('9000000002');
+  check('a donor with no lead gets one, closed and neutral, so it never joins a queue', [bala.status, (await pool.query(`SELECT is_open, is_won, is_lost FROM crm_statuses WHERE slug = 'seva_wall'`)).rows[0]], ['seva_wall', { is_open: false, is_won: false, is_lost: false }]);
+  check('...owned by the caller who made the calls', bala.assigned_to, ids.caller);
+  const balaCalls = await calls(bala.id);
+  const tally = (d: string) => balaCalls.filter((c: any) => c.disposition === d).length;
+  check('every answered and not-answered call is in the call log', [tally('seva_wall_answered'), tally('seva_wall_no_answer'), balaCalls.length], [3, 2, 5]);
+  check('answered counts as connected, not answered does not', balaCalls.every((c: any) => c.connected === (c.disposition === 'seva_wall_answered')), true);
+  check('each is credited to the caller', balaCalls.every((c: any) => c.user_id === ids.caller), true);
+  check('and says it came from the Seva wall, with what the donor said',
+    [balaCalls.every((c: any) => /^Seva wall \(/.test(c.note)), balaCalls.some((c: any) => /Wants to donate another brick/.test(c.note))], [true, true]);
+  check('the attempts are counted on the lead like any call', bala.call_attempts, 5);
+  check('...but no retry is booked and the stage is not moved', [bala.next_follow_up_at, bala.status], [null, 'seva_wall']);
+  const preLead = await lead('9333333300');
+  check('a donor who is already a lead keeps their stage and owner', [preLead.status, preLead.assigned_to], ['attempting', ids.admin]);
+  const preCalls = await calls(preLead.id);
+  check('...and the calls are added to that lead', preCalls.map((c: any) => c.disposition), ['seva_wall_no_answer', 'seva_wall_no_answer', 'seva_wall_answered']);
+  check('the two dispositions are hidden from the calling screen', (await pool.query(`SELECT COUNT(*)::int AS n FROM crm_dispositions WHERE slug LIKE 'seva_wall%' AND active`)).rows[0].n, 0);
 
   console.log('\n--- donations before the start day are not on the wall ---');
   delete process.env.SEVA_WALL_FROM;

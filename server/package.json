@@ -49,6 +49,7 @@
     "test:hidden": "tsx scripts/test-hidden-donors.ts",
     "test:sevawall": "tsx scripts/test-seva-wall.ts",
     "test:sevacatalog": "tsx scripts/test-seva-catalog.ts",
+    "backfill:sevawallcalls": "tsx scripts/backfill-seva-wall-calls.ts",
     "seed:local": "tsx scripts/seed-local-demo.ts",
     "import:wall": "tsx scripts/import-wall-xlsx.ts",
     "fix:qrfollowups": "tsx scripts/fix-qr-follow-ups.ts",
