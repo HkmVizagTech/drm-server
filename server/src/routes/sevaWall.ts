@@ -236,9 +236,10 @@ router.get('/', allow(...LOOK), async (req, res) => {
   // brick promised a month ago never sits behind one that came in this morning.
   //
   // The Seva wall table is what a caller works through top to bottom:
-  //   1. pictures nobody has reached the donor about yet (incl. "did not answer")
-  //   2. donors reached, picture still to be sent
-  //   3. sent
+  //   1. untouched: not called and no WhatsApp sent yet (a "did not answer" stays here)
+  //   2. WhatsApp sent but the donor not reached yet
+  //   3. donor reached, WhatsApp still to be sent
+  //   4. done
   // Longest waiting first inside each. A "call again on" day does NOT move a brick
   // up the table - the reminder arrives in the notification bell instead.
   const order =
@@ -247,7 +248,12 @@ router.get('/', allow(...LOOK), async (req, res) => {
       : view === 'print'
       ? `(w.status = 'needs_reprint') DESC, ${PRIORITY_RANK}, w.donated_at ASC, w.ref`
       : view === 'contact'
-      ? `CASE WHEN w.status = 'sent' THEN 3 WHEN w.called_at IS NOT NULL THEN 2 ELSE 1 END,
+      ? `CASE
+           WHEN w.status = 'sent' THEN 4
+           WHEN w.called_at IS NULL AND w.whatsapp_sent_at IS NULL THEN 1
+           WHEN w.called_at IS NULL THEN 2
+           ELSE 3
+         END,
          CASE WHEN w.status <> 'sent' THEN pic.uploaded_at END ASC NULLS LAST,
          w.sent_at DESC NULLS LAST, w.ref`
       : `w.donated_at DESC, w.ref`;

@@ -348,6 +348,8 @@ async function main() {
   check('...and the follow-up day is gone', (await pool.query(`SELECT follow_up_on FROM seva_wall_items WHERE donation_id = $1`, [mandir])).rows[0].follow_up_on, null);
 
   console.log('\n--- WhatsApp sent, the donor did not answer, answered later ---');
+  const untouched = await call('admin', 'POST', '/api/seva-wall', { donor_name: 'Untouched One', phone: '9333333302', amount: 2400, kind: 'brick' });
+  await call('printer', 'POST', `/api/seva-wall/${untouched.ref}/image`, { mime: 'image/png', base64: Buffer.from('untouched picture').toString('base64') });
   const fresh = await call('admin', 'POST', '/api/seva-wall', { donor_name: 'Later Answer', phone: '9333333300', amount: 2200, kind: 'brick' });
   check('a brick is added and its picture uploaded', [fresh.http, (await call('printer', 'POST', `/api/seva-wall/${fresh.ref}/image`, { mime: 'image/png', base64: Buffer.from('later answer picture').toString('base64') })).http], [201, 201]);
   check('the caller sends the WhatsApp', (await call('caller', 'POST', `/api/seva-wall/${fresh.ref}/mark-sent`)).status, 'in_review');
@@ -357,6 +359,11 @@ async function main() {
   check('it shows both: WhatsApp sent AND did not answer, still to call',
     [row2.status, !!row2.whatsapp_sent_at, !!row2.called_at, row2.last_call_outcome, row2.call_attempts], ['in_review', true, false, 'no_answer', 1]);
   check('another try that is not answered keeps it open', [(await logCall('caller', fresh.ref, { outcome: 'no_answer' })).status, (await call('caller', 'GET', '/api/seva-wall?stage=to_call')).rows.some((x: any) => x.ref === fresh.ref)], ['in_review', true]);
+  r = await call('caller', 'GET', '/api/seva-wall');
+  const order = r.rows.map((x: any) => x.ref);
+  check('not called and no WhatsApp comes FIRST, ahead of one that was messaged but not reached',
+    [order.indexOf(untouched.ref) < order.indexOf(fresh.ref), order.indexOf(untouched.ref)], [true, 0]);
+  check('...and that comes ahead of the donors who were reached', order.indexOf(fresh.ref) < order.indexOf(midSqft), true);
   const later = await logCall('caller', fresh.ref, { outcome: 'answered', note: 'Said he will visit the temple on Sunday' });
   check('later he answers, the caller writes what he said, and it is finished', [later.http, later.status], [200, 'sent']);
   check('the note is kept', (await call('caller', 'GET', '/api/seva-wall?stage=sent')).rows.find((x: any) => x.ref === fresh.ref)?.last_call_note, 'Said he will visit the temple on Sunday');
@@ -368,10 +375,10 @@ async function main() {
   check('a final answered call with no new day then finishes it', (await logCall('caller', withDay.ref, { outcome: 'answered', note: 'Spoke, all done' })).status, 'sent');
 
   console.log('\n--- everyone else ---');
-  check('an accountant can look', (await call('accountant', 'GET', '/api/seva-wall?view=all')).total, 7);
+  check('an accountant can look', (await call('accountant', 'GET', '/api/seva-wall?view=all')).total, 8);
   check('but not upload', (await call('accountant', 'POST', `/api/seva-wall/${midSqft}/image`, pic)).http, 403);
   r = await call('admin', 'GET', '/api/seva-wall?view=all');
-  check('the counts say where everything is', r.counts, { to_print: 1, needs_reprint: 0, to_call: 0, called: 2, sent: 4, due: 0 });
+  check('the counts say where everything is', r.counts, { to_print: 1, needs_reprint: 0, to_call: 1, called: 2, sent: 4, due: 0 });
   check('filter by seva', (await call('admin', 'GET', '/api/seva-wall?view=all&kind=mandir')).total, 1);
   check('filter by priority', (await call('admin', 'GET', '/api/seva-wall?view=all&priority=high')).total, 2);
   check('search by receipt number', (await call('admin', 'GET', '/api/seva-wall?view=all&search=BOOK-77')).total, 1);
