@@ -413,6 +413,12 @@ export interface OfflineDonationInput {
   /** When the money was actually received, not when it was typed in. */
   paymentDate?: string | null;
   sevaName?: string | null;
+  /**
+   * The Seva Code from DRM's seva list (Deepotsava = DEEP), which is what the main
+   * site's DCC call expects. Sent for HKM Vizag only: annadan has no such list and
+   * takes the seva as free text in `occasion`.
+   */
+  sevaCode?: string | null;
   panNumber?: string | null;
   wantCertificate?: boolean;
   wantPrasadam?: boolean;
@@ -656,6 +662,10 @@ export function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Re
     manualPaymentMode: HKMV_MODES[input.paymentMode] || 'bank',
     paymentDate: input.paymentDate || undefined,
     sevaName: input.sevaName || undefined,
+    // The code DCC wants. The field name is the one the main site's receipt API is
+    // told to read; SEVA_CODE_FIELD changes it without a release if the site calls it
+    // something else.
+    ...(input.sevaCode ? { [process.env.SEVA_CODE_FIELD || 'sevaCode']: input.sevaCode } : {}),
     type: input.sevaName || 'Manual Entry',
     panNumber: input.panNumber ? input.panNumber.trim().toUpperCase() : undefined,
     certificate: !!input.wantCertificate,

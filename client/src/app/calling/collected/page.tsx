@@ -79,6 +79,7 @@ interface Collection {
   donor_pan?: string | null;
   donor_address?: string | null;
   purpose?: string | null;
+  seva_catalog_id?: string | null;
   receipt_error?: string | null;
   /** The lead this payment landed on, when it was from one. */
   lead_name?: string | null;
@@ -846,6 +847,7 @@ function ReceiptDialog({
     mobile: collection.donor_phone ?? "",
     email: collection.donor_email ?? "",
     seva: collection.purpose ?? "",
+    sevaCatalogId: collection.seva_catalog_id ?? "",
     onNameOf: collection.sevak_name ?? "",
     pan: collection.donor_pan ?? "",
     want80G: !!collection.donor_pan,
@@ -883,6 +885,7 @@ function ReceiptDialog({
           donor_pan: v.want80G ? v.pan.trim() : undefined,
           donor_address: v.address.trim(),
           purpose: v.seva.trim(),
+          seva_catalog_id: v.sevaCatalogId || undefined,
           sevak_name: v.onNameOf.trim(),
           want_80g: v.want80G,
           want_prasadam: v.wantPrasadam,

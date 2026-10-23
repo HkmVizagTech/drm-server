@@ -151,6 +151,8 @@ export const navGroups: NavGroup[] = [
       // Every phone with the app: is it saving calls and recordings?
       { href: "/calling/phones", label: "Phones", icon: "phone" },
       { href: "/whatsapp-thanks", label: "WhatsApp thanks", icon: "message" },
+      // The sevas a receipt is raised for, with the Seva Code DCC expects.
+      { href: "/seva-categories", label: "Seva categories", icon: "list" },
     ],
   },
 ];

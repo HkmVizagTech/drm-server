@@ -10,12 +10,15 @@ import { useEffect, useState } from "react";
 import { apiClient } from "@/lib/api";
 import { currency, dateTime, istToday } from "@/lib/format";
 import { Alert, Button, Checkbox, Field, Input, Modal, SegmentedControl, Skeleton, Textarea } from "@/components/ui";
+import { SevaPicker, sevaListAvailable, useSevaCatalog } from "@/components/receipts/seva-picker";
 
 export interface ReceiptValues {
   donorName: string;
   mobile: string;
   email: string;
   seva: string;
+  /** The seva picked from DRM's seva list (HKM Vizag receipts). Its code is what DCC is sent. */
+  sevaCatalogId: string;
   onNameOf: string;
   want80G: boolean;
   pan: string;
@@ -30,6 +33,7 @@ export const emptyReceipt = (): ReceiptValues => ({
   mobile: "",
   email: "",
   seva: "",
+  sevaCatalogId: "",
   onNameOf: "",
   want80G: false,
   pan: "",
@@ -49,6 +53,9 @@ export function receiptProblems(v: ReceiptValues, opts: { needSite: boolean }): 
   if (v.want80G && !PAN_RE.test(v.pan.trim().toUpperCase())) return "Enter a valid PAN Number.";
   if ((v.want80G || v.wantPrasadam) && !v.address.trim()) return "Enter the Address.";
   if (opts.needSite && !v.site) return "Choose the receipt site.";
+  // The main site's DCC wants a Seva Code, so a seva must be picked - once the list has
+  // loaded. If it could not, the typed seva below is used and nobody is blocked.
+  if (v.site !== "annadan" && sevaListAvailable() && !v.sevaCatalogId) return "Choose the Seva.";
   return null;
 }
 
@@ -70,6 +77,12 @@ export function DonorFields({
   myDonorLocked?: string | null;
   lookupHint?: string | null;
 }) {
+  // HKM Vizag receipts pick the seva from the list; if the list could not be loaded
+  // (or is empty) the typed seva is used instead, so nobody is stopped.
+  const { sevas, ready } = useSevaCatalog();
+  // Picked from the list unless the receipt is for annadan, which takes a typed seva. With no
+  // site chosen yet the list is shown too, so a QR receipt never opens on a typed field.
+  const pickSeva = v.site !== "annadan" && (!ready || sevas.length > 0);
   return (
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2">
@@ -89,9 +102,18 @@ export function DonorFields({
         <Field label="E-mail ID (optional)" htmlFor="r-email">
           <Input id="r-email" type="email" value={v.email} onChange={(e) => set({ email: e.target.value.toLowerCase() })} />
         </Field>
-        <Field label="Seva (optional)" htmlFor="r-seva">
-          <Input id="r-seva" value={v.seva} onChange={(e) => set({ seva: e.target.value })} placeholder="e.g. Annadan" />
-        </Field>
+        {pickSeva ? (
+          <Field label="Seva" required className="sm:col-span-2">
+            <SevaPicker
+              value={v.sevaCatalogId}
+              onChange={(id, name) => set({ sevaCatalogId: id, seva: name })}
+            />
+          </Field>
+        ) : (
+          <Field label="Seva (optional)" htmlFor="r-seva">
+            <Input id="r-seva" value={v.seva} onChange={(e) => set({ seva: e.target.value })} placeholder="e.g. Annadan" />
+          </Field>
+        )}
         <Field label="On the name of (optional)" htmlFor="r-onname" className="sm:col-span-2">
           <Input id="r-onname" value={v.onNameOf} onChange={(e) => set({ onNameOf: e.target.value })} />
         </Field>
@@ -320,6 +342,7 @@ export function ManualReceiptDialog({ onClose, onSaved }: { onClose: () => void;
         reference_no: needTxn ? txn.trim() : undefined,
         payment_date: paidOn || undefined,
         seva_name: v.seva.trim() || undefined,
+        seva_catalog_id: v.sevaCatalogId || undefined,
         sevak_name: v.onNameOf.trim() || undefined,
         want_certificate: v.want80G,
         pan_number: v.want80G ? v.pan.trim().toUpperCase() : undefined,

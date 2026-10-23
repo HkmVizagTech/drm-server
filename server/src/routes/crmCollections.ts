@@ -38,6 +38,7 @@ import { leadForPayer, leadBefore, restoreLead, type LeadUndo } from '../service
 import { markLeadDonated } from './crmQr';
 import { parseDate, istDate } from '../bootTimezone';
 import { createOfflineDonation, type SiteKey } from '../services/hkmvClient';
+import { resolveSeva } from '../services/sevaCatalog';
 import { sendExport, formatFrom, describeFilters, EXPORT_ROW_CAP, type ExportFormat } from '../utils/export';
 
 const router = Router();
@@ -65,7 +66,7 @@ const SELECT = `
   vu.name AS verified_by_name,
   col.donor_name, col.donor_phone, col.method, col.reference,
   col.receipt_status, col.receipt_number, col.receipt_site, col.sevak_name,
-  col.donor_email, col.donor_pan, col.donor_address, col.purpose, col.receipt_error,
+  col.donor_email, col.donor_pan, col.donor_address, col.purpose, col.seva_catalog_id, col.receipt_error,
   ld.name AS lead_name
 `;
 const JOINS = `
@@ -431,6 +432,14 @@ router.post('/collections/:creditId/receipt', async (req, res) => {
     if (b.donor_pan !== undefined) patch.donor_pan = (str(b.donor_pan, 12) ?? '').toUpperCase() || null;
     if (b.donor_address !== undefined) patch.donor_address = str(b.donor_address, 400);
     if (b.purpose !== undefined) patch.purpose = str(b.purpose, 120);
+    // The seva picked from DRM's list: checked here, and its name becomes the purpose,
+    // so what the browser typed is never what reaches DCC.
+    if (b.seva_catalog_id) {
+      const picked = await resolveSeva(b.seva_catalog_id);
+      if (!picked) return res.status(400).json({ error: 'That seva is no longer on the list. Pick another.' });
+      patch.seva_catalog_id = picked.id;
+      patch.purpose = picked.name.slice(0, 120);
+    }
     if (b.sevak_name !== undefined) patch.sevak_name = str(b.sevak_name, 160);
     if (b.method !== undefined && str(b.method, 40)) patch.method = str(b.method, 40);
     const keys = Object.keys(patch);
@@ -465,6 +474,9 @@ router.post('/collections/:creditId/receipt', async (req, res) => {
       [c.credit_id, site]
     );
 
+    // Allowed even if switched off since: a retry must say what the first attempt said.
+    const chosenSeva = c.seva_catalog_id ? await resolveSeva(c.seva_catalog_id, pool, { allowInactive: true }) : null;
+
     try {
       const result = await createOfflineDonation(site, {
         donorName: c.donor_name,
@@ -474,7 +486,8 @@ router.post('/collections/:creditId/receipt', async (req, res) => {
         paymentMode: ['cash', 'cheque', 'bank'].includes(String(c.method)) ? String(c.method) : 'upi',
         referenceNo: c.reference,
         paymentDate: new Date(c.occurred_at).toISOString(),
-        sevaName: c.purpose || undefined,
+        sevaName: chosenSeva?.name || c.purpose || undefined,
+        sevaCode: site === 'hkmv' && chosenSeva ? chosenSeva.code : null,
         panNumber: want80G ? c.donor_pan || undefined : undefined,
         wantCertificate: want80G,
         wantPrasadam,

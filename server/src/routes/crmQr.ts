@@ -32,6 +32,7 @@ import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import * as storage from '../services/storage';
 import { createOfflineDonation, resendReceipt, type SiteKey } from '../services/hkmvClient';
+import { resolveSeva } from '../services/sevaCatalog';
 import {
   describeFilters,
   sendExport,
@@ -1149,6 +1150,11 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
     paymentRowId,
   ]);
 
+  // The seva picked from DRM's list, if one was: its name goes on the receipt and, for
+  // the main site, its Seva Code goes to DCC. Allowed even if it has since been
+  // switched off - a retry must say what the first attempt said.
+  const chosenSeva = p.seva_catalog_id ? await resolveSeva(p.seva_catalog_id, pool, { allowInactive: true }) : null;
+
   try {
     const result = await createOfflineDonation(site, {
       donorName,
@@ -1167,7 +1173,8 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
         p.payment_id,
       gatewayPaymentId: p.payment_id,
       paymentDate: new Date(p.received_at).toISOString(),
-      sevaName: p.purpose || p.qr_purpose || undefined,
+      sevaName: chosenSeva?.name || p.purpose || p.qr_purpose || undefined,
+      sevaCode: site === 'hkmv' && chosenSeva ? chosenSeva.code : null,
       // 80G only when it was asked for (or, on rows from before the form
       // asked, when there is a PAN), and the PAN only with it. A certificate
       // without a PAN is no use to the donor.
@@ -1871,6 +1878,13 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
       return res.status(409).json({ error: 'Receipt already issued.' });
     }
 
+    // The seva picked from DRM's list. Checked here: it has to be on the list and on
+    // offer, and its name (not whatever the browser sent) becomes the purpose.
+    const chosenSeva = b.seva_catalog_id ? await resolveSeva(b.seva_catalog_id) : null;
+    if (b.seva_catalog_id && !chosenSeva) {
+      return res.status(400).json({ error: 'That seva is no longer on the list. Pick another.' });
+    }
+
     // Stored on the payment, not just passed through, so a reprint months
     // later says exactly what the original said.
     //
@@ -1897,6 +1911,7 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
          -- to be its own answer or it could never be given.
          want_certificate = COALESCE($13::boolean, want_certificate),
          receipt_site = COALESCE($10, receipt_site),
+         seva_catalog_id = COALESCE($14::uuid, seva_catalog_id),
          receipt_by = $11, receipt_status = NULL, receipt_error = NULL
        WHERE id = $1`,
       [
@@ -1906,7 +1921,7 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
         str(b.donor_email, 160),
         (str(b.donor_pan, 12) ?? '').toUpperCase() || null,
         str(b.donor_address, 400),
-        str(b.purpose, 120),
+        chosenSeva ? chosenSeva.name.slice(0, 120) : str(b.purpose, 120),
         // "On the name of" - the person the donation is offered for. This is
         // what prints in the sevak field on both sites' receipts, and on
         // annadan it is also who gets the birthday message.
@@ -1916,6 +1931,7 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
         req.user?.userId ?? null,
         typeof b.want_prasadam === 'boolean' ? b.want_prasadam : null,
         typeof b.want_certificate === 'boolean' ? b.want_certificate : null,
+        chosenSeva?.id ?? null,
       ]
     );
 

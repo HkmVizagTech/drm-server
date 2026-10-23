@@ -116,6 +116,7 @@ export interface PaymentDetail {
   want_prasadam?: boolean | null;
   want_certificate?: boolean | null;
   purpose: string | null;
+  seva_catalog_id: string | null;
   sevak_name: string | null;
   sevak_phone: string | null;
   receipt_status: string | null;
@@ -455,6 +456,7 @@ export function ReceiptDialog({
         mobile: d.donor_phone ?? d.person_phone ?? d.share_phone ?? d.payer_phone ?? "",
         email: d.donor_email ?? d.person_email ?? d.lead_email ?? "",
         seva: d.purpose ?? d.qr_purpose ?? "",
+        sevaCatalogId: d.seva_catalog_id ?? "",
         onNameOf: d.sevak_name ?? "",
         want80G: d.want_certificate ?? !!pan,
         pan,
@@ -511,6 +513,7 @@ export function ReceiptDialog({
         donor_pan: v.want80G ? v.pan.trim().toUpperCase() : "",
         donor_address: v.address.trim(),
         purpose: v.seva.trim(),
+        seva_catalog_id: v.sevaCatalogId || undefined,
         sevak_name: v.onNameOf.trim(),
         sevak_phone: "",
         site: siteFixed ? detail?.site_for_receipt : v.site,

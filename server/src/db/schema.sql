@@ -2855,6 +2855,46 @@ CREATE TABLE IF NOT EXISTS seva_wall_events (
 ALTER TABLE seva_wall_events ADD COLUMN IF NOT EXISTS follow_up_on DATE;
 CREATE INDEX IF NOT EXISTS idx_seva_wall_events_item ON seva_wall_events (item_id, at);
 
+-- ===========================================================================
+-- SEVA CATALOG
+--
+-- The seva structure the donation sites' DCC API understands: a Seva Category
+-- (Cultural Program), a Seva Sub Category with its Seva Code (Deepotsava = DEEP),
+-- and where there is one a Seva Sub Code (Annadana Seva). When DRM raises a
+-- receipt it lets the person pick a seva from this list and sends the Seva Code
+-- with the donation, which is what DCC expects.
+--
+-- One row per (sub category, sub code). The sheet this comes from has no single
+-- id for a row, so the pair is the identity: sub_category_id plus
+-- sub_code_id (0 when the sub category has no sub codes). Nothing is ever
+-- deleted - a seva that should not be offered is switched off with is_active, so
+-- a receipt raised against it last year still points at something.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS seva_catalog (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_type    VARCHAR(20)  NOT NULL DEFAULT 'HKMI',
+  category        VARCHAR(160) NOT NULL,
+  category_id     INTEGER      NOT NULL,
+  code            VARCHAR(60)  NOT NULL,
+  sub_category    VARCHAR(200) NOT NULL,
+  sub_category_id INTEGER      NOT NULL,
+  sub_code        VARCHAR(200),
+  sub_code_id     INTEGER,
+  is_active       BOOLEAN      NOT NULL DEFAULT TRUE,
+  is_tax_exempted BOOLEAN,
+  source          VARCHAR(12)  NOT NULL DEFAULT 'manual',
+  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_seva_catalog_identity
+  ON seva_catalog (sub_category_id, COALESCE(sub_code_id, 0));
+CREATE INDEX IF NOT EXISTS idx_seva_catalog_code ON seva_catalog (code);
+
+-- The seva chosen on a receipt, kept on the thing the receipt is raised from, so
+-- raising it again (a retry, a reprint) says what the first one said.
+ALTER TABLE qr_payments ADD COLUMN IF NOT EXISTS seva_catalog_id UUID REFERENCES seva_catalog(id);
+ALTER TABLE collections ADD COLUMN IF NOT EXISTS seva_catalog_id UUID REFERENCES seva_catalog(id);
+
 /* =========================================================================
    HIDING A DONOR WITHOUT DELETING THEM
    =========================================================================

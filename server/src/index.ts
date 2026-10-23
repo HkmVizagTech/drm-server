@@ -28,6 +28,8 @@ import donationsRoutes from './routes/donations';
 import sevaRoutes from './routes/seva';
 import sevaWallRoutes from './routes/sevaWall';
 import sevaWallPublic from './routes/sevaWallPublic';
+import sevaCatalogRoutes from './routes/sevaCatalog';
+import { seedSevaCatalog } from './services/sevaCatalog';
 import eventsRoutes from './routes/events';
 import triggersRoutes from './routes/triggers';
 import reportsRoutes from './routes/reports';
@@ -227,6 +229,8 @@ app.use('/api/donations', readOnlyFor('caller'), donationsRoutes);
 app.use('/api/seva', denyRole('caller'), sevaRoutes);
 // Roles are decided inside the router: callers review, printers upload, admins manage.
 app.use('/api/seva-wall', sevaWallRoutes);
+// The seva list receipts are raised against; everyone who raises a receipt reads it, an admin edits it.
+app.use('/api/seva-catalog', sevaCatalogRoutes);
 // The donor-facing brick page and its picture. No login: protected by an unguessable token.
 app.use(sevaWallPublic);
 app.use('/api/events', denyRole('caller'), eventsRoutes);
@@ -360,6 +364,12 @@ async function start(): Promise<void> {
   // all - and whatever is wrong, serving the parts that still work beats
   // serving nothing. It is logged loudly and shows on /health.
   setMigrationResult(await runMigrations());
+
+  // The temple's seva list, put in once when the catalog is empty. Never fatal:
+  // the receipt forms fall back to a typed seva name without it.
+  await seedSevaCatalog()
+    .then((n) => n && console.log(`[seva-catalog] loaded ${n} sevas`))
+    .catch((e) => console.error('[seva-catalog] seed failed:', (e as Error).message));
 
   // Checked, not assumed. The failure mode is reports that are five and a half
   // hours out and look entirely plausible, so it has to be loud at boot rather

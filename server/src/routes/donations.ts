@@ -16,6 +16,7 @@ import { upsertDonorSnapshot } from '../services/hkmvSync';
 import { canonPage, canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 import { displayPurposeSql } from '../utils/donationLabel';
 import { registerName } from '../services/personNames';
+import { resolveSeva } from '../services/sevaCatalog';
 import {
   describeFilters,
   sendExport,
@@ -476,6 +477,7 @@ router.post('/offline', async (req, res) => {
     reference_no,
     payment_date,
     seva_name,
+    seva_catalog_id,
     pan_number,
     want_certificate,
     want_prasadam,
@@ -529,6 +531,15 @@ router.post('/offline', async (req, res) => {
 
   const siteKey = site as SiteKey;
 
+  // The seva picked from DRM's seva list. Looked up here rather than trusting the
+  // name and code the browser sends: what reaches DCC is always a code that is in
+  // the list and still on offer. Only the main site uses it; annadan takes the
+  // seva as typed.
+  const chosenSeva = seva_catalog_id ? await resolveSeva(seva_catalog_id) : null;
+  if (seva_catalog_id && !chosenSeva) {
+    return res.status(400).json({ error: 'That seva is no longer on the list. Pick another.' });
+  }
+
   // "On the name of" - who the donation is offered for, which is what both
   // sites' receipts print and what annadan's birthday wish is addressed to.
   //
@@ -574,7 +585,10 @@ router.post('/offline', async (req, res) => {
       paymentMode: String(payment_mode),
       referenceNo: ref,
       paymentDate: payment_date || null,
-      sevaName: seva_name ? String(seva_name).trim() : null,
+      // The listed seva's name when one was picked, else what was typed (annadan,
+      // and anything calling this API without the seva list).
+      sevaName: chosenSeva ? chosenSeva.name : seva_name ? String(seva_name).trim() : null,
+      sevaCode: siteKey === 'hkmv' && chosenSeva ? chosenSeva.code : null,
       panNumber: pan_number ? String(pan_number).trim() : null,
       wantCertificate: !!want_certificate,
       wantPrasadam: !!want_prasadam,
