@@ -7,12 +7,14 @@
 import '../src/bootTimezone';
 // Reminders wait until 9am in real use; the test must not depend on the clock.
 process.env.SEVA_REMINDER_FROM_HOUR = '0';
+// The test donations are dated from August; the wall's real start day (1 Sep) is tested at the end.
+process.env.SEVA_WALL_FROM = '2026-01-01';
 import express from 'express';
 import http from 'http';
 import pool from '../src/db/pool';
 import { generateToken, confineRole } from '../src/middleware/auth';
 import { runMigrations } from '../src/db/migrate';
-import sevaWallRoutes, { raiseWallReminders } from '../src/routes/sevaWall';
+import sevaWallRoutes, { raiseWallReminders, wallStart } from '../src/routes/sevaWall';
 import sevaWallPublic from '../src/routes/sevaWallPublic';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
@@ -422,6 +424,24 @@ async function main() {
   const noPriority = await call('admin', 'POST', '/api/seva-wall/bulk', body(false, ['Name', 'Phone', 'Amount', 'Seva'], [['Plain Row', '9444444444', '2000', 'Mandir']]));
   check('a sheet with no priority column at all works, as medium', noPriority.added, 1);
   check('...and a Mandir row is Mandir', (await call('admin', 'GET', '/api/seva-wall?view=all&search=Plain')).rows[0].kind, 'mandir');
+
+  console.log('\n--- donations before the start day are not on the wall ---');
+  delete process.env.SEVA_WALL_FROM;
+  check('the wall starts on 1 September 2026 unless told otherwise', wallStart(), '2026-09-01');
+  process.env.SEVA_WALL_FROM = '2026-08-15';
+  r = await call('admin', 'GET', '/api/seva-wall?view=all');
+  check('an August donation (1 Aug) is left off every table', r.rows.some((x: any) => x.ref === oldBrick), false);
+  check('...while September and later donations stay', r.rows.some((x: any) => x.ref === midSqft) && r.rows.some((x: any) => x.ref === newBrick), true);
+  const cutTotal = r.total as number;
+  const c = r.counts as Record<string, number>;
+  check('the counts agree with the list', c.to_print + c.needs_reprint + c.to_call + c.called + c.sent, cutTotal);
+  check('a link already sent to the donor still works', (await getRaw(share)).http, 200);
+  check('and so does its picture', (await getRaw(`${share}/image`)).http, 200);
+  check('a brick added by hand is not cut off by the start day', (await call('admin', 'GET', '/api/seva-wall?view=all&search=BOOK-77')).total, 1);
+  process.env.SEVA_WALL_FROM = '2026-01-01';
+  const fullList = await call('admin', 'GET', '/api/seva-wall?view=all');
+  check('moving the start day back brings it back, with its history', [fullList.rows.some((x: any) => x.ref === oldBrick), fullList.total - cutTotal], [true, 1]);
+  check('nothing was removed to hide it', (await pool.query(`SELECT COUNT(*)::int AS n FROM donations`)).rows[0].n, 8);
 
   console.log('\n--- nothing was deleted ---');
   check('every step is on record, in order',

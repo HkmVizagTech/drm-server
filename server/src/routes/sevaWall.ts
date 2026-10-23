@@ -123,7 +123,20 @@ function viewsFor(role: UserRole): { allowed: View[]; fallback: View } {
 
 /* -------------------------------------------------------------- the wall */
 
-const DERIVED = `
+/**
+ * Donations from before this day are not on the wall. The wall is for the current
+ * campaign: September 2026 onwards. Older gifts are not deleted or changed - they
+ * are simply not listed - and a link already sent to a donor keeps working (see
+ * brickByToken). Change the day with SEVA_WALL_FROM (YYYY-MM-DD) without a release.
+ */
+const WALL_START_DEFAULT = '2026-09-01';
+export function wallStart(): string {
+  const v = process.env.SEVA_WALL_FROM ?? '';
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : WALL_START_DEFAULT;
+}
+
+/** Donations that qualify for the wall; `cut` false lists every such donation whatever its date. */
+const derivedSql = (cut = true) => `
   SELECT d.id AS ref, i.id AS item_id, 'donation'::text AS origin,
          COALESCE(NULLIF(d.given_name, ''), p.name)  AS donor_name,
          NULLIF(d.sevak_name, '')                    AS honoree_name,
@@ -142,7 +155,8 @@ const DERIVED = `
     LEFT JOIN seva_wall_items i ON i.donation_id = d.id
    WHERE d.amount >= ${WALL_MIN_AMOUNT}
      AND COALESCE(d.source_site, 'hkmv') <> 'annadan'
-     AND (${WALL_KIND_SQL}) IS NOT NULL`;
+     AND (${WALL_KIND_SQL}) IS NOT NULL
+     ${cut ? `AND d.created_at >= '${wallStart()}'::date` : ''}`;
 
 const MANUAL = `
   SELECT i.id AS ref, i.id AS item_id, 'manual'::text AS origin,
@@ -154,7 +168,8 @@ const MANUAL = `
     FROM seva_wall_items i
    WHERE i.donation_id IS NULL`;
 
-const WALL = `(${DERIVED} UNION ALL ${MANUAL}) w`;
+/** The wall's rows. `cut` false ignores the start day - only for what must work for any brick ever shared. */
+const wallSql = (cut = true) => `(${derivedSql(cut)} UNION ALL ${MANUAL}) w`;
 
 const PICTURE = `
   LEFT JOIN LATERAL (
@@ -263,7 +278,7 @@ router.get('/', allow(...LOOK), async (req, res) => {
       pool.query(
         `SELECT w.*, pic.id AS picture_id, pic.r2_key, pic.uploaded_at AS picture_at,
                 su.name AS sent_by_name, cu.name AS called_by_name
-           FROM ${WALL} ${PICTURE}
+           FROM ${wallSql()} ${PICTURE}
            LEFT JOIN users su ON su.id = w.sent_by
            LEFT JOIN users cu ON cu.id = w.called_by
            ${clause}
@@ -271,13 +286,13 @@ router.get('/', allow(...LOOK), async (req, res) => {
           LIMIT ${limit} OFFSET ${(page - 1) * limit}`,
         values
       ),
-      pool.query(`SELECT COUNT(*)::int AS n FROM ${WALL} ${clause}`, values),
+      pool.query(`SELECT COUNT(*)::int AS n FROM ${wallSql()} ${clause}`, values),
       // Counts ignore the view's own filters on purpose: they say how much work
       // is in each stage, not how big the current list is.
       pool.query(
         `SELECT w.status, (w.called_at IS NOT NULL) AS called, COUNT(*)::int AS n,
                 COUNT(*) FILTER (WHERE w.follow_up_on <= CURRENT_DATE)::int AS due
-           FROM ${WALL} GROUP BY 1, 2`
+           FROM ${wallSql()} GROUP BY 1, 2`
       ),
     ]);
 
@@ -454,7 +469,7 @@ async function duplicateOf(q: Db, r: NewRecord, opts: { againstDonations: boolea
     // A donation DRM already has, for the same phone, amount and seva, is almost
     // certainly this one: it is on the wall already.
     const onWall = await q.query(
-      `SELECT 1 FROM (${DERIVED}) w WHERE w.phone = $1 AND w.amount = $2 AND w.kind = $3 LIMIT 1`,
+      `SELECT 1 FROM (${derivedSql(false)}) w WHERE w.phone = $1 AND w.amount = $2 AND w.kind = $3 LIMIT 1`,
       [r.phone, r.amount, r.kind]
     );
     if (onWall.rowCount) return 'a donation with this phone, amount and seva is already on the wall';
@@ -610,7 +625,7 @@ async function itemFor(ref: string): Promise<Item | null> {
     [ref]
   );
   if (existing.rows[0]) return existing.rows[0] as Item;
-  const onWall = await pool.query(`SELECT 1 FROM (${DERIVED}) w WHERE w.ref = $1`, [ref]);
+  const onWall = await pool.query(`SELECT 1 FROM (${derivedSql()}) w WHERE w.ref = $1`, [ref]);
   if (!onWall.rowCount) return null;
   const made = await pool.query(
     `INSERT INTO seva_wall_items (donation_id) VALUES ($1)
@@ -868,7 +883,7 @@ export async function raiseWallReminders(): Promise<number> {
   );
   if (!due.rowCount) return 0;
   const people = await pool.query(
-    `SELECT w.ref, w.donor_name, w.kind, w.phone FROM ${WALL} WHERE w.ref = ANY($1::uuid[])`,
+    `SELECT w.ref, w.donor_name, w.kind, w.phone FROM ${wallSql()} WHERE w.ref = ANY($1::uuid[])`,
     [due.rows.map((r) => r.ref)]
   );
   const byRef = new Map(people.rows.map((p) => [p.ref, p]));
@@ -876,6 +891,7 @@ export async function raiseWallReminders(): Promise<number> {
   let raised = 0;
   for (const r of due.rows) {
     const p = byRef.get(r.ref);
+    if (!p) continue; // not on the wall (before the start day): no reminder
     const body =
       [p?.kind ? KIND[p.kind] : '', r.last_call_note ?? ''].filter(Boolean).join(' - ') +
       (r.set_by ? ` (asked by ${r.set_by})` : '');
@@ -1007,7 +1023,7 @@ export async function brickByToken(token: string) {
   if (!/^[0-9a-f]{32}$/.test(token)) return null;
   const r = await pool.query(
     `SELECT w.donor_name, w.honoree_name, w.kind, pic.mime, pic.data, pic.r2_key
-       FROM ${WALL}
+       FROM ${wallSql(false)}
        JOIN LATERAL (
          SELECT sp.mime, sp.data, sp.r2_key FROM seva_wall_pictures sp
           WHERE sp.item_id = w.item_id AND sp.state = 'current'
