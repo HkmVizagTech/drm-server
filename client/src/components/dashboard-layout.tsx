@@ -74,8 +74,14 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [searching, setSearching] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, ready } = useAuth();
   const isPrinter = user?.role === "brick_printer";
+
+  // Not signed in (never, or the login ran out): go to the sign-in page rather
+  // than showing a screen whose every request is refused.
+  useEffect(() => {
+    if (ready && !user) router.replace("/login");
+  }, [ready, user, router]);
 
   // A brick printer has one screen. Anywhere else in the admin shell, send them
   // back to it - and do not mount the shell at all, because it starts polling
@@ -103,7 +109,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     };
   }, [open]);
 
-  if (isPrinter) return null;
+  if (isPrinter || !ready || !user) return null;
 
   return (
     // One provider around the whole shell: the bell, the nav count and the

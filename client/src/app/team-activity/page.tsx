@@ -47,6 +47,7 @@ interface Caller {
   idle_gaps: number;
   longest_gap_minutes: number;
   seva_wall_calls: number;
+  inbound_calls: number;
   donors_reached: number;
   overdue_followups: number;
   due_today_followups: number;
@@ -183,7 +184,7 @@ export default function TeamActivityPage() {
     <div>
       <PageHeader
         title="Team activity"
-        subtitle="What each caller did, from the call log. A call that is not logged in DRM is not counted, and talk time is real only for calls made through the phone app."
+        subtitle="What each caller did, from the call log. Every answered call counts, whether the caller rang the donor or the donor rang them, and every call to the same donor counts again. A call that is not logged in DRM is not counted, and talk time is real only for calls made through the phone app."
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <ExportButton path="/crm/team-activity/export" params={{ date: day }} filename={`team-activity-${day}`} />
@@ -381,6 +382,7 @@ function CallerDay({ caller, day, onClose }: { caller: Caller; day: string; onCl
         <Badge tone="brand">{caller.calls} call{caller.calls === 1 ? "" : "s"}</Badge>
         <Badge tone="good">{caller.connected} answered</Badge>
         {caller.talk_real_seconds > 0 && <Badge tone="neutral">Talk {fromSeconds(caller.talk_real_seconds)}</Badge>}
+        {caller.inbound_calls > 0 && <Badge tone="neutral">{caller.inbound_calls} from donors</Badge>}
         {caller.seva_wall_calls > 0 && <Badge tone="neutral">{caller.seva_wall_calls} Seva wall</Badge>}
         {caller.last_login_at && <Badge tone="neutral">Last login {shortDate(caller.last_login_at)} {clockTime(caller.last_login_at)}</Badge>}
       </div>

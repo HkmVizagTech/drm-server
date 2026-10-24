@@ -13,6 +13,32 @@ const API_URL =
   process.env.NEXT_PUBLIC_API_URL ??
   (process.env.NODE_ENV === 'development' ? 'http://localhost:4000' : '');
 
+/** Keep a renewed login when the server sends one - it does when the stored one is half used. */
+function keepRenewedToken(res: Response) {
+  const fresh = res.headers.get('x-new-token');
+  if (!fresh) return;
+  try {
+    localStorage.setItem('token', fresh);
+  } catch {
+    // Storage blocked: the current login still works until it ends.
+  }
+}
+
+/**
+ * The login is gone or refused and nothing could renew it: clear it and go to
+ * the sign-in page, instead of leaving a screen full of "No token provided".
+ */
+function signedOut(hadToken: boolean) {
+  // No login was ever stored (a public page, or the sign-in page): nothing ended.
+  if (typeof window === 'undefined' || !hadToken) return;
+  try {
+    localStorage.removeItem('token');
+  } catch {
+    // Nothing to clear.
+  }
+  if (window.location.pathname !== '/login') window.location.assign('/login');
+}
+
 export async function api<T>(path: string, options: RequestInit = {}, retried = false): Promise<T> {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
 
@@ -29,6 +55,15 @@ export async function api<T>(path: string, options: RequestInit = {}, retried = 
   // request tried once more, rather than the caller being signed out.
   if (res.status === 401 && !retried && !path.startsWith('/api/auth/login') && (await restoreAppSession())) {
     return api<T>(path, options, true);
+  }
+
+  keepRenewedToken(res);
+
+  // A refused login on anything but the sign-in itself: the session has ended.
+  if (res.status === 401 && !path.startsWith('/api/auth/login')) {
+    // The check of who is signed in (auth-context) handles its own refusal.
+    if (!path.startsWith('/api/auth/me')) signedOut(!!token);
+    throw Object.assign(new Error('Your session has ended. Please sign in again.'), { status: 401 });
   }
 
   if (!res.ok) {
@@ -68,6 +103,11 @@ export const apiClient = {
       ...init,
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
+    keepRenewedToken(res);
+    if (res.status === 401) {
+      signedOut(!!token);
+      throw new Error('Your session has ended. Please sign in again.');
+    }
     if (!res.ok) {
       const error = await res.json().catch(() => ({ error: 'Request failed' }));
       throw new Error(error.error || 'Request failed');

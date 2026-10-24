@@ -75,7 +75,7 @@ async function main() {
        VALUES ($1,$2,'call',$3,$4,$5,$6,$7,$8,$9)`,
       [lead_, user, o.dir ?? 'outbound', o.dispo ?? (o.connected ? 'interested' : 'no_answer'), o.connected, o.dur ?? null, o.source ?? 'manual', o.note ?? null, when]
     );
-  // Asha, 15 Sep: 5 outbound calls, 3 answered, a 52-minute gap, one Seva wall call, one inbound (not counted)
+  // Asha, 15 Sep: 5 outbound calls and 1 answered inbound, a 52-minute gap, one Seva wall call
   await act(ID.asha, L1, at('10:00'), { connected: true, dur: 120, source: 'phone' });
   await act(ID.asha, L1, at('10:05'), { connected: false });
   await act(ID.asha, L1, at('10:08'), { connected: true, dur: 60, source: 'manual' });
@@ -103,19 +103,19 @@ async function main() {
   const asha = r.callers.find((c: any) => c.id === ID.asha);
   const bala = r.callers.find((c: any) => c.id === ID.bala);
   check('callers listed are the callers (not the admin)', r.callers.map((c: any) => c.name), ['Asha', 'Bala']);
-  check('calls made: outbound only (the inbound call is not counted)', asha.calls, 5);
-  check('answered, unanswered and the percentage', [asha.connected, asha.unanswered, asha.answered_pct], [3, 2, 60]);
+  check('every talk counts: 5 she made + 1 a donor made to her', [asha.calls, asha.inbound_calls], [6, 1]);
+  check('answered, unanswered and the percentage', [asha.connected, asha.unanswered, asha.answered_pct], [4, 2, 67]);
   check('talk time from the phone app is kept apart from time a caller typed', [asha.talk_real_seconds, asha.talk_logged_seconds], [120, 60]);
-  check('first and last call', [new Date(asha.first_call_at).toISOString(), new Date(asha.last_call_at).toISOString()], ['2026-09-15T04:30:00.000Z', '2026-09-15T05:32:00.000Z']);
-  check('active time counts each gap up to 10 minutes: 5 + 3 + 10 + 2', asha.active_minutes, 20);
-  check('one break over 30 minutes, the longest 52', [asha.idle_gaps, asha.longest_gap_minutes], [1, 52]);
+  check('first and last call', [new Date(asha.first_call_at).toISOString(), new Date(asha.last_call_at).toISOString()], ['2026-09-15T04:30:00.000Z', '2026-09-15T06:30:00.000Z']);
+  check('active time counts each gap up to 10 minutes: 5 + 3 + 10 + 2 + 10 (the inbound one)', asha.active_minutes, 30);
+  check('one break over 30 minutes, the longest 58 (the inbound call came after the 52)', [asha.idle_gaps, asha.longest_gap_minutes], [2, 58]);
   check('donors actually reached', asha.donors_reached, 2);
   check('Seva wall calls are counted among them', asha.seva_wall_calls, 1);
   check('money credited that day', [asha.raised, asha.credits], [500, 1]);
-  check('the last 7 days, oldest first, ending on the day chosen', asha.trend_7d, [0, 0, 0, 0, 0, 2, 5]);
+  check('the last 7 days, oldest first, ending on the day chosen', asha.trend_7d, [0, 0, 0, 0, 0, 2, 6]);
   check('a caller with no calls is shown with zeros, not left out', [bala.calls, bala.answered_pct, bala.first_call_at], [0, null, null]);
   check('status is only given for today, not for a past day', asha.status, null);
-  check('the totals add up', [r.totals.calls, r.totals.connected, r.totals.raised], [5, 3, 500]);
+  check('the totals add up', [r.totals.calls, r.totals.connected, r.totals.raised], [6, 4, 500]);
   check('a made-up date falls back to today instead of failing', (await call('admin', 'GET', '/api/crm/team-activity?date=garbage')).today, true);
 
   console.log('\n--- one caller\'s day ---');

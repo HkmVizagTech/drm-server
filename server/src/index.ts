@@ -100,7 +100,9 @@ const SERVE_CLIENT = process.env.SERVE_CLIENT
   ? process.env.SERVE_CLIENT !== 'false'
   : process.env.NODE_ENV === 'production';
 
-app.use(cors());
+// X-New-Token carries a renewed login (see authenticate); a page on another origin
+// cannot read it unless it is exposed.
+app.use(cors({ exposedHeaders: ['X-New-Token'] }));
 // 25mb, not the 100kb default. The office uploads its donor workbooks through
 // this API - the real one is 8,569 rows across two sheets - and the default
 // limit would reject them with a bare 413 that reads like the server is broken.

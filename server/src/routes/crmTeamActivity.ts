@@ -52,7 +52,9 @@ function shift(day: string, days: number): string {
 }
 
 const IN_DAY = `a.occurred_at >= $1::date AND a.occurred_at < $1::date + 1`;
-const OUTBOUND_CALL = `a.kind = 'call' AND COALESCE(a.direction, 'outbound') = 'outbound' AND a.user_id IS NOT NULL`;
+// Every talk counts: calls the caller made and calls a donor made to them that
+// were picked up. A missed call is nobody's work, so it is left out.
+const OUTBOUND_CALL = `a.kind = 'call' AND COALESCE(a.direction, 'outbound') IN ('outbound', 'inbound') AND a.user_id IS NOT NULL`;
 
 export interface Scorecard {
   id: string;
@@ -71,6 +73,7 @@ export interface Scorecard {
   idle_gaps: number;
   longest_gap_minutes: number;
   seva_wall_calls: number;
+  inbound_calls: number;
   donors_reached: number;
   overdue_followups: number;
   due_today_followups: number;
@@ -97,7 +100,7 @@ async function scorecards(day: string): Promise<{ rows: Scorecard[] }> {
     ),
     pool.query(
       `WITH c AS (
-         SELECT a.user_id, a.occurred_at, a.connected, a.duration_seconds, a.source, a.disposition, a.lead_id,
+         SELECT a.user_id, a.occurred_at, a.connected, a.duration_seconds, a.source, a.disposition, a.lead_id, a.direction,
                 a.occurred_at - lag(a.occurred_at) OVER (PARTITION BY a.user_id ORDER BY a.occurred_at) AS gap
            FROM lead_activities a
           WHERE ${OUTBOUND_CALL} AND ${IN_DAY}
@@ -105,6 +108,7 @@ async function scorecards(day: string): Promise<{ rows: Scorecard[] }> {
        SELECT user_id,
               COUNT(*)::int                                                              AS calls,
               COUNT(*) FILTER (WHERE connected IS TRUE)::int                             AS connected,
+              COUNT(*) FILTER (WHERE direction = 'inbound')::int                         AS inbound_calls,
               COALESCE(SUM(duration_seconds) FILTER (WHERE source <> 'manual'), 0)::int  AS talk_real_seconds,
               COALESCE(SUM(duration_seconds) FILTER (WHERE source = 'manual'), 0)::int   AS talk_logged_seconds,
               MIN(occurred_at)                                                           AS first_call_at,
@@ -195,6 +199,7 @@ async function scorecards(day: string): Promise<{ rows: Scorecard[] }> {
       idle_gaps: s.idle_gaps ?? 0,
       longest_gap_minutes: Math.round((s.longest_gap_seconds ?? 0) / 60),
       seva_wall_calls: s.seva_wall_calls ?? 0,
+      inbound_calls: s.inbound_calls ?? 0,
       donors_reached: s.donors_reached ?? 0,
       overdue_followups: f.overdue ?? 0,
       due_today_followups: f.due_today ?? 0,
@@ -261,6 +266,7 @@ async function exportDay(req: import('express').Request, res: import('express').
         { header: 'Active time (min)', value: (r) => r.active_minutes, kind: 'number' },
         { header: 'Breaks over 30 min', value: (r) => r.idle_gaps, kind: 'number' },
         { header: 'Longest gap (min)', value: (r) => r.longest_gap_minutes, kind: 'number' },
+        { header: 'Calls from donors', value: (r) => r.inbound_calls, kind: 'number' },
         { header: 'Donors reached', value: (r) => r.donors_reached, kind: 'number' },
         { header: 'Seva wall calls', value: (r) => r.seva_wall_calls, kind: 'number' },
         { header: 'Follow-ups overdue (now)', value: (r) => r.overdue_followups, kind: 'number' },

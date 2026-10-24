@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AuthPayload, UserRole } from '../types';
+import pool from '../db/pool';
 
 declare global {
   namespace Express {
@@ -42,20 +43,49 @@ export function generateToken(payload: AuthPayload): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });
 }
 
-export function authenticate(req: Request, res: Response, next: NextFunction) {
+const TOKEN_LIFE_SECONDS = 24 * 60 * 60;
+/** A token with less than this left is swapped for a fresh one on the next request. */
+const RENEW_BELOW_SECONDS = TOKEN_LIFE_SECONDS / 2;
+
+/**
+ * Keep somebody who is using DRM signed in.
+ *
+ * A token lasts a day, and a day is a hard stop in the middle of a calling
+ * shift. So when a request arrives with a token that is past half its life, a
+ * fresh one goes back in the X-New-Token header and the page stores it. Active
+ * people never see the end; somebody who leaves for a day still has to sign in.
+ *
+ * The role is read again from the database when the token is renewed, so a
+ * changed role takes effect and a switched-off account is not renewed.
+ */
+async function renewIfOld(decoded: AuthPayload & { exp?: number }, res: Response) {
+  const left = (decoded.exp ?? 0) - Math.floor(Date.now() / 1000);
+  if (left <= 0 || left > RENEW_BELOW_SECONDS) return;
+  try {
+    const r = await pool.query(`SELECT role FROM users WHERE id = $1 AND COALESCE(active, true)`, [decoded.userId]);
+    if (!r.rows.length) return;
+    res.setHeader('X-New-Token', generateToken({ userId: decoded.userId, role: r.rows[0].role }));
+  } catch {
+    // Not renewing is harmless: the current token still works until it ends.
+  }
+}
+
+export async function authenticate(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'No token provided' });
   }
 
   const token = authHeader.split(' ')[1];
+  let decoded: AuthPayload & { exp?: number };
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as AuthPayload;
-    req.user = decoded;
-    next();
+    decoded = jwt.verify(token, JWT_SECRET) as AuthPayload & { exp?: number };
   } catch {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+  req.user = decoded;
+  await renewIfOld(decoded, res);
+  next();
 }
 
 /**
