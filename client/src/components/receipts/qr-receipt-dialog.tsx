@@ -613,9 +613,8 @@ export function ReceiptDialog({
               {detail.credit_user_name && (
                 <span className="text-ink-muted">· Counted for {detail.credit_user_name}</span>
               )}
-              {/* Whoever linked it, or an admin - the server says the same. A link
-                  nobody made by hand (matched from a sent QR) can be changed by any caller who can see it. */}
-              {!receiptOut && (user?.role !== "caller" || !detail.linked_by || detail.linked_by === currentUserId) && (
+              {/* Whoever linked it, or an admin - the server says the same. */}
+              {!receiptOut && (user?.role !== "caller" || detail.linked_by === currentUserId) && (
                 <Button variant="ghost" size="xs" className="ml-auto" disabled={busy} onClick={() => void unlink()}>
                   Wrong person? Change
                 </Button>

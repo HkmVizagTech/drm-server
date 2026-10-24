@@ -2609,7 +2609,7 @@ router.post('/qr/payments/:id/unlink', authenticate, async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'The receipt is already sent, so this link stays.' });
     }
-    if (!elevated && pay.linked_by && pay.linked_by !== me) {
+    if (!elevated && pay.linked_by !== me) {
       await client.query('ROLLBACK');
       return res.status(403).json({ error: 'Only the person who linked it, or an admin, can unlink it.' });
     }
