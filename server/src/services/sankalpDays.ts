@@ -156,3 +156,65 @@ export async function refreshSankalpFromPerson(
   }
   return added;
 }
+
+
+/** The smallest single donation that puts a donor on the Sankalpam list. 0 switches it off. */
+export async function sankalpamMinGift(db: Db): Promise<number> {
+  const r = await db.query(`SELECT value FROM crm_settings WHERE key = 'sankalpam_min_gift'`);
+  const n = Number(r.rows[0]?.value ?? 5000);
+  return Number.isFinite(n) && n >= 0 ? n : 5000;
+}
+
+/**
+ * A donor who has just given one donation of the set amount or more goes on the
+ * Sankalpam list - once. They arrive with every special day DRM already knows
+ * (see refreshSankalpFromPerson, run right after); with none they sit on "Need
+ * details" until somebody rings to ask.
+ *
+ * LEFT ALONE:
+ *   - somebody already on the list, switched off or not: a patron the office
+ *     removed is not brought back by their next gift;
+ *   - a donor hidden from DRM (a test donor);
+ *   - a gift under the set amount.
+ * Returns true when a patron was added.
+ */
+export async function addPatronForBigGift(db: Db, personId: string, amount: number): Promise<boolean> {
+  const min = await sankalpamMinGift(db);
+  if (!min || !(amount >= min)) return false;
+
+  const p = (
+    await db.query(
+      `SELECT name, hidden_at, right(regexp_replace(phone, '\\D', '', 'g'), 10) AS phone,
+              COALESCE(prasadam_address, address) AS address
+         FROM people WHERE id = $1`,
+      [personId]
+    )
+  ).rows[0];
+  if (!p || p.hidden_at) return false;
+
+  const there = await db.query(
+    `SELECT id FROM sankalpam_donors WHERE person_id = $1 OR ($2::text <> '' AND (phone = $2 OR alt_phone = $2)) LIMIT 1`,
+    [personId, p.phone ?? '']
+  );
+  if (there.rows.length) return false;
+
+  const name = tidy(String(p.name ?? '').trim() || 'Donor');
+  const id = (
+    await db.query(
+      `INSERT INTO sankalpam_donors (donor_name, phone, address, person_id, source)
+       VALUES ($1, $2, $3, $4, 'donors') RETURNING id`,
+      [name, /^[6-9]\d{9}$/.test(p.phone ?? '') ? p.phone : null, p.address ?? null, personId]
+    )
+  ).rows[0].id;
+  await notify(
+    {
+      kind: 'sankalpam',
+      title: `New Sankalpam donor · ${name}`,
+      body: `Gave ₹${Math.round(amount).toLocaleString('en-IN')} - check their special days`,
+      link: `/sankalpam?tab=donors&edit=${id}`,
+      refKey: `sk-new:${id}`,
+    },
+    db
+  );
+  return true;
+}

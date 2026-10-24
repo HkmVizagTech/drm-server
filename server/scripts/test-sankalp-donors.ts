@@ -88,6 +88,10 @@ async function main() {
   await pool.query(`TRUNCATE people, users RESTART IDENTITY CASCADE`);
   await pool.query(`INSERT INTO users (id, name, email, password_hash, role) VALUES ($1,'Admin','a@t','x','admin'), ($2,'Ana','ana@t','x','caller')`, [ADMIN, ANA]);
 
+  // These cases are about adding donors by hand from the "Add donors" screen; the
+  // automatic add for a big gift has its own test (test-sankalpam-auto.ts).
+  await pool.query(`INSERT INTO crm_settings (key, value) VALUES ('sankalpam_min_gift', '0'::jsonb) ON CONFLICT (key) DO UPDATE SET value = '0'::jsonb`);
+
   console.log('\n1. what the site form carries reaches DRM');
   // As annadan sends it: a birthday booked on the form, for the donor's own birthday.
   await upsertDonorSnapshot(

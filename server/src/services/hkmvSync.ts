@@ -19,7 +19,7 @@
 import type { PoolClient } from 'pg';
 import pool from '../db/pool';
 import { hkmvMappers, HkmvDonation, HkmvSubscription, HkmvTransaction, SiteKey, siteDay } from './hkmvClient';
-import { refreshSankalpFromPerson } from './sankalpDays';
+import { addPatronForBigGift, refreshSankalpFromPerson } from './sankalpDays';
 import { decideName } from './profileSync';
 import { registerName } from './personNames';
 import { alignQrDonationDate } from './qrDonationDate';
@@ -306,7 +306,7 @@ async function upsertDonation(
   site: SiteKey,
   /* The name this snapshot arrived under - see donor_name in the INSERT. */
   donorName: string | null
-): Promise<{ donationId: string; deliveryUpserted: boolean }> {
+): Promise<{ donationId: string; deliveryUpserted: boolean; inserted: boolean; amount: number }> {
   const donationResult = await client.query(
     `INSERT INTO donations (
        person_id, amount, type, purpose, payment_mode, source, receipt_generated,
@@ -360,7 +360,7 @@ async function upsertDonation(
      -- in hand. They differ in the cases that matter: utm_campaign is
      -- truncated on the way in, and created_at is NOT in the DO UPDATE list,
      -- so on a re-sync it is still the moment the donation first arrived.
-     RETURNING id, amount, created_at, utm_campaign, utm_source, utm_medium`,
+     RETURNING id, amount, created_at, utm_campaign, utm_source, utm_medium, (xmax = 0) AS inserted`,
     [
       personId,
       d.amount,
@@ -486,7 +486,7 @@ async function upsertDonation(
     }
   }
 
-  return { donationId, deliveryUpserted };
+  return { donationId, deliveryUpserted, inserted: donationResult.rows[0].inserted === true, amount: Number(donationResult.rows[0].amount) };
 }
 
 async function upsertSubscription(
@@ -540,12 +540,15 @@ export async function upsertDonorSnapshot(
 
     let donationsSynced = 0;
     let deliveriesSynced = 0;
+    // The largest gift that is NEW in this sync (not one already in DRM, updated again).
+    let biggestNewGift = 0;
 
     for (const d of snapshot.donations || []) {
       // DRM's ledger tracks confirmed donations only - pending/failed/cancelled
       // attempts on the live site aren't real contributions here.
       if (d.status !== 'completed') continue;
-      const { deliveryUpserted } = await upsertDonation(client, personId, d, fallbackAddress, site, snapshot.donor.name ?? null);
+      const { deliveryUpserted, inserted, amount } = await upsertDonation(client, personId, d, fallbackAddress, site, snapshot.donor.name ?? null);
+      if (inserted && amount > biggestNewGift) biggestNewGift = amount;
       donationsSynced++;
       if (deliveryUpserted) deliveriesSynced++;
     }
@@ -562,6 +565,9 @@ export async function upsertDonorSnapshot(
     // Sankalpam row must never cost it.
     try {
       await client.query('SAVEPOINT sankalp');
+      // A donor whose NEW gift is the set amount or more goes on the list first, so
+      // the refresh below brings in the days the form gave.
+      if (biggestNewGift > 0) await addPatronForBigGift(client, personId, biggestNewGift);
       await refreshSankalpFromPerson(client, personId);
       await client.query('RELEASE SAVEPOINT sankalp');
     } catch (e) {

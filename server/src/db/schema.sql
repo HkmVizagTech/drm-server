@@ -2945,6 +2945,12 @@ INSERT INTO crm_dispositions (slug, label, counts_connected, suggests_status, wa
   ('recorded_call', 'Call added from a recording', TRUE, NULL, FALSE, 140, FALSE)
 ON CONFLICT (slug) DO NOTHING;
 
+-- A donor who gives this much in ONE donation is put on the Sankalpam list by the
+-- sync, with whatever special days the form gave. Changeable here (Setup would
+-- show it); 0 turns it off.
+INSERT INTO crm_settings (key, value) VALUES ('sankalpam_min_gift', '5000'::jsonb)
+ON CONFLICT (key) DO NOTHING;
+
 /* =========================================================================
    HIDING A DONOR WITHOUT DELETING THEM
    =========================================================================
