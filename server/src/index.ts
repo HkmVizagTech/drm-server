@@ -38,6 +38,7 @@ import prasadamRoutes from './routes/prasadam';
 import webhooksRoutes, { siteAuth } from './routes/webhooks';
 import crmRoutes from './routes/crm';
 import crmReportsRoutes from './routes/crmReports';
+import crmTeamActivityRoutes from './routes/crmTeamActivity';
 import crmRemindersRoutes from './routes/crmReminders';
 import crmLinksRoutes from './routes/crmLinks';
 import crmPreachersRoutes from './routes/crmPreachers';
@@ -256,6 +257,8 @@ app.use('/api/files', filesRoutes);
 // a catch-all, so any route added after it would never be reached.
 app.use('/api/crm', crmRoutes);
 app.use('/api/crm', crmReportsRoutes);
+// Admin-only: what each caller did today (calls, answered, talk time, idle gaps, targets).
+app.use('/api/crm', crmTeamActivityRoutes);
 app.use('/api/crm', crmRemindersRoutes);
 app.use('/api/crm', crmLinksRoutes);
 app.use('/api/crm', crmPreachersRoutes);

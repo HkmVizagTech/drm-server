@@ -37,6 +37,8 @@ export const navGroups: NavGroup[] = [
       // wants too.
       { href: "/calling/start", label: "Start calling", icon: "phoneOutgoing", roles: CALLING_AND_UP },
       { href: "/dashboard", label: "Dashboard", icon: "home", roles: ["admin", "accountant", "volunteer_coordinator"] },
+      // What each caller did today: calls, answered, talk time, breaks, targets. Admin only.
+      { href: "/team-activity", label: "Team activity", icon: "chart", roles: ["admin"] },
     ],
   },
   {
