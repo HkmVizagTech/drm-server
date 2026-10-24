@@ -65,8 +65,12 @@ export function PhoneCallItem({
         </div>
 
         {c.added_by_hand && (
-          <div className="mt-1.5">
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             <Badge tone="info">Added from a recording</Badge>
+            {/* What the caller wrote when adding it, for the caller and the admin alike. */}
+            {c.outcome_note?.replace(/^Added from a recording:?\s*/, "") && (
+              <span className="min-w-0 text-xs text-ink-soft">{c.outcome_note.replace(/^Added from a recording:?\s*/, "")}</span>
+            )}
           </div>
         )}
 

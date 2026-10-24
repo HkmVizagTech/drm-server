@@ -150,7 +150,7 @@ const derivedSql = (cut = true) => `
          COALESCE(i.status, 'to_print')::text        AS status,
          i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token,
          COALESCE(i.call_attempts, 0) AS call_attempts, i.last_call_outcome, i.last_call_note, i.last_call_at, i.follow_up_on,
-         i.whatsapp_sent_at
+         i.whatsapp_sent_at, i.awaiting_reply_at
     FROM live_donations d
     JOIN live_people p ON p.id = d.person_id
     LEFT JOIN seva_wall_items i ON i.donation_id = d.id
@@ -165,7 +165,7 @@ const MANUAL = `
          i.kind::text, COALESCE(i.donated_on::timestamptz, i.created_at),
          i.priority::text, i.status::text, i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token,
          i.call_attempts, i.last_call_outcome, i.last_call_note, i.last_call_at, i.follow_up_on,
-         i.whatsapp_sent_at
+         i.whatsapp_sent_at, i.awaiting_reply_at
     FROM seva_wall_items i
    WHERE i.donation_id IS NULL`;
 
@@ -180,12 +180,33 @@ const PICTURE = `
      ORDER BY sp.uploaded_at DESC LIMIT 1
   ) pic ON TRUE`;
 
+// How many messages are on a brick (the reason it was sent back, and what was
+// said after) and who spoke last, so a table can say "new reply". Also the
+// picture that was sent back, which the printer needs to see while it is redone.
+const THREAD = `
+  LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS n,
+           (SELECT u2.role FROM seva_wall_events e2 LEFT JOIN users u2 ON u2.id = e2.by_user
+             WHERE e2.item_id = w.item_id AND e2.action IN ('sent_back', 'message')
+             ORDER BY e2.at DESC, e2.id DESC LIMIT 1) AS last_by_role
+      FROM seva_wall_events e
+     WHERE e.item_id = w.item_id AND e.action IN ('sent_back', 'message')
+  ) msg ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT sp.id
+      FROM seva_wall_pictures sp
+     WHERE sp.item_id = w.item_id AND sp.state = 'sent_back'
+     ORDER BY sp.uploaded_at DESC LIMIT 1
+  ) prev ON TRUE`;
+
 const PRIORITY_RANK = `CASE w.priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END`;
 
 /** What a brick printer is allowed to know about a row. No contact, money or receipt. */
 function forPrinter(row: Record<string, unknown>) {
-  const { ref, donor_name, honoree_name, kind, donated_at, priority, status, review_note, reviewed_at, has_image, uploaded_at } = row;
-  return { ref, donor_name, honoree_name, kind, donated_at, priority, status, review_note, reviewed_at, has_image, uploaded_at };
+  const { ref, donor_name, honoree_name, kind, donated_at, priority, status, review_note, reviewed_at, has_image, uploaded_at,
+    has_previous_image, message_count, last_message_role, awaiting_reply } = row;
+  return { ref, donor_name, honoree_name, kind, donated_at, priority, status, review_note, reviewed_at, has_image, uploaded_at,
+    has_previous_image, message_count, last_message_role, awaiting_reply };
 }
 
 router.get('/', allow(...LOOK), async (req, res) => {
@@ -220,7 +241,14 @@ router.get('/', allow(...LOOK), async (req, res) => {
   const statuses = roleStatuses && viewStatuses ? viewStatuses.filter((s) => roleStatuses.includes(s)) : viewStatuses ?? roleStatuses;
   if (statuses) {
     values.push(statuses);
-    where.push(`w.status = ANY($${values.length}::text[])`);
+    // On the callers' table, a brick the printer has a question about is there too,
+    // whatever its status: somebody has to answer before the printer can go on.
+    const withQuestions = view === 'contact' && !stage && role !== 'brick_printer';
+    where.push(
+      withQuestions
+        ? `(w.status = ANY($${values.length}::text[]) OR w.awaiting_reply_at IS NOT NULL)`
+        : `w.status = ANY($${values.length}::text[])`
+    );
   }
   if (stage === 'due') where.push(`w.status = 'in_review' AND w.follow_up_on <= CURRENT_DATE`);
   if (stage === 'to_call' || uploadedTab) where.push(`w.status = 'in_review' AND w.called_at IS NULL`);
@@ -264,7 +292,8 @@ router.get('/', allow(...LOOK), async (req, res) => {
       : view === 'print'
       ? `(w.status = 'needs_reprint') DESC, ${PRIORITY_RANK}, w.donated_at ASC, w.ref`
       : view === 'contact'
-      ? `CASE
+      ? `(w.awaiting_reply_at IS NOT NULL) DESC,
+         CASE
            WHEN w.status = 'sent' THEN 4
            WHEN w.called_at IS NULL AND w.whatsapp_sent_at IS NULL THEN 1
            WHEN w.called_at IS NULL THEN 2
@@ -278,8 +307,9 @@ router.get('/', allow(...LOOK), async (req, res) => {
     const [rows, count, tally] = await Promise.all([
       pool.query(
         `SELECT w.*, pic.id AS picture_id, pic.r2_key, pic.uploaded_at AS picture_at,
+                prev.id AS previous_picture_id, COALESCE(msg.n, 0) AS message_count, msg.last_by_role AS last_message_role,
                 su.name AS sent_by_name, cu.name AS called_by_name
-           FROM ${wallSql()} ${PICTURE}
+           FROM ${wallSql()} ${PICTURE} ${THREAD}
            LEFT JOIN users su ON su.id = w.sent_by
            LEFT JOIN users cu ON cu.id = w.called_by
            ${clause}
@@ -292,14 +322,16 @@ router.get('/', allow(...LOOK), async (req, res) => {
       // is in each stage, not how big the current list is.
       pool.query(
         `SELECT w.status, (w.called_at IS NOT NULL) AS called, COUNT(*)::int AS n,
+                COUNT(*) FILTER (WHERE w.awaiting_reply_at IS NOT NULL)::int AS asked,
                 COUNT(*) FILTER (WHERE w.follow_up_on <= CURRENT_DATE)::int AS due
            FROM ${wallSql()} GROUP BY 1, 2`
       ),
     ]);
 
     const baseUrl = publicBase(req);
-    const counts: Record<string, number> = { to_print: 0, needs_reprint: 0, to_call: 0, called: 0, sent: 0, due: 0 };
+    const counts: Record<string, number> = { to_print: 0, needs_reprint: 0, to_call: 0, called: 0, sent: 0, due: 0, questions: 0 };
     for (const r of tally.rows) {
+      counts.questions += r.asked;
       if (r.status === 'in_review') {
         counts[r.called ? 'called' : 'to_call'] += r.n;
         counts.due += r.due;
@@ -307,11 +339,13 @@ router.get('/', allow(...LOOK), async (req, res) => {
     }
 
     const shaped = rows.rows.map((r) => {
-      const { r2_key, picture_id, picture_at, item_id: _item, share_token, ...row } = r;
+      const { r2_key, picture_id, picture_at, previous_picture_id, item_id: _item, share_token, ...row } = r;
       void _item;
       const full = {
         ...row,
         has_image: !!picture_id,
+        has_previous_image: !!previous_picture_id,
+        awaiting_reply: !!row.awaiting_reply_at,
         uploaded_at: picture_at ?? null,
         // The link the donor opens from the WhatsApp message. WhatsApp builds a
         // preview card (the brick picture and a title) from this page, which is
@@ -342,7 +376,7 @@ router.get('/', allow(...LOOK), async (req, res) => {
         role === 'brick_printer'
           ? { to_print: counts.to_print, needs_reprint: counts.needs_reprint, uploaded: counts.to_call }
           : role === 'caller'
-          ? { to_call: counts.to_call, called: counts.called, sent: counts.sent, due: counts.due }
+          ? { to_call: counts.to_call, called: counts.called, sent: counts.sent, due: counts.due, questions: counts.questions }
           : counts,
     });
   } catch (err) {
@@ -613,6 +647,7 @@ interface Item {
   status: string;
   priority: string;
   called_at: Date | null;
+  awaiting_reply_at: Date | null;
 }
 
 /**
@@ -622,7 +657,7 @@ interface Item {
 async function itemFor(ref: string): Promise<Item | null> {
   if (!UUID_RE.test(ref)) return null;
   const existing = await pool.query(
-    'SELECT id, donation_id, status, priority, called_at FROM seva_wall_items WHERE id = $1 OR donation_id = $1',
+    'SELECT id, donation_id, status, priority, called_at, awaiting_reply_at FROM seva_wall_items WHERE id = $1 OR donation_id = $1',
     [ref]
   );
   if (existing.rows[0]) return existing.rows[0] as Item;
@@ -631,7 +666,7 @@ async function itemFor(ref: string): Promise<Item | null> {
   const made = await pool.query(
     `INSERT INTO seva_wall_items (donation_id) VALUES ($1)
      ON CONFLICT (donation_id) DO UPDATE SET donation_id = EXCLUDED.donation_id
-     RETURNING id, donation_id, status, priority, called_at`,
+     RETURNING id, donation_id, status, priority, called_at, awaiting_reply_at`,
     [ref]
   );
   return made.rows[0] as Item;
@@ -789,7 +824,7 @@ router.post('/:ref/image', allow(...UPLOAD), async (req, res) => {
       );
       await client.query(
         `UPDATE seva_wall_items
-            SET status = 'in_review', review_note = NULL,
+            SET status = 'in_review', review_note = NULL, awaiting_reply_at = NULL,
                 share_token = COALESCE(share_token, $2), updated_at = NOW()
           WHERE id = $1`,
         [item.id, randomBytes(16).toString('hex')]
@@ -815,17 +850,19 @@ router.post('/:ref/image', allow(...UPLOAD), async (req, res) => {
   }
 });
 
-// A printer may look at a picture only while they can still replace it (uploaded,
-// nobody has called yet); everyone else with access may always look.
+// A printer may look at the pictures of the bricks on their lists - the one they
+// uploaded, and the one that was sent back while they redo it. `?which=previous`
+// is the picture that was sent back; without it, the current one.
 router.get('/:ref/image', allow(...LOOK), async (req, res) => {
   try {
     if (!UUID_RE.test(String(req.params.ref))) return res.status(404).json({ error: 'No picture for this record.' });
-    const printerOnly = req.user!.role === 'brick_printer' ? `AND i.status = 'in_review' AND i.called_at IS NULL` : '';
+    const printerOnly = req.user!.role === 'brick_printer' ? `AND i.status IN ('in_review', 'needs_reprint')` : '';
+    const previous = req.query.which === 'previous' ? `AND sp.state = 'sent_back'` : '';
     const r = await pool.query(
       `SELECT sp.mime, sp.data, sp.r2_key
          FROM seva_wall_pictures sp
          JOIN seva_wall_items i ON i.id = sp.item_id
-        WHERE (i.id = $1 OR i.donation_id = $1) ${printerOnly}
+        WHERE (i.id = $1 OR i.donation_id = $1) ${printerOnly} ${previous}
         ORDER BY sp.uploaded_at DESC
         LIMIT 1`,
       [String(req.params.ref)]
@@ -1032,7 +1069,7 @@ router.post('/:ref/send-back', allow(...REVIEW), async (req, res) => {
       await client.query('BEGIN');
       const moved = await client.query(
         `UPDATE seva_wall_items
-            SET status = 'needs_reprint', review_note = $2, reviewed_by = $3, reviewed_at = NOW(),
+            SET status = 'needs_reprint', review_note = $2, reviewed_by = $3, reviewed_at = NOW(), awaiting_reply_at = NULL,
                 called_at = NULL, called_by = NULL, call_attempts = 0, whatsapp_sent_at = NULL, whatsapp_sent_by = NULL, last_call_outcome = NULL,
                 last_call_note = NULL, last_call_at = NULL, follow_up_on = NULL, follow_up_by = NULL, updated_at = NOW()
           WHERE id = $1 AND status = 'in_review'
@@ -1060,6 +1097,107 @@ router.post('/:ref/send-back', allow(...REVIEW), async (req, res) => {
   } catch (err) {
     console.error('seva-wall send-back error:', (err as Error).message);
     res.status(500).json({ error: 'Could not send it back.' });
+  }
+});
+
+// THE CONVERSATION ON A BRICK. The reason a brick was sent back is its first
+// message; after that the printer can ask what they do not understand ("is the
+// name this or that?") and a caller or an admin can answer, so the picture comes
+// right without a phone call. It is kept in the events table, shown on the brick
+// to everyone who can see the brick, and never holds a phone number or an amount.
+const TALK: UserRole[] = ['admin', 'caller', 'brick_printer'];
+
+/**
+ * Whether this role may see this brick at all - the statuses its tables show. A
+ * caller also sees a brick the printer has asked about, because the answer is theirs.
+ */
+const SEES: Record<string, string[] | null> = {
+  brick_printer: ['to_print', 'needs_reprint', 'in_review'],
+  caller: ['in_review', 'sent'],
+};
+const canSee = (role: string, item: { status: string; awaiting_reply_at: Date | string | null }) => {
+  const allowed = SEES[role];
+  return !allowed || allowed.includes(item.status) || (role === 'caller' && !!item.awaiting_reply_at);
+};
+
+/** A bell notification for the callers and the admin: the printer is waiting for an answer. */
+async function raiseQuestion(itemId: string, question: string) {
+  try {
+    const w = await pool.query(`SELECT w.donor_name, w.phone FROM ${wallSql(false)} WHERE w.item_id = $1`, [itemId]);
+    const row = w.rows[0];
+    const phone = String(row?.phone ?? '').replace(/\D/g, '').slice(-10);
+    await notify({
+      kind: 'seva_wall',
+      title: `Printer question about ${row?.donor_name ?? 'a brick'}`,
+      body: question.slice(0, 200),
+      link: row?.donor_name ? `/seva-wall?search=${encodeURIComponent(row.donor_name)}` : '/seva-wall',
+      phone: phone.length === 10 ? phone : null,
+      refKey: `swq:${itemId}:${Date.now()}`,
+    });
+  } catch (e) {
+    console.error('seva-wall question notification failed (non-fatal):', (e as Error).message);
+  }
+}
+
+async function threadOf(itemId: string) {
+  const r = await pool.query(
+    `SELECT e.id, e.action, e.note, e.at, u.name AS by_name, u.role AS by_role
+       FROM seva_wall_events e LEFT JOIN users u ON u.id = e.by_user
+      WHERE e.item_id = $1 AND e.action IN ('sent_back', 'message')
+      ORDER BY e.at, e.id`,
+    [itemId]
+  );
+  return r.rows.map((m) => ({
+    id: String(m.id),
+    kind: m.action === 'sent_back' ? 'sent_back' : 'message',
+    note: m.note as string | null,
+    at: m.at as string,
+    by_name: (m.by_name as string | null) ?? 'Someone',
+    by_role: (m.by_role as string | null) ?? null,
+  }));
+}
+
+router.get('/:ref/messages', allow(...LOOK), async (req, res) => {
+  try {
+    if (!UUID_RE.test(String(req.params.ref))) return res.json({ messages: [] });
+    const r = await pool.query('SELECT id, status, awaiting_reply_at FROM seva_wall_items WHERE id = $1 OR donation_id = $1', [String(req.params.ref)]);
+    const item = r.rows[0];
+    if (!item) return res.json({ messages: [] });
+    if (!canSee(req.user!.role, item)) return notFound(res);
+    res.json({ messages: await threadOf(item.id) });
+  } catch (err) {
+    console.error('seva-wall messages error:', (err as Error).message);
+    res.status(500).json({ error: 'Could not load the messages.' });
+  }
+});
+
+router.post('/:ref/messages', allow(...TALK), async (req, res) => {
+  const note = String(req.body?.note ?? '').trim().slice(0, 500);
+  if (!note) return res.status(400).json({ error: 'Write your message first.' });
+  try {
+    const item = await itemFor(String(req.params.ref));
+    if (!item) return notFound(res);
+    if (!canSee(req.user!.role, item)) return notFound(res);
+    await logEvent(pool, item.id, 'message', req.user?.userId, note);
+
+    // The printer asks. An admin working the print list (who can upload a picture
+    // like the printer) asks too, by writing from there: `ask`.
+    const asking = req.user!.role === 'brick_printer' || (req.user!.role === 'admin' && req.body?.ask === true);
+    if (asking) {
+      // A question about a brick that is waiting for the printer goes to the callers'
+      // table until it is answered. A note on a picture already in review is only a note.
+      if (item.status === 'to_print' || item.status === 'needs_reprint') {
+        await pool.query('UPDATE seva_wall_items SET awaiting_reply_at = NOW(), updated_at = NOW() WHERE id = $1', [item.id]);
+        await raiseQuestion(item.id, note);
+      }
+    } else if (item.awaiting_reply_at) {
+      // Answered: it goes back to the printer's list with the answer on it.
+      await pool.query('UPDATE seva_wall_items SET awaiting_reply_at = NULL, updated_at = NOW() WHERE id = $1', [item.id]);
+    }
+    res.status(201).json({ messages: await threadOf(item.id) });
+  } catch (err) {
+    console.error('seva-wall message error:', (err as Error).message);
+    res.status(500).json({ error: 'Could not send the message.' });
   }
 });
 

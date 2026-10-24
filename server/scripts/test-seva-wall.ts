@@ -237,7 +237,7 @@ async function main() {
   check('the printer is never given the link', (await call('printer', 'GET', '/api/seva-wall?stage=uploaded')).rows.some((x: any) => 'share_url' in x), false);
   check('once a caller has called, the printer can no longer replace the picture',
     (await call('printer', 'POST', `/api/seva-wall/${oldBrick}/image`, { mime: 'image/png', base64: Buffer.from('too late').toString('base64') })).http, 409);
-  check('...or look at it', (await call('printer', 'GET', `/api/seva-wall/${oldBrick}/image`)).http, 404);
+  check('...but can still look at the picture they uploaded', (await call('printer', 'GET', `/api/seva-wall/${oldBrick}/image`)).http, 200);
   const img = await call('caller', 'GET', `/api/seva-wall/${oldBrick}/image`);
   check('the picture comes back as an image', [img.http, img.type, img.bytes], [200, 'image/png', Buffer.from('a better picture').length]);
   check('sending back needs a reason', (await call('caller', 'POST', `/api/seva-wall/${oldBrick}/send-back`, { note: '  ' })).http, 400);
@@ -248,6 +248,43 @@ async function main() {
   const again = r.rows.find((x: any) => x.ref === oldBrick);
   check('it is back on the printer\'s list with the reason', [!!again, again?.status, again?.review_note], [true, 'needs_reprint', 'Name is cut off']);
   check('and at the TOP of it, ahead of every urgent brick', r.rows[0].ref, oldBrick);
+  check('the printer is told a picture was sent back and can see it', [again?.has_previous_image, (await call('printer', 'GET', `/api/seva-wall/${oldBrick}/image?which=previous`)).http], [true, 200]);
+  check('the sent-back picture is the old one, not a new one', (await call('printer', 'GET', `/api/seva-wall/${oldBrick}/image?which=previous`)).bytes, Buffer.from('a better picture').length);
+  check('a brick that was never sent back has no previous picture', (await call('printer', 'GET', `/api/seva-wall/${hiddenGift}/image?which=previous`)).http, 404);
+
+  console.log('\n--- the conversation on a brick ---');
+  let thread = await call('printer', 'GET', `/api/seva-wall/${oldBrick}/messages`);
+  check('the reason it was sent back is the first message, by the caller', [thread.messages.length, thread.messages[0].kind, thread.messages[0].note, thread.messages[0].by_role], [1, 'sent_back', 'Name is cut off', 'caller']);
+  check('a caller cannot write on a brick that is out for reprint until the printer has asked', (await call('caller', 'POST', `/api/seva-wall/${oldBrick}/messages`, { note: 'hello' })).http, 404);
+  check('an empty message is refused', (await call('printer', 'POST', `/api/seva-wall/${oldBrick}/messages`, { note: '   ' })).http, 400);
+  check('the printer asks what is not clear', (await call('printer', 'POST', `/api/seva-wall/${oldBrick}/messages`, { note: 'What is not clear in the picture?' })).http, 201);
+  r = await call('printer', 'GET', '/api/seva-wall');
+  check('the printer sees it is waiting for an answer', r.rows.find((x: any) => x.ref === oldBrick).awaiting_reply, true);
+  r = await call('caller', 'GET', '/api/seva-wall');
+  const asked = r.rows.find((x: any) => x.ref === oldBrick);
+  check('the brick is on the caller\'s Seva wall table, first, with the question', [r.rows[0]?.ref, asked?.awaiting_reply, asked?.status, asked?.message_count], [oldBrick, true, 'needs_reprint', 2]);
+  check('the caller can see the picture that was sent back', [asked?.has_previous_image, (await call('caller', 'GET', `/api/seva-wall/${oldBrick}/image?which=previous`)).http], [true, 200]);
+  check('and the tally says one question is waiting', r.counts.questions, 1);
+  check('the callers are told in the bell', (await pool.query(`SELECT COUNT(*)::int AS n FROM drm_notifications WHERE ref_key LIKE 'swq:%' AND title LIKE 'Printer question%'`)).rows[0].n, 1);
+  check('the caller reads the whole conversation', (await call('caller', 'GET', `/api/seva-wall/${oldBrick}/messages`)).messages.length, 2);
+  check('and cannot do what the printer is waiting on - call or send it on', (await call('caller', 'POST', `/api/seva-wall/${oldBrick}/mark-sent`)).http, 409);
+  check('an accountant cannot join in', (await call('accountant', 'POST', `/api/seva-wall/${oldBrick}/messages`, { note: 'hi' })).http, 403);
+  check('the caller answers', (await call('caller', 'POST', `/api/seva-wall/${oldBrick}/messages`, { note: 'The name at the bottom is faint' })).http, 201);
+  check('it leaves the caller\'s table once answered', (await call('caller', 'GET', '/api/seva-wall')).rows.some((x: any) => x.ref === oldBrick), false);
+  r = await call('printer', 'GET', '/api/seva-wall');
+  const answered = r.rows.find((x: any) => x.ref === oldBrick);
+  check('the printer sees the answer: no longer waiting, the caller spoke last', [answered.awaiting_reply, answered.last_message_role, answered.message_count], [false, 'caller', 3]);
+  check('the admin can add to it too', (await call('admin', 'POST', `/api/seva-wall/${oldBrick}/messages`, { note: 'Please use a darker print' })).http, 201);
+  thread = await call('printer', 'GET', `/api/seva-wall/${oldBrick}/messages`);
+  check('the printer sees all four, in order', thread.messages.map((m: any) => m.by_role), ['caller', 'brick_printer', 'caller', 'admin']);
+  check('a message never carries a phone number or an amount', JSON.stringify(thread).includes('phone'), false);
+  check('an admin working the print list asks the callers the same way',
+    (await call('admin', 'POST', `/api/seva-wall/${oldBrick}/messages`, { note: 'Is the spelling right?', ask: true })).http, 201);
+  check('so it is on the caller\'s table', (await call('caller', 'GET', '/api/seva-wall')).rows.some((x: any) => x.ref === oldBrick && x.awaiting_reply), true);
+  check('and the caller answers it', (await call('caller', 'POST', `/api/seva-wall/${oldBrick}/messages`, { note: 'Yes, it is right' })).http, 201);
+  check('and it is off the caller\'s table again', (await call('caller', 'GET', '/api/seva-wall')).rows.some((x: any) => x.ref === oldBrick), false);
+  check('a brick nobody has written on has an empty conversation', (await call('printer', 'GET', `/api/seva-wall/${hiddenGift}/messages`)).messages.length, 0);
+
   check('a new round of calling starts: the called mark is cleared',
     (await pool.query(`SELECT called_at FROM seva_wall_items WHERE donation_id = $1`, [oldBrick])).rows[0].called_at, null);
   check('it is not in review any more', (await call('caller', 'GET', '/api/seva-wall')).total, 0);
@@ -255,7 +292,13 @@ async function main() {
   check('a brick that is not in review cannot be marked sent', (await call('caller', 'POST', `/api/seva-wall/${oldBrick}/mark-sent`)).http, 409);
   check('...or sent back again', (await call('caller', 'POST', `/api/seva-wall/${oldBrick}/send-back`, { note: 'x' })).http, 409);
 
+  check('the printer says they will redo it - a question again', (await call('printer', 'POST', `/api/seva-wall/${oldBrick}/messages`, { note: 'I will redo it now' })).http, 201);
+  check('so it is on the caller\'s table again', (await call('caller', 'GET', '/api/seva-wall')).rows.some((x: any) => x.ref === oldBrick), true);
   const reup = await call('printer', 'POST', `/api/seva-wall/${oldBrick}/image`, pic);
+  check('a new picture ends the question', (await pool.query(`SELECT awaiting_reply_at FROM seva_wall_items WHERE donation_id = $1`, [oldBrick])).rows[0].awaiting_reply_at, null);
+  check('a note with the new picture is only a note, not a question',
+    (await call('printer', 'POST', `/api/seva-wall/${oldBrick}/messages`, { note: 'Darker now' })).http === 201 &&
+      (await pool.query(`SELECT awaiting_reply_at FROM seva_wall_items WHERE donation_id = $1`, [oldBrick])).rows[0].awaiting_reply_at === null, true);
   check('the printer uploads a new picture', [reup.http, reup.status], [201, 'in_review']);
   check('the rejected picture was deleted when the new one came in', (await pool.query(`SELECT COUNT(*)::int AS n FROM seva_wall_pictures`)).rows[0].n, 1);
   check('and the one left is the current one', (await pool.query(`SELECT COUNT(*)::int AS n FROM seva_wall_pictures WHERE state = 'current'`)).rows[0].n, 1);
@@ -288,7 +331,7 @@ async function main() {
   check('stage: not called yet', (await call('caller', 'GET', '/api/seva-wall?stage=to_call')).total, 2);
   check('stage: called, picture not sent', (await call('caller', 'GET', '/api/seva-wall?stage=called')).total, 1);
   check('stage: sent', (await call('caller', 'GET', '/api/seva-wall?stage=sent')).total, 1);
-  check('a caller\'s counts', r.counts, { to_call: 2, called: 1, sent: 1, due: 0 });
+  check('a caller\'s counts', r.counts, { to_call: 2, called: 1, sent: 1, due: 0, questions: 0 });
   check('the print list no longer has them', (await call('printer', 'GET', '/api/seva-wall')).total, 1);
 
   console.log('\n--- logging a call: answered or not, a note, and the day to call again ---');
@@ -329,10 +372,10 @@ async function main() {
   check('nothing is raised before the morning hour', await raiseWallReminders(), 0);
   process.env.SEVA_REMINDER_FROM_HOUR = '0';
   check('the follow-up that has come due is raised once', await raiseWallReminders(), 1);
-  const bell = (await pool.query(`SELECT kind, title, body, link, phone FROM drm_notifications WHERE kind = 'seva_wall'`)).rows;
+  const bell = (await pool.query(`SELECT kind, title, body, link, phone FROM drm_notifications WHERE kind = 'seva_wall' AND title LIKE 'Call %'`)).rows;
   check('as a bell notification with the donor, what they said and who asked',
     bell, [{ kind: 'seva_wall', title: 'Call Bala K today', body: 'Square foot seva - Wants to donate another brick (asked by caller)', link: '/seva-wall?search=9000000002', phone: '9000000002' }]);
-  check('running it again raises nothing new', [await raiseWallReminders(), (await pool.query(`SELECT COUNT(*)::int AS n FROM drm_notifications`)).rows[0].n], [0, 1]);
+  check('running it again raises nothing new', [await raiseWallReminders(), (await pool.query(`SELECT COUNT(*)::int AS n FROM drm_notifications WHERE title LIKE 'Call %'`)).rows[0].n], [0, 1]);
   check('a day that has not come yet is not raised (the one set for 3 days ahead)', bell.some((n: any) => /Phone off/.test(n.body ?? '')), false);
 
   const kept = await logCall('caller', midSqft, { outcome: 'answered', note: 'Told him the picture is on its way' });
@@ -383,7 +426,7 @@ async function main() {
   check('an accountant can look', (await call('accountant', 'GET', '/api/seva-wall?view=all')).total, 8);
   check('but not upload', (await call('accountant', 'POST', `/api/seva-wall/${midSqft}/image`, pic)).http, 403);
   r = await call('admin', 'GET', '/api/seva-wall?view=all');
-  check('the counts say where everything is', r.counts, { to_print: 1, needs_reprint: 0, to_call: 1, called: 2, sent: 4, due: 0 });
+  check('the counts say where everything is', r.counts, { to_print: 1, needs_reprint: 0, to_call: 1, called: 2, sent: 4, due: 0, questions: 0 });
   check('filter by seva', (await call('admin', 'GET', '/api/seva-wall?view=all&kind=mandir')).total, 1);
   check('filter by priority', (await call('admin', 'GET', '/api/seva-wall?view=all&priority=high')).total, 2);
   check('search by receipt number', (await call('admin', 'GET', '/api/seva-wall?view=all&search=BOOK-77')).total, 1);
@@ -472,7 +515,7 @@ async function main() {
   check('every step is on record, in order',
     (await pool.query(`SELECT e.action FROM seva_wall_events e JOIN seva_wall_items i ON i.id = e.item_id
                         WHERE i.donation_id = $1 ORDER BY e.id`, [oldBrick])).rows.map((x: any) => x.action),
-    ['uploaded', 'replaced', 'called', 'sent_back', 'replaced', 'whatsapp_sent', 'called', 'sent']);
+    ['uploaded', 'replaced', 'called', 'sent_back', 'message', 'message', 'message', 'message', 'message', 'message', 'replaced', 'message', 'whatsapp_sent', 'called', 'sent']);
   check('every donation is still there', (await pool.query(`SELECT COUNT(*)::int AS n FROM donations`)).rows[0].n, 8);
 
   server.close();

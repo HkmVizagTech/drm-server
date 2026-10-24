@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiClient, isAbort } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { currency, number, shortDate } from "@/lib/format";
+import { currency, dateTime, number, shortDate } from "@/lib/format";
 import {
   Alert,
   Badge,
@@ -78,6 +78,13 @@ interface Row {
   sent_at?: string | null;
   sent_by_name?: string | null;
   has_image?: boolean;
+  /** A picture that was sent back and is still kept while the brick is redone. */
+  has_previous_image?: boolean;
+  /** The printer asked a question about this brick and nobody has answered yet. */
+  awaiting_reply?: boolean;
+  /** Messages on the brick: why it was sent back, and what was said after. */
+  message_count?: number;
+  last_message_role?: string | null;
   uploaded_at?: string | null;
   /** The picture's own Cloudflare address. This is what the WhatsApp message carries. */
   image_url?: string | null;
@@ -95,7 +102,7 @@ interface Response {
   limit: number;
   total_pages: number;
   min_amount: number;
-  counts: Partial<Record<"to_print" | "needs_reprint" | "uploaded" | "to_call" | "called" | "sent" | "due", number>>;
+  counts: Partial<Record<"to_print" | "needs_reprint" | "uploaded" | "to_call" | "called" | "sent" | "due" | "questions", number>>;
 }
 
 const KIND_LABEL: Record<Kind, string> = {
@@ -267,7 +274,7 @@ function ContactIcons({ row }: { row: Row }) {
 }
 
 /** The uploaded picture. Fetched with the login token, which an <img src> cannot carry. */
-function Picture({ row }: { row: Row }) {
+function Picture({ row, previous = false }: { row: Row; previous?: boolean }) {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [open, setOpen] = useState(false);
@@ -278,7 +285,7 @@ function Picture({ row }: { row: Row }) {
     setUrl(null);
     setFailed(false);
     apiClient
-      .getBlob(`/api/seva-wall/${row.ref}/image`)
+      .getBlob(`/api/seva-wall/${row.ref}/image${previous ? "?which=previous" : ""}`)
       .then((b) => {
         if (!live) return;
         made = URL.createObjectURL(b);
@@ -290,23 +297,154 @@ function Picture({ row }: { row: Row }) {
       if (made) URL.revokeObjectURL(made);
     };
     // A new upload for the same brick has a new timestamp: fetch it again.
-  }, [row.ref, row.uploaded_at]);
+  }, [row.ref, row.uploaded_at, previous]);
 
   if (failed) return <span className="text-xs text-ink-muted">Could not load</span>;
   if (!url) return <span className="inline-block h-14 w-14 animate-pulse rounded-control bg-sunken" />;
   return (
     <>
-      <button type="button" onClick={() => setOpen(true)} title="View picture" className="block rounded-control">
+      <button type="button" onClick={() => setOpen(true)} title={previous ? "The picture that was sent back" : "View picture"} className="block rounded-control">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={url} alt="Printed brick" className="h-14 w-14 rounded-control object-cover ring-1 ring-line-soft" />
       </button>
       {open && (
-        <Modal title={`${row.donor_name ?? "Brick"} - ${KIND_LABEL[row.kind]}`} onClose={() => setOpen(false)} wide>
+        <Modal title={`${row.donor_name ?? "Brick"} - ${KIND_LABEL[row.kind]}${previous ? " (sent back)" : ""}`} onClose={() => setOpen(false)} wide>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={url} alt="Printed brick" className="mx-auto max-h-[70vh] w-auto rounded-control" />
         </Modal>
       )}
     </>
+  );
+}
+
+/** Who is on which side of the conversation: the printer, or the people who review. */
+const isPrinterRole = (role: string | null | undefined) => role === "brick_printer";
+
+/** "Messages", with how many, and "New" when the other side spoke last. */
+function MessagesButton({ row, viewer, onOpen }: { row: Row; viewer: string; onOpen: () => void }) {
+  const n = row.message_count ?? 0;
+  const last = row.last_message_role ?? null;
+  const waiting = n > 0 && !!last && isPrinterRole(last) !== isPrinterRole(viewer);
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="inline-flex items-center gap-1 rounded-control text-xs font-medium text-brand-700 hover:underline"
+    >
+      <Icon name="message" size={13} />
+      {row.awaiting_reply && !isPrinterRole(viewer) ? "Answer the printer" : n > 0 ? `Messages (${n})` : "Ask or note"}
+      {waiting && <Badge tone="warn">New</Badge>}
+    </button>
+  );
+}
+
+interface Message {
+  id: string;
+  kind: "sent_back" | "message";
+  note: string | null;
+  at: string;
+  by_name: string;
+  by_role: string | null;
+}
+
+const ROLE_WORDS: Record<string, string> = { brick_printer: "Printer", caller: "Caller", admin: "Admin" };
+
+/**
+ * The conversation on one brick: why it was sent back, the printer's questions and
+ * the answers. Nothing here is about the donor's phone or money.
+ */
+function Messages({ row, asking, onClose, onChanged }: { row: Row; asking: boolean; onClose: () => void; onChanged: () => void }) {
+  const { user } = useAuth();
+  const [list, setList] = useState<Message[] | null>(null);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const canWrite = user?.role === "admin" || user?.role === "caller" || user?.role === "brick_printer";
+
+  useEffect(() => {
+    let live = true;
+    apiClient
+      .get<{ messages: Message[] }>(`/api/seva-wall/${row.ref}/messages`)
+      .then((r) => live && setList(r.messages))
+      .catch((e) => live && setError((e as Error).message));
+    return () => {
+      live = false;
+    };
+  }, [row.ref]);
+
+  async function send() {
+    if (!text.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await apiClient.post<{ messages: Message[] }>(`/api/seva-wall/${row.ref}/messages`, { note: text.trim(), ask: asking });
+      setList(r.messages);
+      setText("");
+      onChanged();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={`${printName(row)} - ${KIND_LABEL[row.kind]}`} onClose={onClose}>
+      <div className="space-y-3">
+        {error && <Alert tone="danger">{error}</Alert>}
+        <div className="max-h-[45vh] space-y-2 overflow-y-auto pr-1">
+          {!list && <p className="text-sm text-ink-muted">Loading…</p>}
+          {list && !list.length && (
+            <p className="py-3 text-center text-sm text-ink-muted">
+              Nothing yet. Ask a question about this brick, or leave a note for the other side.
+            </p>
+          )}
+          {list?.map((m) => {
+            const mine = (m.by_role === "brick_printer") === (user?.role === "brick_printer");
+            return (
+              <div
+                key={m.id}
+                className={`rounded-control border px-3 py-2 text-sm ${
+                  m.kind === "sent_back" ? "border-danger/40 bg-danger/5" : mine ? "border-brand-200 bg-brand-50" : "border-line-soft bg-sunken"
+                }`}
+              >
+                <p className="mb-0.5 text-xs text-ink-muted">
+                  <span className="font-medium text-ink">{m.by_name}</span>
+                  {m.by_role && ROLE_WORDS[m.by_role] ? ` (${ROLE_WORDS[m.by_role]})` : ""} · {dateTime(m.at)}
+                  {m.kind === "sent_back" ? " · sent it back" : ""}
+                </p>
+                <p className="whitespace-pre-wrap text-ink">{m.note}</p>
+              </div>
+            );
+          })}
+        </div>
+        {asking && (row.status === "to_print" || row.status === "needs_reprint") && (
+          <p className="text-xs text-ink-muted">
+            Your question goes to the Seva wall, where a caller or the admin answers it. The answer appears here.
+          </p>
+        )}
+        {canWrite && (
+          <div className="space-y-2">
+            <Textarea
+              value={text}
+              rows={2}
+              maxLength={500}
+              placeholder={
+                asking
+                  ? "Ask what is not clear, or tell them what you changed"
+                  : "Answer the printer, or tell them what to check"
+              }
+              onChange={(e) => setText(e.target.value)}
+            />
+            <div className="flex justify-end">
+              <Button icon="arrowRight" disabled={!text.trim()} loading={busy} onClick={() => void send()}>
+                Send
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -374,6 +512,9 @@ export default function WallTable({ view }: { view: WallView }) {
   const [bulk, setBulk] = useState(false);
   const [sendingBack, setSendingBack] = useState<Row | null>(null);
   const [logging, setLogging] = useState<Row | null>(null);
+  const [talking, setTalking] = useState<Row | null>(null);
+  // A note the printer adds as the new picture goes in: it reaches the callers as a message.
+  const [uploadNote, setUploadNote] = useState("");
   // A picture chosen but not yet sent: shown for checking first.
   const [pending, setPending] = useState<{ row: Row; file: File; url: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -464,6 +605,7 @@ export default function WallTable({ view }: { view: WallView }) {
   }
 
   function closePreview() {
+    setUploadNote("");
     setPending((p) => {
       if (p) URL.revokeObjectURL(p.url);
       return null;
@@ -479,6 +621,11 @@ export default function WallTable({ view }: { view: WallView }) {
         mime: file.type,
         base64: await readBase64(file),
       });
+      if (uploadNote.trim()) {
+        await apiClient.post(`/api/seva-wall/${row.ref}/messages`, { note: uploadNote.trim() }).catch(() => {
+          toast.error("The picture went in, but your note did not. Add it from Messages.");
+        });
+      }
       toast.success(
         r.replaced ? "Picture replaced" : "Picture uploaded",
         r.replaced ? "The old picture was deleted." : "It has moved to the Seva wall for review."
@@ -543,6 +690,15 @@ export default function WallTable({ view }: { view: WallView }) {
           <Badge tone="neutral" dot>
             {number(counts.to_print)} new to print
           </Badge>
+        </div>
+      )}
+
+      {view === "contact" && stage === "" && (counts.questions ?? 0) > 0 && (
+        <div className="mb-4">
+          <Alert tone="warn">
+            {number(counts.questions)} {counts.questions === 1 ? "brick has" : "bricks have"} a question from the brick
+            printer. They are at the top - answer them so the printer can carry on.
+          </Alert>
         </div>
       )}
 
@@ -665,7 +821,16 @@ export default function WallTable({ view }: { view: WallView }) {
                 <tr key={r.ref} className={r.status === "needs_reprint" && view === "print" ? "bg-danger/5" : undefined}>
                   {view === "contact" && (
                     <Td>
-                      {r.has_image ? <Picture row={r} /> : <span className="text-ink-faint">-</span>}
+                      {r.has_image ? (
+                        <Picture row={r} />
+                      ) : r.has_previous_image ? (
+                        <div className="text-center">
+                          <Picture row={r} previous />
+                          <span className="mt-0.5 block text-[11px] text-ink-muted">Sent back</span>
+                        </div>
+                      ) : (
+                        <span className="text-ink-faint">-</span>
+                      )}
                     </Td>
                   )}
                   {view !== "contact" && (
@@ -721,10 +886,22 @@ export default function WallTable({ view }: { view: WallView }) {
                   {view !== "print" && <Td className="whitespace-nowrap">{shortDate(r.donated_at)}</Td>}
                   <Td>
                     <StatusBadge row={r} waitingForReview={isPrinter} />
+                    {r.awaiting_reply && (
+                      <span className="mt-1 block">
+                        <Badge tone="warn" dot>
+                          {isPrinter ? "Waiting for the caller's answer" : "Printer asked a question"}
+                        </Badge>
+                      </span>
+                    )}
                     {r.status === "needs_reprint" && r.review_note && (
                       <span className="mt-1 block max-w-xs text-xs text-danger">
                         Sent back: {r.review_note}
                         {r.reviewed_at ? ` (${shortDate(r.reviewed_at)})` : ""}
+                      </span>
+                    )}
+                    {(isPrinter || role === "admin" || role === "caller") && (
+                      <span className="mt-1 block">
+                        <MessagesButton row={r} viewer={role ?? ""} onOpen={() => setTalking(r)} />
                       </span>
                     )}
                     {r.status === "in_review" && r.called_at && r.called_by_name && (
@@ -789,6 +966,10 @@ export default function WallTable({ view }: { view: WallView }) {
                             Send back
                           </Button>
                         </div>
+                      ) : r.awaiting_reply ? (
+                        <Button size="xs" variant="primary" icon="message" onClick={() => setTalking(r)}>
+                          Answer the printer
+                        </Button>
                       ) : (
                         <Badge tone="good" icon="checkCircle">Done</Badge>
                       )}
@@ -798,15 +979,24 @@ export default function WallTable({ view }: { view: WallView }) {
                   {view !== "contact" && canUpload && (
                     <Td>
                       {r.status === "to_print" || r.status === "needs_reprint" ? (
-                        <Button
-                          size="sm"
-                          variant={r.status === "needs_reprint" ? "primary" : "secondary"}
-                          icon="upload"
-                          loading={busy === r.ref}
-                          onClick={() => pickFile(r)}
-                        >
-                          {r.status === "needs_reprint" ? "Upload new picture" : "Upload"}
-                        </Button>
+                        <div className="flex items-center gap-3">
+                          {/* The picture that was sent back, so what to fix can be seen next to why. */}
+                          {r.status === "needs_reprint" && r.has_previous_image && (
+                            <div className="text-center">
+                              <Picture row={r} previous />
+                              <span className="mt-0.5 block text-[11px] text-ink-muted">Sent back</span>
+                            </div>
+                          )}
+                          <Button
+                            size="sm"
+                            variant={r.status === "needs_reprint" ? "primary" : "secondary"}
+                            icon="upload"
+                            loading={busy === r.ref}
+                            onClick={() => pickFile(r)}
+                          >
+                            {r.status === "needs_reprint" ? "Upload new picture" : "Upload"}
+                          </Button>
+                        </div>
                       ) : r.status === "in_review" && !r.called_at ? (
                         <div className="flex items-center gap-3">
                           {r.has_image && <Picture row={r} />}
@@ -815,7 +1005,10 @@ export default function WallTable({ view }: { view: WallView }) {
                           </Button>
                         </div>
                       ) : (
-                        <span className="text-ink-faint">Uploaded</span>
+                        <div className="flex items-center gap-3">
+                          {r.has_image && <Picture row={r} />}
+                          <span className="text-ink-faint">Uploaded</span>
+                        </div>
                       )}
                     </Td>
                   )}
@@ -881,6 +1074,11 @@ export default function WallTable({ view }: { view: WallView }) {
           </p>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={pending.url} alt="Picture to upload" className="mx-auto max-h-[60vh] w-auto rounded-control ring-1 ring-line-soft" />
+          <div className="mt-3">
+            <Field label="Note for the caller (optional)" hint="For example: what you changed, or a question about the name.">
+              <Textarea value={uploadNote} rows={2} maxLength={500} onChange={(e) => setUploadNote(e.target.value)} />
+            </Field>
+          </div>
         </Modal>
       )}
       {bulk && (
@@ -903,6 +1101,7 @@ export default function WallTable({ view }: { view: WallView }) {
           }}
         />
       )}
+      {talking && <Messages row={talking} asking={isPrinter || view === "print"} onClose={() => setTalking(null)} onChanged={() => void load()} />}
       {sendingBack && (
         <SendBack
           row={sendingBack}

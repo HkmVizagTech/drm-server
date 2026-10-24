@@ -2813,6 +2813,11 @@ ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS follow_up_alerted_on DATE;
 -- Added after the table first shipped locally; harmless where the CREATE already had them.
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS called_by UUID REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS called_at TIMESTAMPTZ;
+-- The printer asked a question about a brick that is waiting for them (one not
+-- printed yet, or one sent back). While this is set the brick is on the callers'
+-- Seva wall table too, with the question, until somebody answers - or until a new
+-- picture goes in.
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS awaiting_reply_at TIMESTAMPTZ;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_seva_wall_manual_receipt
   ON seva_wall_items (lower(receipt_number)) WHERE donation_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_seva_wall_status ON seva_wall_items (status);
