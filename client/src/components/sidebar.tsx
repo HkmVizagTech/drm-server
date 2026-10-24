@@ -107,6 +107,9 @@ export const navGroups: NavGroup[] = [
       // Calls the DRM app saw on callers' phones, with their recordings: a
       // caller's own, or the whole team's for an admin.
       { href: "/calling/recordings", label: "Recordings", icon: "mic" },
+      // A call from a number DRM did not know, added from its recording: its talk
+      // time is the recording's length. A caller's own, or the whole team's.
+      { href: "/calling/unmatched", label: "Unmatched calls", icon: "phoneIncoming" },
       // The phone's half of "click Call on the laptop, ring from the phone".
       { href: "/calling/dialer", label: "Laptop dialer", icon: "phoneOutgoing", appOnly: true },
       // The app's own setup: permissions, recordings, last sync. Only in the app.

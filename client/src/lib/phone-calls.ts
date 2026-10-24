@@ -13,6 +13,8 @@ export interface PhoneCallRow {
   started_at: string;
   duration_seconds: number;
   from_app: boolean;
+  /** Added by a caller from a recording, not reported by a phone. */
+  added_by_hand?: boolean;
   recording_status: RecordingStatus;
   recording_bytes: number | null;
   user_id: string | null;

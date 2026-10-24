@@ -12,6 +12,7 @@ import { apiClient, isAbort } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { clockTime, currency, istDayPlus, istToday, number, shortDate } from "@/lib/format";
 import { ExportButton } from "@/components/export-button";
+import { RecordingPlayer } from "@/components/calls/recording-player";
 import {
   Alert,
   Badge,
@@ -104,7 +105,16 @@ interface Detail {
 
 /** 125 -> "2h 05m", 40 -> "40m". */
 const minutes = (m: number) => (m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${m}m`);
-const fromSeconds = (s: number) => minutes(Math.round(s / 60));
+// Talk time exactly as it was: 34 seconds is "34s", never rounded to a minute.
+const fromSeconds = (s: number) => {
+  const t = Math.max(0, Math.round(s));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const sec = t % 60;
+  if (h) return `${h}h ${m}m ${sec}s`;
+  if (m) return `${m}m ${sec}s`;
+  return `${sec}s`;
+};
 
 /** Seven small bars, oldest first, the last being the day shown. */
 function Spark({ values }: { values: number[] }) {
@@ -475,11 +485,11 @@ function CallerDay({ caller, day, onClose }: { caller: Caller; day: string; onCl
                       </td>
                       <td className="whitespace-nowrap px-3 py-2 tabular-nums">
                         {x.duration_seconds ? fromSeconds(x.duration_seconds) : "-"}
-                        <span className="block text-xs text-ink-muted">{x.source === "manual" ? "typed" : "phone app"}</span>
+                        <span className="block text-xs text-ink-muted">{x.source === "manual" ? "typed" : x.source === "recording" ? "added from recording" : "phone app"}</span>
                         {x.recording_url && (
-                          <a href={x.recording_url} target="_blank" rel="noreferrer" className="text-xs text-brand-700 underline">
-                            Recording
-                          </a>
+                          <div className="mt-1">
+                            <RecordingPlayer url={x.recording_url} seconds={x.duration_seconds ?? undefined} size="sm" />
+                          </div>
                         )}
                       </td>
                       <td className="max-w-xs px-3 py-2 text-ink-soft">{x.note || ""}</td>

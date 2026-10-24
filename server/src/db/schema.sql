@@ -2922,6 +2922,25 @@ INSERT INTO crm_dispositions (slug, label, counts_connected, suggests_status, wa
 ON CONFLICT (slug) DO NOTHING;
 
 /* =========================================================================
+   CALLS A CALLER ADDS FROM A RECORDING
+   =========================================================================
+   A donor rings from a number DRM does not know, and the phone app, which only
+   reports numbers DRM knows, never saw the call. The caller adds it by hand
+   on the Unmatched calls page: the number, who it was, and the recording. The
+   call is kept in phone_calls like any other (so the Recordings list and the
+   player work unchanged) with no phone behind it: device_id is empty and
+   added_by_hand says why. Its talk time is read from the recording. */
+ALTER TABLE phone_calls ALTER COLUMN device_id DROP NOT NULL;
+ALTER TABLE phone_calls ADD COLUMN IF NOT EXISTS added_by_hand BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_phone_calls_added ON phone_calls(started_at DESC) WHERE added_by_hand;
+
+-- Hidden: the call result of a call added from a recording. It changes nothing
+-- on the lead but its history and its last-contacted time.
+INSERT INTO crm_dispositions (slug, label, counts_connected, suggests_status, wants_follow_up, sort_order, active) VALUES
+  ('recorded_call', 'Call added from a recording', TRUE, NULL, FALSE, 140, FALSE)
+ON CONFLICT (slug) DO NOTHING;
+
+/* =========================================================================
    HIDING A DONOR WITHOUT DELETING THEM
    =========================================================================
 

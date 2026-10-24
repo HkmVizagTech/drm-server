@@ -64,7 +64,13 @@ export function PhoneCallItem({
           </Link>
         </div>
 
-        {(c.disposition_label || c.disposition || (c.direction === "outbound" && spoke)) && (
+        {c.added_by_hand && (
+          <div className="mt-1.5">
+            <Badge tone="info">Added from a recording</Badge>
+          </div>
+        )}
+
+        {!c.added_by_hand && (c.disposition_label || c.disposition || (c.direction === "outbound" && spoke)) && (
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {c.disposition_label || c.disposition ? (
               <Badge tone="neutral">{c.disposition_label ?? c.disposition}</Badge>

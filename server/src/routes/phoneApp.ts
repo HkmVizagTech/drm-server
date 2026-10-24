@@ -34,7 +34,7 @@ import {
 const router = Router();
 
 /** Who may hear any recording. Everybody else hears only their own calls. */
-const REVIEWERS = ['admin', 'volunteer_coordinator'];
+export const REVIEWERS = ['admin', 'volunteer_coordinator'];
 
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 const str = (v: unknown, max: number) => {
@@ -262,13 +262,13 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** Who may open the calls list at all. A caller sees only their own calls. */
 const LIST_ROLES = ['admin', 'volunteer_coordinator', 'caller'] as const;
 
-const CALL_ROW = `
-  pc.id, pc.direction, pc.phone, pc.started_at, pc.duration_seconds, pc.from_app,
+export const CALL_ROW = `
+  pc.id, pc.direction, pc.phone, pc.started_at, pc.duration_seconds, pc.from_app, pc.added_by_hand,
   pc.recording_status, pc.recording_bytes, pc.user_id, u.name AS caller_name,
   pc.lead_id, l.name AS lead_name, l.phone AS lead_phone,
   a.disposition, d.label AS disposition_label, a.note AS outcome_note,
   dv.model AS phone_model, dv.manufacturer AS phone_maker`;
-const CALL_FROM = `
+export const CALL_FROM = `
   FROM phone_calls pc
   LEFT JOIN users u ON u.id = pc.user_id
   LEFT JOIN leads l ON l.id = pc.lead_id

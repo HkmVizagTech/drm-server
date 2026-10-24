@@ -249,7 +249,6 @@ async function exportDay(req: import('express').Request, res: import('express').
   const day = dayOf(req.query.date);
   try {
     const { rows } = await scorecards(day);
-    const mins = (s: number) => Math.round(s / 60);
     await sendExport(res, format, {
       name: 'team-activity',
       rows,
@@ -259,8 +258,8 @@ async function exportDay(req: import('express').Request, res: import('express').
         { header: 'Calls made', value: (r) => r.calls, kind: 'number' },
         { header: 'Answered', value: (r) => r.connected, kind: 'number' },
         { header: 'Answered %', value: (r) => r.answered_pct ?? '', kind: 'number' },
-        { header: 'Talk time, from the phone app (min)', value: (r) => mins(r.talk_real_seconds), kind: 'number' },
-        { header: 'Talk time, typed by the caller (min)', value: (r) => mins(r.talk_logged_seconds), kind: 'number' },
+        { header: 'Talk time, measured (seconds)', value: (r) => r.talk_real_seconds, kind: 'number' },
+        { header: 'Talk time, typed by the caller (seconds)', value: (r) => r.talk_logged_seconds, kind: 'number' },
         { header: 'First call', value: (r) => r.first_call_at, kind: 'datetime' },
         { header: 'Last call', value: (r) => r.last_call_at, kind: 'datetime' },
         { header: 'Active time (min)', value: (r) => r.active_minutes, kind: 'number' },
