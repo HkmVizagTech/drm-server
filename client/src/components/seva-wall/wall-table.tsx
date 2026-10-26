@@ -251,6 +251,11 @@ function ContactIcons({ row }: { row: Row }) {
     <div className="flex items-center gap-2">
       <a
         href={`tel:+${to}`}
+        // Make the donor a lead as the call starts: the phone app only keeps calls
+        // (and their recordings) to numbers DRM knows.
+        onClick={() => {
+          apiClient.post(`/api/seva-wall/${row.ref}/call-start`, {}).catch(() => undefined);
+        }}
         title={`Call ${name}`}
         aria-label={`Call ${name}`}
         className={`${base} text-brand-700 hover:bg-brand-50`}

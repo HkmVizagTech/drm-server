@@ -705,35 +705,47 @@ async function trackCall(
   user: { userId?: string; role?: string } | undefined
 ) {
   try {
-    const w = await pool.query(`SELECT w.donor_name, w.phone, w.kind FROM ${wallSql(false)} WHERE w.ref = $1`, [ref]);
-    const row = w.rows[0];
-    const phone = String(row?.phone ?? '').replace(/\D/g, '').slice(-10);
-    if (!row || phone.length !== 10) return;
-    const label = KIND_NAME[row.kind] ?? 'Seva';
-    const { lead } = await upsertLead(
-      {
-        phone,
-        name: row.donor_name,
-        source_detail: `Seva wall - ${label}`,
-        status: 'seva_wall',
-        // A caller's own calls belong to them, as with Nearly gave; an admin's leave it free.
-        assigned_to: user?.role === 'caller' ? user.userId ?? null : null,
-        tags: ['seva_wall'],
-      },
-      user?.userId ?? null
-    );
+    const found = await ensureWallLead(ref, user);
+    if (!found) return;
     await logCallForLead(
-      String(lead.id),
+      found.leadId,
       {
         disposition: outcome === 'answered' ? 'seva_wall_answered' : 'seva_wall_no_answer',
         direction: 'outbound',
-        note: note ? `Seva wall (${label}): ${note}` : `Seva wall (${label})`,
+        note: note ? `Seva wall (${found.label}): ${note}` : `Seva wall (${found.label})`,
       },
       user ? { userId: user.userId, role: user.role } : null
     );
   } catch (e) {
     console.error('seva-wall call tracking failed (non-fatal):', (e as Error).message);
   }
+}
+
+/**
+ * The donor's lead, made if they have none - the one thing a call needs before
+ * the phone app will keep its recording. The app only reports calls to numbers
+ * that are leads, so this runs when the caller taps Call, not when they log the
+ * outcome minutes later. Null when the brick has no usable phone number.
+ */
+async function ensureWallLead(ref: string, user: { userId?: string; role?: string } | undefined) {
+  const w = await pool.query(`SELECT w.donor_name, w.phone, w.kind FROM ${wallSql(false)} WHERE w.ref = $1`, [ref]);
+  const row = w.rows[0];
+  const phone = String(row?.phone ?? '').replace(/\D/g, '').slice(-10);
+  if (!row || phone.length !== 10) return null;
+  const label = KIND_NAME[row.kind] ?? 'Seva';
+  const { lead } = await upsertLead(
+    {
+      phone,
+      name: row.donor_name,
+      source_detail: `Seva wall - ${label}`,
+      status: 'seva_wall',
+      // A caller's own calls belong to them, as with Nearly gave; an admin's leave it free.
+      assigned_to: user?.role === 'caller' ? user.userId ?? null : null,
+      tags: ['seva_wall'],
+    },
+    user?.userId ?? null
+  );
+  return { leadId: String(lead.id), label };
 }
 
 const KIND_NAME: Record<string, string> = { brick: 'Brick seva', square: 'Square foot seva', mandir: 'Mandir nirmana seva' };
@@ -890,6 +902,18 @@ router.get('/:ref/image', allow(...LOOK), async (req, res) => {
 //                unless a new one is given - the promise was kept.
 //   no_answer    nobody picked up: it stays among the bricks still to call, with
 //                a count of tries, so it is not mistaken for one that was reached.
+// The caller has tapped Call. Makes sure the donor is a lead now, so the phone app
+// keeps this call and its recording. Never fatal: the call is not held up by it.
+router.post('/:ref/call-start', allow(...REVIEW), async (req, res) => {
+  try {
+    const found = await ensureWallLead(String(req.params.ref), req.user);
+    res.json({ ok: !!found });
+  } catch (e) {
+    console.error('seva-wall call-start failed (non-fatal):', (e as Error).message);
+    res.json({ ok: false });
+  }
+});
+
 router.post('/:ref/call', allow(...REVIEW), async (req, res) => {
   const outcome = String(req.body?.outcome ?? '');
   if (!['answered', 'no_answer'].includes(outcome)) {
