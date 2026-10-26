@@ -87,6 +87,11 @@ const onFollowUps = async (id: string) => {
 };
 
 async function main() {
+  // These dates assume the plain retry rule. The same-day evening retry (an unanswered
+  // morning call comes back that evening) depends on the clock, so it is switched off
+  // here and has its own test: test-evening-retry.ts.
+  await pool.query(`INSERT INTO crm_settings (key, value) VALUES ('evening_retry_cutoff_hour', '0'::jsonb)
+                    ON CONFLICT (key) DO UPDATE SET value = '0'::jsonb`);
   await pool.query(`TRUNCATE leads, razorpay_qrs, users RESTART IDENTITY CASCADE`);
   await pool.query(`INSERT INTO users (id, name, email, password_hash, role) VALUES ($1,'Admin','a@t','x','admin')`, [ADMIN]);
   await pool.query(`UPDATE crm_settings SET value = '2'::jsonb, updated_by = NULL WHERE key = 'retry_after_days'`);

@@ -119,7 +119,8 @@ export const CALLABLE = `
  * within the hour. Today means today.
  */
 export const DUE_NOW = `
-  (l.next_follow_up_at IS NULL OR l.next_follow_up_at < date_trunc('day', NOW()) + INTERVAL '1 day')`;
+  ((l.next_follow_up_at IS NULL OR l.next_follow_up_at < date_trunc('day', NOW()) + INTERVAL '1 day')
+   AND (l.retry_hold_until IS NULL OR l.retry_hold_until <= NOW()))`;
 
 /**
  * Does this lead's follow-up belong on the Follow-ups page - and yet?
@@ -157,6 +158,8 @@ export const DUE_NOW = `
 export const FOLLOW_UP_LISTED = `(
   l.follow_up_auto = FALSE
   OR (
+    (l.retry_hold_until IS NULL OR l.retry_hold_until <= NOW())
+    AND
     l.next_follow_up_at < date_trunc('day', NOW()) + INTERVAL '1 day'
     AND (
       'abandoned' = ANY(l.tags)

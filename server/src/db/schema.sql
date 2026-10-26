@@ -2989,3 +2989,20 @@ CREATE OR REPLACE VIEW live_people AS
 CREATE OR REPLACE VIEW live_donations AS
   SELECT d.* FROM donations d
    WHERE NOT EXISTS (SELECT 1 FROM people hp WHERE hp.id = d.person_id AND hp.hidden_at IS NOT NULL);
+
+/* leads.retry_hold_until: a same-day evening retry (an unanswered morning call
+   comes back to the same caller that evening). The queue treats any date today
+   as due now, so this keeps the lead out of the queue and Follow-ups until the
+   evening hour. Set and cleared by logCallForLead; null for everything else. */
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS retry_hold_until TIMESTAMPTZ;
+
+/* What the site itself says about a subscription, kept beside DRM's own status.
+   DRM's status folds the site's 'pending' (set up, nothing charged yet) into
+   'active', so the Recurring card counted people who had never paid. site_status
+   is the unfolded value; last_charged_at and charge_count say whether it is
+   really paying. Filled by the sync (hkmvSync upsertSubscription); null until
+   a subscription has been synced again. */
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS site_status VARCHAR(20);
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_charged_at TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS charge_count INTEGER;
+

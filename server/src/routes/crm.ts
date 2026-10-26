@@ -2523,7 +2523,9 @@ export async function logCallForLead(
               -- note and seen-marker.
               awaiting_qr_at, converted_note, conversion_seen_at,
               -- And the two the follow-up rules keep, so Undo restores them too.
-              follow_up_auto, unanswered_reset_at
+              follow_up_auto, unanswered_reset_at,
+              -- And the same-day evening retry's hold and the owner it may set.
+              retry_hold_until, assigned_to, assigned_at
          FROM leads WHERE id = $1 FOR UPDATE`,
       [leadId]
     );
@@ -2697,6 +2699,58 @@ export async function logCallForLead(
     );
     const retryAt: Date = when.rows[0].at;
 
+    /* THE SAME-DAY EVENING RETRY.
+
+       A call that did not connect, made in the morning, comes back the SAME
+       DAY in the evening - to the same caller - before the usual
+       `retry_after_days` rule applies. If that evening call is unanswered too,
+       the lead goes on to the normal retry day.
+
+       Only the first unanswered call of the day gets it, and only when it was
+       made before the cutoff hour and the evening hour is still ahead; a call
+       recorded late, or the evening call itself, books the normal date. The
+       lead is held out of the queue and the follow-ups until the evening hour
+       (leads.retry_hold_until, read by DUE_NOW and FOLLOW_UP_LISTED), because
+       the queue otherwise treats anything dated today as due this minute.
+       Hours are crm_settings evening_retry_hour (16) and
+       evening_retry_cutoff_hour (13), in IST, and evening_retry_scope
+       (nearly_gave, or all). */
+    let eveningAt: Date | null = null;
+    if (unanswered && schedules && !followUp) {
+      const hrs = await client.query(
+        `SELECT key, value FROM crm_settings WHERE key IN ('evening_retry_hour', 'evening_retry_cutoff_hour', 'evening_retry_scope')`
+      );
+      // Who gets it. Nearly gave leads (tagged 'abandoned') for now; set
+      // evening_retry_scope to "all" in crm_settings to give it to every lead.
+      const scope = String(hrs.rows.find((r) => r.key === 'evening_retry_scope')?.value ?? 'nearly_gave');
+      const inScope =
+        scope === 'all' ||
+        (await client.query(`SELECT 'abandoned' = ANY(tags) AS ng FROM leads WHERE id = $1`, [leadId])).rows[0]?.ng === true;
+      const hour = (key: string, dflt: number) => {
+        const v = Number(hrs.rows.find((r) => r.key === key)?.value);
+        return Number.isFinite(v) && v >= 0 && v <= 24 ? Math.floor(v) : dflt;
+      };
+      const eveningHour = hour('evening_retry_hour', 16);
+      const cutoffHour = hour('evening_retry_cutoff_hour', 13);
+      const ev = await client.query(
+        `SELECT date_trunc('day', NOW()) + ($1::int || ' hours')::interval AS at,
+                COALESCE($3::timestamptz, NOW()) >= date_trunc('day', NOW())
+                  AND COALESCE($3::timestamptz, NOW()) < date_trunc('day', NOW()) + ($2::int || ' hours')::interval AS morning,
+                NOW() < date_trunc('day', NOW()) + ($1::int || ' hours')::interval AS evening_ahead,
+                (SELECT COUNT(*)::int
+                   FROM lead_activities a JOIN crm_dispositions cd ON cd.slug = a.disposition
+                  WHERE a.lead_id = $4 AND a.kind = 'call'
+                    AND COALESCE(a.direction, 'outbound') = 'outbound'
+                    AND COALESCE(a.connected, FALSE) = FALSE AND cd.wants_follow_up = TRUE
+                    AND a.occurred_at >= date_trunc('day', NOW())) AS unanswered_today`,
+        [eveningHour, cutoffHour, asDate(b.occurred_at), leadId]
+      );
+      const e = ev.rows[0];
+      if (inScope && e.morning && e.evening_ahead && e.unanswered_today === 1) eveningAt = e.at as Date;
+    }
+    // The date this call books when nobody picked one.
+    const bookAt: Date = eveningAt ?? retryAt;
+
     const updated = await client.query(
       `UPDATE leads SET
          status            = COALESCE($1, status),
@@ -2719,6 +2773,15 @@ export async function logCallForLead(
              WHEN $4::timestamptz IS NOT NULL THEN $4::timestamptz
              WHEN $5::boolean THEN GREATEST($9::timestamptz, COALESCE(next_follow_up_at, $9::timestamptz))
              ELSE NULL END,
+         -- Held out of the queue until the evening hour (see above); cleared by
+         -- every other call.
+         retry_hold_until  = $11::timestamptz,
+         -- The evening call is the same caller's: a lead nobody owns goes to
+         -- the caller who rang it, so it is not handed to somebody else.
+         assigned_to       = CASE WHEN $11::timestamptz IS NOT NULL AND assigned_to IS NULL AND $12::uuid IS NOT NULL
+                                  THEN $12::uuid ELSE assigned_to END,
+         assigned_at       = CASE WHEN $11::timestamptz IS NOT NULL AND assigned_to IS NULL AND $12::uuid IS NOT NULL
+                                  THEN NOW() ELSE assigned_at END,
          follow_up_note    = CASE WHEN $4::timestamptz IS NOT NULL THEN $6 ELSE follow_up_note END,
          do_not_call       = do_not_call OR $7::boolean,
          -- "They said they would pay by the QR I just sent."
@@ -2742,8 +2805,10 @@ export async function logCallForLead(
         str(b.follow_up_note, 500),
         disposition === 'do_not_call',
         leadId,
-        retryAt,
+        bookAt,
         disposition === 'will_pay_qr',
+        eveningAt,
+        user?.role === 'caller' ? user.userId ?? null : null,
       ]
     );
 
@@ -2759,7 +2824,7 @@ export async function logCallForLead(
     // their day (FOLLOW_UP_LISTED). Which of the two it was is read from
     // last_outcome, not stored.
     const bookedNow = updated.rows[0].next_follow_up_at as Date | null;
-    const systemChose = schedules && !followUp && !!bookedNow && +new Date(bookedNow) === +retryAt;
+    const systemChose = schedules && !followUp && !!bookedNow && +new Date(bookedNow) === +bookAt;
     await client.query(
       `UPDATE leads SET follow_up_auto = $2,
               -- Strictly after the call that closed it (that call must not count
@@ -3640,6 +3705,16 @@ router.delete('/activities/:id', async (req, res) => {
     // date back is itself a change of date, which clears the flag.
     if (Object.prototype.hasOwnProperty.call(before, 'follow_up_auto')) {
       await client.query(`UPDATE leads SET follow_up_auto = $2 WHERE id = $1`, [a.lead_id, before.follow_up_auto === true]);
+    }
+
+    // The same-day evening retry's hold, and the owner it may have set.
+    if (Object.prototype.hasOwnProperty.call(before, 'retry_hold_until')) {
+      await client.query(`UPDATE leads SET retry_hold_until = $2, assigned_to = $3, assigned_at = $4 WHERE id = $1`, [
+        a.lead_id,
+        before.retry_hold_until ?? null,
+        before.assigned_to ?? null,
+        before.assigned_at ?? null,
+      ]);
     }
 
     // What the call did outside the lead row.

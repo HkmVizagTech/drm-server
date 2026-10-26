@@ -150,11 +150,23 @@ router.get('/dashboard', async (_req, res) => {
       WHERE created_at >= date_trunc('month', NOW()) - INTERVAL '1 month'
         AND created_at <  date_trunc('month', NOW())
     `),
+    // "Recurring / month" is the MONTHLY EQUIVALENT of every active subscription:
+    // a quarterly one counts a third of its amount, a yearly one a twelfth. It used
+    // to add up monthly ones only, so any other frequency vanished from the card.
+    // Donors hidden as test donors are left out, as in every other figure here
+    // (live_people / live_donations) - and as on the Subscriptions screen.
+    // A site's 'pending' subscription (set up, never charged) is not recurring money
+    // yet; DRM's status folds it into 'active', site_status keeps the difference.
     pool.query(`
-      SELECT COUNT(*) FILTER (WHERE status = 'active') AS active_count,
-             COALESCE(SUM(amount) FILTER (WHERE status = 'active' AND frequency = 'monthly'), 0) AS monthly_value,
-             COUNT(*) FILTER (WHERE status = 'paused') AS paused_count
-      FROM subscriptions
+      SELECT COUNT(*) FILTER (WHERE s.status = 'active' AND s.site_status IS DISTINCT FROM 'pending') AS active_count,
+             COALESCE(SUM(CASE s.frequency
+                            WHEN 'monthly'   THEN s.amount
+                            WHEN 'quarterly' THEN s.amount / 3
+                            WHEN 'yearly'    THEN s.amount / 12
+                            ELSE 0 END) FILTER (WHERE s.status = 'active' AND s.site_status IS DISTINCT FROM 'pending'), 0) AS monthly_value,
+             COUNT(*) FILTER (WHERE s.status = 'paused') AS paused_count
+      FROM subscriptions s
+      JOIN live_people p ON p.id = s.person_id
     `),
     pool.query(`
       SELECT

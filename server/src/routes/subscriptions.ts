@@ -28,7 +28,8 @@ function buildSubscriptionFilters(
 }
 
 const SUBSCRIPTION_SELECT = `s.*, p.name as donor_name, p.phone as donor_phone`;
-const SUBSCRIPTION_FROM = `FROM subscriptions s JOIN people p ON s.person_id = p.id`;
+// Donors hidden as test donors are not listed, so the screen agrees with the dashboard card.
+const SUBSCRIPTION_FROM = `FROM subscriptions s JOIN people p ON s.person_id = p.id AND p.hidden_at IS NULL`;
 
 // List subscriptions with filters
 router.get('/', async (req, res) => {
@@ -45,7 +46,7 @@ router.get('/', async (req, res) => {
        ${f.where} ORDER BY s.created_at DESC LIMIT $${f.next} OFFSET $${f.next + 1}`,
       values
     ),
-    pool.query(`SELECT COUNT(*) FROM subscriptions s ${f.where}`, f.values),
+    pool.query(`SELECT COUNT(*) ${SUBSCRIPTION_FROM} ${f.where}`, f.values),
   ]);
 
   res.json({ subscriptions: data.rows, total: Number(count.rows[0].count) });

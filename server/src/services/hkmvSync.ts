@@ -497,14 +497,23 @@ async function upsertSubscription(
 ): Promise<void> {
   const status = hkmvMappers.SUBSCRIPTION_STATUS_MAP[s.status] || 'active';
   await client.query(
-    `INSERT INTO subscriptions (person_id, amount, frequency, purpose, status, gateway_subscription_id, start_date, external_ref, source_site)
-     VALUES ($1, $2, 'monthly', $3, $4, $5, $6, $7, $8)
+    `INSERT INTO subscriptions (person_id, amount, frequency, purpose, status, gateway_subscription_id, start_date, external_ref, source_site,
+                                site_status, last_charged_at, charge_count)
+     VALUES ($1, $2, 'monthly', $3, $4, $5, $6, $7, $8, $9, $10, $11)
      ON CONFLICT (external_ref) DO UPDATE SET
-       amount      = EXCLUDED.amount,
-       status      = EXCLUDED.status,
-       source_site = EXCLUDED.source_site,
-       updated_at  = NOW()`,
-    [personId, s.amount, hkmvMappers.truncate30(s.sevaName), status, s.subscriptionId, s.startedAt, s.subscriptionId, site]
+       amount          = EXCLUDED.amount,
+       status          = EXCLUDED.status,
+       source_site     = EXCLUDED.source_site,
+       site_status     = EXCLUDED.site_status,
+       last_charged_at = EXCLUDED.last_charged_at,
+       charge_count    = EXCLUDED.charge_count,
+       updated_at      = NOW()`,
+    [
+      personId, s.amount, hkmvMappers.truncate30(s.sevaName), status, s.subscriptionId, s.startedAt, s.subscriptionId, site,
+      String(s.status ?? '').slice(0, 20) || null,
+      s.lastChargedAt ?? null,
+      Number.isFinite(Number(s.chargeCount)) ? Number(s.chargeCount) : null,
+    ]
   );
 }
 

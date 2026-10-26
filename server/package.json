@@ -29,6 +29,7 @@
     "test:nearlysplit": "tsx scripts/test-nearly-gave-split.ts",
     "test:given": "tsx scripts/test-given-filter.ts",
     "test:retry": "tsx scripts/test-retry-morning.ts",
+    "test:eveningretry": "tsx scripts/test-evening-retry.ts",
     "test:dialer": "tsx scripts/test-dialer.ts",
     "test:sankalpreplace": "tsx scripts/test-sankalpam-replace.ts",
     "test:incoming": "tsx scripts/test-incoming.ts",
