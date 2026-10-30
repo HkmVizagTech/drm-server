@@ -624,6 +624,8 @@ router.post('/offline', async (req, res) => {
   // include the new donation (DCC still working, or the read lagging the write),
   // and reporting success then would have the UI claim a row that isn't there.
   let synced = false;
+  // The credit written below for a caller's receipt, so the Collected list can show it with its real method.
+  let handCreditId: string | null = null;
   try {
     const snapshot = await fetchDonorSnapshot(siteKey, String(donor_mobile));
     if (snapshot?.found) {
@@ -725,7 +727,7 @@ router.post('/offline', async (req, res) => {
            figure is the callers' own. Never fatal: the receipt is already out. */
         if (marked.rows[0] && req.user?.role === 'caller' && req.user.userId) {
           try {
-            await recordCredit({
+            const credit = await recordCredit({
               userId: req.user.userId,
               amount: issued.amount ?? Number(amount),
               kind: 'offline',
@@ -735,6 +737,7 @@ router.post('/offline', async (req, res) => {
               note: `Receipt raised by hand (${String(payment_mode)})`,
               createdBy: req.user.userId,
             });
+            if (credit) handCreditId = credit.id;
           } catch (e) {
             console.error('donations.offline credit failed (non-fatal):', (e as Error).message);
           }
@@ -769,6 +772,47 @@ router.post('/offline', async (req, res) => {
     }
   } catch (e) {
     console.error('donations.offline receipt number lookup failed (non-fatal):', (e as Error).message);
+  }
+
+  /* SHOWN IN COLLECTED WITH ITS REAL METHOD.
+
+     The Collected list is built from 'offline' credits plus a collections row
+     that says who paid, how and with what reference. A credit with no such
+     row printed as an anonymous UPI line - a bank transfer read "collected by
+     PhonePe". So the credit above gets its row, carrying the method the
+     caller chose (cash, upi, cheque, bank), the reference and the receipt
+     that was just raised. Never fatal. */
+  if (handCreditId) {
+    try {
+      await pool.query(
+        `INSERT INTO collections
+           (credit_id, donor_name, donor_phone, donor_email, donor_pan, donor_address, purpose, method, reference,
+            sevak_name, sevak_phone, receipt_status, receipt_number, receipt_site, external_donation_id, receipt_at,
+            receipt_by, recorded_by, seva_catalog_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'issued',$12,$13,$14,NOW(),$15,$15,$16)
+         ON CONFLICT (credit_id) DO NOTHING`,
+        [
+          handCreditId,
+          typedName.slice(0, 160),
+          String(donor_mobile).replace(/\D/g, '').slice(-10),
+          donor_email ? String(donor_email).trim().slice(0, 160) : null,
+          want_certificate && pan_number ? String(pan_number).trim().toUpperCase().slice(0, 12) : null,
+          prasadam_address ? String(prasadam_address).trim() : null,
+          (chosenSeva ? chosenSeva.name : seva_name ? String(seva_name).trim() : '').slice(0, 120) || null,
+          String(payment_mode),
+          ref ? String(ref).slice(0, 80) : null,
+          sevakName ? String(sevakName).slice(0, 160) : null,
+          sevakMobile ? String(sevakMobile).slice(0, 15) : null,
+          receiptNumber ? String(receiptNumber).slice(0, 80) : null,
+          siteKey,
+          issued.externalId ? String(issued.externalId).slice(0, 80) : null,
+          req.user?.userId ?? null,
+          chosenSeva?.id ?? null,
+        ]
+      );
+    } catch (e) {
+      console.error('donations.offline collected row failed (non-fatal):', (e as Error).message);
+    }
   }
 
   res.status(201).json({
