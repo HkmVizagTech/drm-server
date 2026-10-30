@@ -16,7 +16,8 @@ import { upsertDonorSnapshot } from '../services/hkmvSync';
 import { canonPage, canonPageSql, groupPredicateSql, isPageGroup } from '../utils/pageGroups';
 import { displayPurposeSql } from '../utils/donationLabel';
 import { registerName } from '../services/personNames';
-import { resolveSeva, dccSevaOf } from '../services/sevaCatalog';
+import { recordCredit } from '../services/credits';
+import { resolveSeva, dccSevaOf, dccAccountTypeOf } from '../services/sevaCatalog';
 import {
   describeFilters,
   sendExport,
@@ -590,6 +591,7 @@ router.post('/offline', async (req, res) => {
       sevaName: chosenSeva ? chosenSeva.name : seva_name ? String(seva_name).trim() : null,
       sevaCode: siteKey === 'hkmv' && chosenSeva ? chosenSeva.code : null,
       dccSeva: siteKey === 'hkmv' && chosenSeva ? dccSevaOf(chosenSeva) : null,
+      dccAccountType: siteKey === 'hkmv' && chosenSeva ? dccAccountTypeOf(chosenSeva) : null,
       panNumber: pan_number ? String(pan_number).trim() : null,
       wantCertificate: !!want_certificate,
       wantPrasadam: !!want_prasadam,
@@ -709,6 +711,34 @@ router.post('/offline', async (req, res) => {
           ]
         );
         synced = (marked.rowCount ?? 0) > 0;
+
+        /* THE CALLER WHO RAISED IT IS CREDITED.
+
+           A receipt raised by hand - cash, UPI, cheque or a bank transfer -
+           wrote the donation and credited nobody, so it never reached Team
+           activity's "Money credited" or the caller's own figures. Only the QR,
+           link and Collected paths credited a caller. Now a caller's receipt is
+           credited to them, as 'offline' money: unverified until an admin or
+           accountant reconciles it, like every other amount a person says
+           arrived. Staff (admin, accountant, coordinator) raising one are not
+           credited - they are often entering it for somebody else, and the
+           figure is the callers' own. Never fatal: the receipt is already out. */
+        if (marked.rows[0] && req.user?.role === 'caller' && req.user.userId) {
+          try {
+            await recordCredit({
+              userId: req.user.userId,
+              amount: issued.amount ?? Number(amount),
+              kind: 'offline',
+              occurredAt: new Date(),
+              donationId: marked.rows[0].id,
+              personId: result.personId,
+              note: `Receipt raised by hand (${String(payment_mode)})`,
+              createdBy: req.user.userId,
+            });
+          } catch (e) {
+            console.error('donations.offline credit failed (non-fatal):', (e as Error).message);
+          }
+        }
       }
     }
   } catch (err) {

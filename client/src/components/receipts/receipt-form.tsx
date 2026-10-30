@@ -25,6 +25,8 @@ export interface ReceiptValues {
   address: string;
   wantPrasadam: boolean;
   site: "" | "hkmv" | "annadan";
+  /** HKM Vizag only: HKMI (DCC account 4, the default) or TSC (account 5). The seva picked decides it on the server. */
+  account: "HKMI" | "TSC";
   myDonor: boolean;
 }
 
@@ -40,6 +42,7 @@ export const emptyReceipt = (): ReceiptValues => ({
   address: "",
   wantPrasadam: false,
   site: "",
+  account: "HKMI",
   myDonor: false,
 });
 
@@ -83,6 +86,14 @@ export function DonorFields({
   // Picked from the list unless the receipt is for annadan, which takes a typed seva. With no
   // site chosen yet the list is shown too, so a QR receipt never opens on a typed field.
   const pickSeva = v.site !== "annadan" && (!ready || sevas.length > 0);
+  // A receipt reopened with a seva already chosen (a QR retried) shows that seva's account.
+  const savedAccount = sevas.find((s) => s.id === v.sevaCatalogId)?.accountType;
+  useEffect(() => {
+    if (savedAccount && (savedAccount === "TSC" || savedAccount === "HKMI") && savedAccount !== v.account) {
+      set({ account: savedAccount });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedAccount]);
   return (
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2">
@@ -102,9 +113,23 @@ export function DonorFields({
         <Field label="E-mail ID (optional)" htmlFor="r-email">
           <Input id="r-email" type="email" value={v.email} onChange={(e) => set({ email: e.target.value.toLowerCase() })} />
         </Field>
+        {pickSeva && v.site === "hkmv" && sevas.some((s) => s.accountType === "TSC") && (
+          <Field label="Account" className="sm:col-span-2">
+            <SegmentedControl
+              solid
+              options={[
+                { value: "HKMI", label: "HKMI" },
+                { value: "TSC", label: "TSC" },
+              ]}
+              value={v.account}
+              onChange={(account) => set({ account: account as ReceiptValues["account"], sevaCatalogId: "", seva: "" })}
+            />
+          </Field>
+        )}
         {pickSeva ? (
           <Field label="Seva" required className="sm:col-span-2">
             <SevaPicker
+              account={v.site === "hkmv" || v.site === "" ? v.account : "HKMI"}
               value={v.sevaCatalogId}
               onChange={(id, name) => set({ sevaCatalogId: id, seva: name })}
             />
@@ -148,12 +173,13 @@ export function DonorFields({
       {showSite && (
         <Field label="Receipt from">
           <SegmentedControl
+            solid
             options={[
               { value: "hkmv", label: "HKM Vizag" },
               { value: "annadan", label: "Annadan" },
             ]}
             value={v.site}
-            onChange={(site) => set({ site: site as ReceiptValues["site"] })}
+            onChange={(site) => set({ site: site as ReceiptValues["site"], account: "HKMI" })}
           />
         </Field>
       )}

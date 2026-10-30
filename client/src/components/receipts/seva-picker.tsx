@@ -24,6 +24,8 @@ export interface CatalogSeva {
   subCode: string | null;
   subCodeId: number | null;
   name: string;
+  /** "HKMI" or "TSC": which DCC account the seva belongs to (4 or 5). */
+  accountType?: string;
 }
 
 // One fetch shared by every form on the page; a form opened a second time does not wait again.
@@ -73,14 +75,18 @@ export function SevaPicker({
   value,
   onChange,
   invalid = false,
+  account = "HKMI",
 }: {
+  /** Which account's sevas to offer. TSC has a short flat list; HKMI has categories and sub sevas. */
+  account?: "HKMI" | "TSC";
   /** The catalog id picked, or "". */
   value: string;
   /** The id and the name to show/print, or "" and "" when cleared. */
   onChange: (id: string, name: string) => void;
   invalid?: boolean;
 }) {
-  const { sevas, ready } = useSevaCatalog();
+  const { sevas: all, ready } = useSevaCatalog();
+  const sevas = useMemo(() => all.filter((s) => (s.accountType ?? "HKMI") === account), [all, account]);
   const picked = useMemo(() => sevas.find((s) => s.id === value) ?? null, [sevas, value]);
   const [category, setCategory] = useState("");
   const [subCategory, setSubCategory] = useState("");
@@ -112,6 +118,28 @@ export function SevaPicker({
 
   if (!ready) return <p className="text-sm text-ink-muted">Loading sevas…</p>;
   if (!sevas.length) return null; // the form shows its typed field instead
+
+  // TSC: one drop-down, each seva with its code in brackets - "Subhojanam (ANBJ)".
+  if (account === "TSC") {
+    return (
+      <Select
+        value={picked?.id ?? ""}
+        onChange={(id) => {
+          const s = sevas.find((x) => x.id === id);
+          onChange(s?.id ?? "", s?.name ?? "");
+        }}
+        placeholder="Seva…"
+        ariaLabel="TSC seva"
+        className={invalid ? "rounded-control ring-2 ring-danger/40" : ""}
+      >
+        {sevas.map((s) => (
+          <option key={s.id} value={s.id}>
+            {`${s.subCategory} (${s.code})`}
+          </option>
+        ))}
+      </Select>
+    );
+  }
 
   return (
     <div className="grid gap-2 sm:grid-cols-2">

@@ -32,6 +32,14 @@ export interface DccSeva {
   subCategoryCode: number | string;
 }
 
+/**
+ * The account type DCC is told for a seva: 5 for a TSC seva, 4 for everything else
+ * (HKMI). Decided here from the catalog row, so a browser cannot choose it.
+ */
+export function dccAccountTypeOf(s: Seva | null | undefined): number {
+  return s?.accountType === 'TSC' ? 5 : 4;
+}
+
 export function dccSevaOf(s: Seva): DccSeva {
   return { category: s.categoryId, subCategory: s.subCategoryId, subCategoryCode: s.subCodeId ?? s.code };
 }
@@ -78,7 +86,8 @@ export async function resolveSeva(id: unknown, db: Db = pool, opts: { allowInact
  * or switched off is undone by a restart.
  */
 export async function seedSevaCatalog(db: Db = pool): Promise<number> {
-  const have = await db.query('SELECT 1 FROM seva_catalog LIMIT 1');
+  // The HKMI list only: the TSC sevas are put in by the schema, so a catalog with just those is still empty here.
+  const have = await db.query("SELECT 1 FROM seva_catalog WHERE account_type = 'HKMI' LIMIT 1");
   if (have.rowCount) return 0;
   let added = 0;
   for (const r of seedRows()) {
@@ -86,7 +95,7 @@ export async function seedSevaCatalog(db: Db = pool): Promise<number> {
       `INSERT INTO seva_catalog
          (category, category_id, code, sub_category, sub_category_id, sub_code, sub_code_id, is_tax_exempted, source)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'seed')
-       ON CONFLICT (sub_category_id, COALESCE(sub_code_id, 0)) DO NOTHING`,
+       ON CONFLICT (account_type, sub_category_id, COALESCE(sub_code_id, 0)) DO NOTHING`,
       [r.category, r.categoryId, r.code, r.subCategory, r.subCategoryId, r.subCode, r.subCodeId, r.taxExempted]
     );
     added += res.rowCount ?? 0;

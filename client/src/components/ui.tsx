@@ -1153,12 +1153,15 @@ export function SegmentedControl<T extends string>({
   onChange,
   size = "md",
   className = "",
+  solid = false,
 }: {
   options: { value: T; label: string; icon?: IconName }[];
   value: T;
   onChange: (v: T) => void;
   size?: "sm" | "md";
   className?: string;
+  /** The chosen option in the primary colour (like a primary button) instead of a raised white chip. */
+  solid?: boolean;
 }) {
   const pad = size === "sm" ? "px-2.5 py-1 text-xs" : "px-3 py-1.5 text-sm";
   return (
@@ -1175,7 +1178,9 @@ export function SegmentedControl<T extends string>({
             onClick={() => onChange(o.value)}
             className={`inline-flex items-center gap-1.5 rounded-[7px] font-medium transition-all ${pad} ${FOCUS} ${
               on
-                ? "bg-surface text-brand-800 shadow-flat"
+                ? solid
+                  ? "bg-brand-600 text-white shadow-button"
+                  : "bg-surface text-brand-800 shadow-flat"
                 : "text-ink-muted hover:text-ink-soft"
             }`}
           >

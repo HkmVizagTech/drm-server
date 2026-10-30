@@ -80,11 +80,12 @@ function clean(b: Record<string, unknown>): { fields?: Fields; error?: string } 
  * A sub category id names ONE sub category: the same id with a different name,
  * code or category is a mistake that would send DCC the wrong code.
  */
-async function conflictingSubCategory(f: Fields, ignoreId?: string): Promise<string | null> {
+async function conflictingSubCategory(f: Fields, ignoreId?: string, account = 'HKMI'): Promise<string | null> {
+  // Ids are only unique within an account (HKMI or TSC), so only that account is compared.
   const r = await pool.query(
     `SELECT category, category_id, code, sub_category FROM seva_catalog
-      WHERE sub_category_id = $1 ${ignoreId ? 'AND id <> $2' : ''} LIMIT 1`,
-    ignoreId ? [f.subCategoryId, ignoreId] : [f.subCategoryId]
+      WHERE sub_category_id = $1 AND account_type = ${ignoreId ? '$3' : '$2'} ${ignoreId ? 'AND id <> $2' : ''} LIMIT 1`,
+    ignoreId ? [f.subCategoryId, ignoreId, account] : [f.subCategoryId, account]
   );
   const o = r.rows[0];
   if (!o) return null;
@@ -134,7 +135,7 @@ router.patch('/:id', authorize('admin'), async (req, res) => {
     };
     const { fields: f, error } = clean(merged);
     if (!f) return res.status(400).json({ error });
-    const clash = await conflictingSubCategory(f, id);
+    const clash = await conflictingSubCategory(f, id, o.account_type);
     if (clash) return res.status(409).json({ error: clash });
     const r = await pool.query(
       `UPDATE seva_catalog
@@ -202,7 +203,8 @@ router.post('/import', authorize('admin'), async (req, res) => {
   let same = 0;
 
   try {
-    const existing = await pool.query('SELECT * FROM seva_catalog');
+    // The sheet is the HKMI list; TSC sevas are not compared with it or touched by it.
+    const existing = await pool.query(`SELECT * FROM seva_catalog WHERE account_type = 'HKMI'`);
     const byKey = new Map(existing.rows.map((r) => [`${r.sub_category_id}:${r.sub_code_id ?? 0}`, r]));
     const subCats = new Map<number, string>();
     for (const r of existing.rows) subCats.set(r.sub_category_id, `${r.category}|${r.category_id}|${r.code}|${r.sub_category}`);

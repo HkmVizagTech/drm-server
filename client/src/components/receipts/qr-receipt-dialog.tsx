@@ -463,6 +463,7 @@ export function ReceiptDialog({
         address,
         wantPrasadam: !!d.want_prasadam,
         site: (d.site_for_receipt as ReceiptValues["site"]) ?? "",
+        account: "HKMI",
         myDonor: false,
       });
       onCreditKnown(d.id, d.credit_id ? { user_id: d.credit_user_id, name: d.credit_user_name } : null);

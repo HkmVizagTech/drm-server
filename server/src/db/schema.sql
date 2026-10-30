@@ -3006,3 +3006,24 @@ ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS site_status VARCHAR(20);
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_charged_at TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS charge_count INTEGER;
 
+/* TSC receipts. The main site sends DCC an account type with every donation: 4
+   for the HKMI sevas, 5 for TSC. DRM works the number out from the seva chosen
+   (seva_catalog.account_type), never from what the browser says.
+
+   A seva is identified by its account as well as its ids: TSC reuses seva codes
+   that HKMI has (ANGE, CRK) under ids of its own, and DCC's ids are only
+   unique within an account type. */
+DROP INDEX IF EXISTS idx_seva_catalog_identity;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_seva_catalog_identity_v2
+  ON seva_catalog (account_type, sub_category_id, COALESCE(sub_code_id, 0));
+
+-- The TSC sevas, as DCC knows them (Seva Category ID 8). Inserted once; an admin's
+-- edit or switch-off of any of them is never undone by a restart.
+INSERT INTO seva_catalog (account_type, category, category_id, code, sub_category, sub_category_id, sub_code, sub_code_id, source) VALUES
+  ('TSC', 'TSC', 8, 'ANBJ', 'Subhojanam',        24, NULL, NULL, 'seed'),
+  ('TSC', 'TSC', 8, 'ANGE', 'Annadanam General', 25, NULL, NULL, 'seed'),
+  ('TSC', 'TSC', 8, 'CRK',  'Covid Relief Kits', 26, NULL, NULL, 'seed'),
+  ('TSC', 'TSC', 8, 'CVA',  'COVID-21 Annadanam',66, NULL, NULL, 'seed'),
+  ('TSC', 'TSC', 8, 'ANGD', 'Annadanam GD',      65, NULL, NULL, 'seed')
+ON CONFLICT (account_type, sub_category_id, COALESCE(sub_code_id, 0)) DO NOTHING;
+

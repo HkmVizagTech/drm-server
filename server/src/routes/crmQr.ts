@@ -32,7 +32,7 @@ import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import * as storage from '../services/storage';
 import { createOfflineDonation, resendReceipt, type SiteKey } from '../services/hkmvClient';
-import { resolveSeva, dccSevaOf } from '../services/sevaCatalog';
+import { resolveSeva, dccSevaOf, dccAccountTypeOf } from '../services/sevaCatalog';
 import {
   describeFilters,
   sendExport,
@@ -1176,6 +1176,7 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
       sevaName: chosenSeva?.name || p.purpose || p.qr_purpose || undefined,
       sevaCode: site === 'hkmv' && chosenSeva ? chosenSeva.code : null,
       dccSeva: site === 'hkmv' && chosenSeva ? dccSevaOf(chosenSeva) : null,
+      dccAccountType: site === 'hkmv' && chosenSeva ? dccAccountTypeOf(chosenSeva) : null,
       // 80G only when it was asked for (or, on rows from before the form
       // asked, when there is a PAN), and the PAN only with it. A certificate
       // without a PAN is no use to the donor.

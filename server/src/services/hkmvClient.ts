@@ -426,6 +426,11 @@ export interface OfflineDonationInput {
    * actually chosen. A site that does not read them ignores them, as with sevaCode.
    */
   dccSeva?: { category: number; subCategory: number; subCategoryCode: number | string } | null;
+  /**
+   * The DCC account type: 4 (HKMI) or 5 (TSC). Sent for HKM Vizag only, and only
+   * when a seva was picked from DRM's list - the main site uses 4 when it is absent.
+   */
+  dccAccountType?: number | null;
   panNumber?: string | null;
   wantCertificate?: boolean;
   wantPrasadam?: boolean;
@@ -680,6 +685,7 @@ export function buildOfflineBody(site: SiteKey, input: OfflineDonationInput): Re
           dccSevaSubCategoryCode: input.dccSeva.subCategoryCode,
         }
       : {}),
+    ...(input.dccAccountType ? { dccAccountType: input.dccAccountType } : {}),
     type: input.sevaName || 'Manual Entry',
     panNumber: input.panNumber ? input.panNumber.trim().toUpperCase() : undefined,
     certificate: !!input.wantCertificate,
