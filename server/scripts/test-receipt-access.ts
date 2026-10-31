@@ -1,5 +1,5 @@
-// Who may download a donor's receipt: admins and accountants any; a caller only receipts of money
-// that is theirs (raised by them, or credited to them); nobody else.
+// Who may download a donor's receipt: admins, accountants and callers (who read the whole Donations
+// list) - any donation; every other role is refused.
 //
 // Never reaches a donation site: it refuses to run unless the site addresses are blank, and only
 // reads the status code (403 = refused; anything else = let through to the lookup).
@@ -61,8 +61,8 @@ async function main() {
   check('an accountant is let through', (await status(nobodys, U.acct, 'accountant')) !== 403);
   check('a caller may download a receipt they raised', (await status(raisedByAna, U.ana, 'caller')) !== 403);
   check('a caller may download one credited to them', (await status(creditedToBhavin, U.bhavin, 'caller')) !== 403);
-  check("a caller may not download a colleague's", (await status(raisedByAna, U.bhavin, 'caller')) === 403);
-  check('nor one that is nobody\'s', (await status(nobodys, U.ana, 'caller')) === 403);
+  check("a caller may download a colleague's - they see it in Donations", (await status(raisedByAna, U.bhavin, 'caller')) !== 403);
+  check("or one that is nobody's", (await status(nobodys, U.ana, 'caller')) !== 403);
   check('a coordinator is still refused', (await status(raisedByAna, U.coord, 'volunteer_coordinator')) === 403);
 
   server.close();
