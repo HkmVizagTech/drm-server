@@ -481,7 +481,7 @@ export function ReceiptDialog({
   }, [load]);
 
   const siteFixed = !!detail?.site_for_receipt;
-  const problem = receiptProblems(v, { needSite: !siteFixed });
+  const problem = receiptProblems(v, { needSite: !siteFixed, listForAnnadan: true });
 
   async function unlink() {
     setBusy(true);
@@ -624,7 +624,7 @@ export function ReceiptDialog({
           )}
           {error && <Alert tone="danger">{error}</Alert>}
           {shown && problem && !error && <Alert tone="warn">{problem}</Alert>}
-          <DonorFields v={v} set={set} showPrasadam showSite={!siteFixed} showMyDonor={false} />
+          <DonorFields v={v} set={set} showPrasadam showSite={!siteFixed} showMyDonor={false} showAccount={false} listForAnnadan />
           <p className="text-xs text-ink-muted">Check the name and number. The receipt is sent at once.</p>
         </div>
       )}

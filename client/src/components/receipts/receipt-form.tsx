@@ -50,7 +50,7 @@ const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 export const digits10 = (v: string) => v.replace(/\D/g, "").slice(-10);
 
 /** What must be filled before Send is allowed. */
-export function receiptProblems(v: ReceiptValues, opts: { needSite: boolean }): string | null {
+export function receiptProblems(v: ReceiptValues, opts: { needSite: boolean; listForAnnadan?: boolean }): string | null {
   if (!v.donorName.trim()) return "Enter the Donor Name.";
   if (digits10(v.mobile).length !== 10) return "Enter a 10-digit Mobile Number.";
   if (v.want80G && !PAN_RE.test(v.pan.trim().toUpperCase())) return "Enter a valid PAN Number.";
@@ -58,7 +58,7 @@ export function receiptProblems(v: ReceiptValues, opts: { needSite: boolean }): 
   if (opts.needSite && !v.site) return "Choose the receipt site.";
   // The main site's DCC wants a Seva Code, so a seva must be picked - once the list has
   // loaded. If it could not, the typed seva below is used and nobody is blocked.
-  if (v.site !== "annadan" && sevaListAvailable() && !v.sevaCatalogId) return "Choose the Seva.";
+  if ((v.site !== "annadan" || v.account === "TSC" || opts.listForAnnadan) && sevaListAvailable() && !v.sevaCatalogId) return "Choose the Seva.";
   return null;
 }
 
@@ -71,11 +71,17 @@ export function DonorFields({
   showMyDonor,
   myDonorLocked,
   lookupHint,
+  showAccount = true,
+  listForAnnadan = false,
 }: {
   v: ReceiptValues;
   set: (patch: Partial<ReceiptValues>) => void;
   showPrasadam: boolean;
   showSite: boolean;
+  /** The HKMI / TSC choice. Off in the QR popup, which offers DRM's own seva list only. */
+  showAccount?: boolean;
+  /** Pick the seva from DRM's list even for an Annadan receipt, instead of typing it. */
+  listForAnnadan?: boolean;
   showMyDonor: boolean;
   myDonorLocked?: string | null;
   lookupHint?: string | null;
@@ -85,11 +91,12 @@ export function DonorFields({
   const { sevas, ready } = useSevaCatalog();
   // Picked from the list unless the receipt is for annadan, which takes a typed seva. With no
   // site chosen yet the list is shown too, so a QR receipt never opens on a typed field.
-  const pickSeva = v.site !== "annadan" && (!ready || sevas.length > 0);
+  const tsc = showAccount && v.account === "TSC";
+  const pickSeva = (v.site !== "annadan" || tsc || listForAnnadan) && (!ready || sevas.length > 0);
   // A receipt reopened with a seva already chosen (a QR retried) shows that seva's account.
   const savedAccount = sevas.find((s) => s.id === v.sevaCatalogId)?.accountType;
   useEffect(() => {
-    if (savedAccount && (savedAccount === "TSC" || savedAccount === "HKMI") && savedAccount !== v.account) {
+    if (showAccount && savedAccount && (savedAccount === "TSC" || savedAccount === "HKMI") && savedAccount !== v.account) {
       set({ account: savedAccount });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -113,7 +120,7 @@ export function DonorFields({
         <Field label="E-mail ID (optional)" htmlFor="r-email">
           <Input id="r-email" type="email" value={v.email} onChange={(e) => set({ email: e.target.value.toLowerCase() })} />
         </Field>
-        {pickSeva && v.site === "hkmv" && sevas.some((s) => s.accountType === "TSC") && (
+        {showAccount && pickSeva && v.site === "hkmv" && sevas.some((s) => s.accountType === "TSC") && (
           <Field label="Account" className="sm:col-span-2">
             <SegmentedControl
               solid
@@ -129,7 +136,7 @@ export function DonorFields({
         {pickSeva ? (
           <Field label="Seva" required className="sm:col-span-2">
             <SevaPicker
-              account={v.site === "hkmv" || v.site === "" ? v.account : "HKMI"}
+              account={showAccount && (v.site !== "annadan" || tsc) ? v.account : "HKMI"}
               value={v.sevaCatalogId}
               onChange={(id, name) => set({ sevaCatalogId: id, seva: name })}
             />
