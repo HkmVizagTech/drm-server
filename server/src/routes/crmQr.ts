@@ -2610,9 +2610,16 @@ router.post('/qr/payments/:id/unlink', authenticate, async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'The receipt is already sent, so this link stays.' });
     }
-    if (!elevated && pay.linked_by !== me) {
+    // A caller may correct a wrong person on money that is theirs: one they linked, one
+    // credited to them, or one nobody has been credited for. Not one credited to a
+    // colleague - undoing that would take the credit off them. An admin or accountant
+    // may unlink any.
+    const owner =
+      (await client.query(`SELECT user_id FROM caller_credits WHERE qr_payment_id = $1 AND status = 'active' LIMIT 1`, [pay.id]))
+        .rows[0]?.user_id ?? null;
+    if (!elevated && !(pay.linked_by === me || owner === null || owner === me)) {
       await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'Only the person who linked it, or an admin, can unlink it.' });
+      return res.status(403).json({ error: 'This payment is counted for somebody else, so only they or an admin can change who paid.' });
     }
 
     await reverseCreditFor({ qrPaymentId: pay.id }, me, str(req.body?.reason, 300) ?? 'Unlinked: wrong person', client);

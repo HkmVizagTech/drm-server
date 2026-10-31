@@ -965,9 +965,33 @@ router.post('/:id/resend-receipt', async (req, res) => {
 // own comment says a download is a GET and cannot be told apart from reading a
 // page by method alone - "that is a separate check on those handlers". This is
 // that check. A caller has no reason to pull another donor's tax certificate.
-router.get('/:id/receipt-file', authorize('admin', 'accountant'), async (req, res) => {
+router.get('/:id/receipt-file', async (req, res) => {
   const id = String(req.params.id);
   try {
+    // Admins and accountants may download any. A caller may download the receipts of money
+    // that is theirs - raised by them, or credited to them (a QR payment, a link, a
+    // collection) - and nobody else's. Anyone else is refused, as before.
+    const role = req.user?.role;
+    if (role !== 'admin' && role !== 'accountant') {
+      const me = req.user?.userId ?? null;
+      const mine =
+        role === 'caller' && !!me &&
+        (
+          await pool.query(
+            `SELECT 1 FROM donations d
+              WHERE d.id = $1
+                AND (d.entered_by::text = $2
+                     OR EXISTS (SELECT 1 FROM caller_credits c
+                                 WHERE c.donation_id = d.id AND c.user_id = $2::uuid AND c.status = 'active')
+                     OR EXISTS (SELECT 1 FROM qr_payments p
+                                  JOIN caller_credits c ON c.qr_payment_id = p.id AND c.status = 'active' AND c.user_id = $2::uuid
+                                 WHERE p.external_donation_id = d.external_ref))
+              LIMIT 1`,
+            [id, me]
+          )
+        ).rows.length > 0;
+      if (!mine) return res.status(403).json({ error: 'Insufficient permissions' });
+    }
     const src = await receiptSourceForDonation(id);
     if (!src) {
       const exists = await pool.query('SELECT 1 FROM donations WHERE id = $1', [id]);

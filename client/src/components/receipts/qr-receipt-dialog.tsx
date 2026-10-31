@@ -615,7 +615,11 @@ export function ReceiptDialog({
                 <span className="text-ink-muted">· Counted for {detail.credit_user_name}</span>
               )}
               {/* Whoever linked it, or an admin - the server says the same. */}
-              {!receiptOut && (user?.role !== "caller" || detail.linked_by === currentUserId) && (
+              {!receiptOut &&
+                (user?.role !== "caller" ||
+                  detail.linked_by === currentUserId ||
+                  !detail.credit_user_id ||
+                  detail.credit_user_id === currentUserId) && (
                 <Button variant="ghost" size="xs" className="ml-auto" disabled={busy} onClick={() => void unlink()}>
                   Wrong person? Change
                 </Button>

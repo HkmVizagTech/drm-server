@@ -14,6 +14,7 @@
     "test:access": "tsx scripts/test-role-access.ts",
     "test:time": "tsx scripts/test-time-and-exports.ts",
     "test:credits": "tsx scripts/test-credits.ts",
+    "test:receiptaccess": "tsx scripts/test-receipt-access.ts",
     "test:sessions": "tsx scripts/test-sessions.ts",
     "test:calls": "tsx scripts/test-calls.ts",
     "test:payloads": "tsx scripts/test-site-payloads.ts",
