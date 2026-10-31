@@ -3019,11 +3019,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_seva_catalog_identity_v2
 
 -- The TSC sevas, as DCC knows them (Seva Category ID 8). Inserted once; an admin's
 -- edit or switch-off of any of them is never undone by a restart.
-INSERT INTO seva_catalog (account_type, category, category_id, code, sub_category, sub_category_id, sub_code, sub_code_id, source) VALUES
-  ('TSC', 'TSC', 8, 'ANBJ', 'Subhojanam',        24, NULL, NULL, 'seed'),
-  ('TSC', 'TSC', 8, 'ANGE', 'Annadanam General', 25, NULL, NULL, 'seed'),
-  ('TSC', 'TSC', 8, 'CRK',  'Covid Relief Kits', 26, NULL, NULL, 'seed'),
-  ('TSC', 'TSC', 8, 'CVA',  'COVID-21 Annadanam',66, NULL, NULL, 'seed'),
-  ('TSC', 'TSC', 8, 'ANGD', 'Annadanam GD',      65, NULL, NULL, 'seed')
+-- Only Subhojanam and Annadanam General are offered. The Covid ones (CRK, CVA) and ANGD
+-- start switched off - ANGD and CVA are also inactive in DCC itself.
+INSERT INTO seva_catalog (account_type, category, category_id, code, sub_category, sub_category_id, sub_code, sub_code_id, is_active, source) VALUES
+  ('TSC', 'TSC', 8, 'ANBJ', 'Subhojanam',        24, NULL, NULL, TRUE,  'seed'),
+  ('TSC', 'TSC', 8, 'ANGE', 'Annadanam General', 25, NULL, NULL, TRUE,  'seed'),
+  ('TSC', 'TSC', 8, 'CRK',  'Covid Relief Kits', 26, NULL, NULL, FALSE, 'seed'),
+  ('TSC', 'TSC', 8, 'CVA',  'COVID-21 Annadanam',66, NULL, NULL, FALSE, 'seed'),
+  ('TSC', 'TSC', 8, 'ANGD', 'Annadanam GD',      65, NULL, NULL, FALSE, 'seed')
 ON CONFLICT (account_type, sub_category_id, COALESCE(sub_code_id, 0)) DO NOTHING;
 
