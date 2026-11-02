@@ -3029,3 +3029,10 @@ INSERT INTO seva_catalog (account_type, category, category_id, code, sub_categor
   ('TSC', 'TSC', 8, 'ANGD', 'Annadanam GD',      65, NULL, NULL, FALSE, 'seed')
 ON CONFLICT (account_type, sub_category_id, COALESCE(sub_code_id, 0)) DO NOTHING;
 
+/* lead_activities.counts_as_attempt: false for the morning call of a same-day evening retry.
+   That call is a logged call - it counts in calls made and as not answered - but the attempt
+   is counted at the evening call that follows it, so one day's morning and evening calls are
+   one attempt toward call_attempts and the unanswered limit. True for every other call,
+   including all those before this existed. */
+ALTER TABLE lead_activities ADD COLUMN IF NOT EXISTS counts_as_attempt BOOLEAN NOT NULL DEFAULT TRUE;
+

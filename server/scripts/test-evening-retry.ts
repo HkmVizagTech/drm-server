@@ -154,6 +154,30 @@ async function main() {
   await post(`/api/crm/leads/${f}/call`, { disposition: 'no_answer' });
   check('kept where it was', (await when(f)) === before, { before, after: await when(f) });
 
+  console.log('\n--- the morning call is not an attempt; the evening call is ---');
+  await setScope('all');
+  await setHours(24, 24);
+  const g1 = await add('9820000009');
+  const attempts = async (id: string) => (await pool.query(`SELECT call_attempts, status FROM leads WHERE id = $1`, [id])).rows[0];
+  const calls = async (id: string) => (await pool.query(`SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE connected IS NOT TRUE)::int unanswered FROM lead_activities WHERE lead_id = $1 AND kind = 'call'`, [id])).rows[0];
+  await post(`/api/crm/leads/${g1}/call`, { disposition: 'no_answer' });
+  check('the morning call does not raise the attempt count', (await attempts(g1)).call_attempts === 0, await attempts(g1));
+  check('but it is a call, and a call nobody answered', JSON.stringify(await calls(g1)) === JSON.stringify({ n: 1, unanswered: 1 }), await calls(g1));
+  await pool.query(`UPDATE leads SET next_follow_up_at = NOW() - INTERVAL '1 minute', retry_hold_until = NOW() - INTERVAL '1 minute' WHERE id = $1`, [g1]);
+  await post(`/api/crm/leads/${g1}/call`, { disposition: 'no_answer' });
+  check('the evening call raises it by one', (await attempts(g1)).call_attempts === 1, await attempts(g1));
+  check('two calls, both unanswered', JSON.stringify(await calls(g1)) === JSON.stringify({ n: 2, unanswered: 2 }), await calls(g1));
+
+  console.log('\n--- one day\'s pair is one attempt toward the unanswered limit ---');
+  await pool.query(`INSERT INTO crm_settings (key, value) VALUES ('max_unanswered', '1'::jsonb) ON CONFLICT (key) DO UPDATE SET value = '1'::jsonb`);
+  const g2 = await add('9820000010');
+  await post(`/api/crm/leads/${g2}/call`, { disposition: 'no_answer' });
+  check('with a limit of 1, the morning call does not close the lead', (await attempts(g2)).status !== 'unreachable', await attempts(g2));
+  await pool.query(`UPDATE leads SET next_follow_up_at = NOW() - INTERVAL '1 minute', retry_hold_until = NOW() - INTERVAL '1 minute' WHERE id = $1`, [g2]);
+  await post(`/api/crm/leads/${g2}/call`, { disposition: 'no_answer' });
+  check('the evening call is the attempt, so it closes the lead', (await attempts(g2)).status === 'unreachable', await attempts(g2));
+  await pool.query(`INSERT INTO crm_settings (key, value) VALUES ('max_unanswered', '5'::jsonb) ON CONFLICT (key) DO UPDATE SET value = '5'::jsonb`);
+
   console.log('\n--- by default only Nearly gave leads get it ---');
   await setScope('nearly_gave');
   const g = await add('9820000007');

@@ -2647,58 +2647,6 @@ export async function logCallForLead(
     // conversation, not an unanswered attempt.
     const unanswered = d.rows[0].wants_follow_up === true && connected !== true;
 
-    // Unanswered attempts in a row, this one included (it is already saved
-    // above). Counted from the call history rather than kept in a counter, so
-    // it is right for leads that were called long before this existed and
-    // right again after an Undo removes a call.
-    let streak = 0;
-    if (unanswered) {
-      const run = await client.query(
-        `SELECT COUNT(*)::int AS n
-           FROM lead_activities a
-           JOIN crm_dispositions cd ON cd.slug = a.disposition
-          WHERE a.lead_id = $1 AND a.kind = 'call'
-            AND COALESCE(a.direction, 'outbound') = 'outbound'
-            AND COALESCE(a.connected, FALSE) = FALSE
-            AND cd.wants_follow_up = TRUE
-            AND a.occurred_at > GREATEST(
-                  COALESCE((SELECT MAX(c.occurred_at) FROM lead_activities c
-                             WHERE c.lead_id = $1 AND c.kind = 'call' AND c.connected IS TRUE),
-                           '-infinity'::timestamptz),
-                  -- The count starts over when a lead was last closed as Not
-                  -- reachable. Without this a lead somebody reopens would still
-                  -- carry its five old attempts and close again on the very
-                  -- next unanswered call.
-                  --
-                  -- Read here, in SQL, and NOT passed in from the row fetched
-                  -- above: a JavaScript Date keeps milliseconds and the column
-                  -- keeps microseconds, so the value came back a fraction of a
-                  -- millisecond EARLIER than the call that closed the lead and
-                  -- that call counted again - a reopened lead started on 2
-                  -- instead of 1.
-                  COALESCE((SELECT unanswered_reset_at FROM leads WHERE id = $1), '-infinity'::timestamptz))`,
-        [leadId]
-      );
-      streak = run.rows[0].n;
-    }
-
-    // The caller choosing a date or a stage is deciding for themselves; the
-    // cap only closes a lead nobody has said anything about.
-    const autoClose = unanswered && !followUp && !str(b.status, 30) && streak >= unansweredLimit;
-    const schedules = d.rows[0].wants_follow_up === true && !laterNoteOnly && !autoClose;
-
-    // The day of the CALL, not of this request: a call rung from the phone and
-    // recorded the next morning still counts from the day it was made. Never
-    // earlier than tomorrow morning, so a call recorded days late is not
-    // booked into the past.
-    const when = await client.query(
-      `SELECT GREATEST(
-                date_trunc('day', COALESCE($1::timestamptz, NOW())) + ($2::int || ' days')::interval + INTERVAL '10 hours',
-                date_trunc('day', NOW()) + INTERVAL '1 day' + INTERVAL '10 hours') AS at`,
-      [asDate(b.occurred_at), retryAfterDays]
-    );
-    const retryAt: Date = when.rows[0].at;
-
     /* THE SAME-DAY EVENING RETRY.
 
        A call that did not connect, made in the morning, comes back the SAME
@@ -2716,7 +2664,7 @@ export async function logCallForLead(
        evening_retry_cutoff_hour (13), in IST, and evening_retry_scope
        (nearly_gave, or all). */
     let eveningAt: Date | null = null;
-    if (unanswered && schedules && !followUp) {
+    if (unanswered && !laterNoteOnly && !followUp && (str(b.direction, 10) ?? 'outbound') === 'outbound') {
       const hrs = await client.query(
         `SELECT key, value FROM crm_settings WHERE key IN ('evening_retry_hour', 'evening_retry_cutoff_hour', 'evening_retry_scope')`
       );
@@ -2748,15 +2696,83 @@ export async function logCallForLead(
       const e = ev.rows[0];
       if (inScope && e.morning && e.evening_ahead && e.unanswered_today === 1) eveningAt = e.at as Date;
     }
+
+    // THE MORNING CALL IS NOT AN ATTEMPT. It is logged and counted as a call - and as a call
+    // nobody answered - but it does not raise the lead's attempt count or the unanswered
+    // streak: the evening call that follows it does, so one day's morning and evening calls
+    // are ONE attempt, counted at the evening. (Undone below if the lead is closing anyway.)
+    if (eveningAt) {
+      await client.query(`UPDATE lead_activities SET counts_as_attempt = FALSE WHERE id = $1`, [activity.rows[0].id]);
+    }
+
+    // Unanswered attempts in a row, this one included (it is already saved
+    // above). Counted from the call history rather than kept in a counter, so
+    // it is right for leads that were called long before this existed and
+    // right again after an Undo removes a call.
+    let streak = 0;
+    if (unanswered) {
+      const run = await client.query(
+        `SELECT COUNT(*)::int AS n
+           FROM lead_activities a
+           JOIN crm_dispositions cd ON cd.slug = a.disposition
+          WHERE a.lead_id = $1 AND a.kind = 'call'
+            AND COALESCE(a.direction, 'outbound') = 'outbound'
+            AND COALESCE(a.connected, FALSE) = FALSE
+            AND cd.wants_follow_up = TRUE
+            AND COALESCE(a.counts_as_attempt, TRUE)
+            AND a.occurred_at > GREATEST(
+                  COALESCE((SELECT MAX(c.occurred_at) FROM lead_activities c
+                             WHERE c.lead_id = $1 AND c.kind = 'call' AND c.connected IS TRUE),
+                           '-infinity'::timestamptz),
+                  -- The count starts over when a lead was last closed as Not
+                  -- reachable. Without this a lead somebody reopens would still
+                  -- carry its five old attempts and close again on the very
+                  -- next unanswered call.
+                  --
+                  -- Read here, in SQL, and NOT passed in from the row fetched
+                  -- above: a JavaScript Date keeps milliseconds and the column
+                  -- keeps microseconds, so the value came back a fraction of a
+                  -- millisecond EARLIER than the call that closed the lead and
+                  -- that call counted again - a reopened lead started on 2
+                  -- instead of 1.
+                  COALESCE((SELECT unanswered_reset_at FROM leads WHERE id = $1), '-infinity'::timestamptz))`,
+        [leadId]
+      );
+      streak = run.rows[0].n;
+    }
+
+    // The caller choosing a date or a stage is deciding for themselves; the
+    // cap only closes a lead nobody has said anything about.
+    const autoClose = unanswered && !followUp && !str(b.status, 30) && streak >= unansweredLimit;
+    const schedules = d.rows[0].wants_follow_up === true && !laterNoteOnly && !autoClose;
+    if (eveningAt && autoClose) {
+      // The lead is closing as Not reachable: this call is its last, so it counts.
+      eveningAt = null;
+      await client.query(`UPDATE lead_activities SET counts_as_attempt = TRUE WHERE id = $1`, [activity.rows[0].id]);
+    }
+
+    // The day of the CALL, not of this request: a call rung from the phone and
+    // recorded the next morning still counts from the day it was made. Never
+    // earlier than tomorrow morning, so a call recorded days late is not
+    // booked into the past.
+    const when = await client.query(
+      `SELECT GREATEST(
+                date_trunc('day', COALESCE($1::timestamptz, NOW())) + ($2::int || ' days')::interval + INTERVAL '10 hours',
+                date_trunc('day', NOW()) + INTERVAL '1 day' + INTERVAL '10 hours') AS at`,
+      [asDate(b.occurred_at), retryAfterDays]
+    );
+    const retryAt: Date = when.rows[0].at;
     // The date this call books when nobody picked one.
     const bookAt: Date = eveningAt ?? retryAt;
+
 
     const updated = await client.query(
       `UPDATE leads SET
          status            = COALESCE($1, status),
          last_contacted_at = NOW(),
          last_outcome      = $2,
-         call_attempts     = call_attempts + 1,
+         -- A morning call that books an evening retry is not an attempt (see above).
+         call_attempts     = call_attempts + CASE WHEN $11::timestamptz IS NOT NULL THEN 0 ELSE 1 END,
          remarks           = COALESCE($3, remarks),
          -- Three cases, in order:
          --   a date the caller chose wins outright;
@@ -2903,6 +2919,34 @@ export async function logCallForLead(
          VALUES ($1,$2,'status_change',$3,$4)`,
         [leadId, user?.userId ?? null, lead.rows[0].status, nextStatus]
       );
+    }
+
+    /* AN ATTEMPT ANSWERS A PROMISE THAT IS ALREADY DUE.
+
+       A reminder ("said they would donate on the 1st") used to stay open - and overdue,
+       and counted in the bell - after the caller had rung that lead, answered or not, and
+       closed only when the donation came or somebody ticked it done. The caller had done
+       the work and the bell still said six.
+
+       Now an outbound call on the lead closes the reminders on it that are already due.
+       The lead is not forgotten: an unanswered call books its own retry (two days on, up
+       to the unanswered limit - see above), so the person comes back through the queue and
+       Follow-ups, and after the limit the lead closes as Not reachable and its remaining
+       reminders close with it. A reminder due LATER stays open - the call was not about it
+       yet - and so does the one this very call creates below. Put back by Undo. */
+    if ((str(b.direction, 10) ?? 'outbound') === 'outbound') {
+      const attempted = await client.query(
+        `UPDATE lead_reminders SET status = 'done', completed_at = NOW(), updated_at = NOW()
+          WHERE lead_id = $1 AND status = 'open' AND ($2::boolean OR due_at <= NOW())
+          RETURNING id`,
+        [leadId, autoClose]
+      );
+      if (attempted.rows.length) {
+        undoExtra.closed_reminders = [
+          ...(((undoExtra.closed_reminders as string[] | undefined) ?? [])),
+          ...attempted.rows.map((r) => r.id as string),
+        ];
+      }
     }
 
     // A promise made on the call becomes a reminder in the same request.
