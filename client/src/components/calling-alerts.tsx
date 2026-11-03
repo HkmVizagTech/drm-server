@@ -52,7 +52,7 @@ export interface ConversionAlert {
 /** One entry in the bell's feed: nearly gave and Sankalpam, as they happen. */
 export interface DrmNotification {
   id: string;
-  kind: "nearly_gave" | "sankalpam" | "seva_wall";
+  kind: "nearly_gave" | "sankalpam" | "seva_wall" | "patron";
   title: string;
   body: string | null;
   link: string | null;
@@ -82,6 +82,8 @@ interface Ctx {
   dueCount: number;
   /** Sankalpam videos to send today, missed, and coming tomorrow. Null when this person has no Sankalpam. */
   sankalpam: SankalpSummary | null;
+  /** Patron requests that need a call now (new, overdue, due today). Null when this person has none to see. */
+  patrons: { now: number; new: number; overdue: number; today: number; evening: number } | null;
   /** The bell's feed, newest first, and how many this person has not seen. */
   notifications: DrmNotification[];
   unread: number;
@@ -102,6 +104,7 @@ const CallingAlertsContext = createContext<Ctx>({
   counts: EMPTY_COUNTS,
   dueCount: 0,
   sankalpam: null,
+  patrons: null,
   notifications: [],
   unread: 0,
   markNotificationsSeen: async () => undefined,
@@ -125,6 +128,7 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
   const [conversions, setConversions] = useState<ConversionAlert[]>([]);
   const [counts, setCounts] = useState<Counts>(EMPTY_COUNTS);
   const [sankalpam, setSankalpam] = useState<SankalpSummary | null>(null);
+  const [patrons, setPatrons] = useState<Ctx['patrons']>(null);
   const [notifications, setNotifications] = useState<DrmNotification[]>([]);
   const [unread, setUnread] = useState(0);
   // Cards still open carry over to the next page (each page mounts this
@@ -165,6 +169,11 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
         notifySankalpamOnceADay(s);
       })
       .catch(() => setSankalpam(null));
+    // Patron requests on their own for the same reason: a 403 or a hiccup here must not touch the rest.
+    void apiClient
+      .get<NonNullable<Ctx['patrons']>>("/api/crm/patrons/summary")
+      .then(setPatrons)
+      .catch(() => setPatrons(null));
     void apiClient
       .get<{ notifications: DrmNotification[]; unread: number; seen_at?: string | null }>("/api/notifications")
       .then((r) => {
@@ -281,6 +290,7 @@ export function CallingAlertsProvider({ children }: { children: ReactNode }) {
         counts,
         dueCount,
         sankalpam,
+        patrons,
         notifications,
         unread,
         markNotificationsSeen,

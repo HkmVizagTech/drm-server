@@ -59,6 +59,7 @@ import phoneAppRoutes from './routes/phoneApp';
 import unmatchedCallsRoutes from './routes/unmatchedCalls';
 import phoneDialerRoutes from './routes/phoneDialer';
 import { storeAbandonedAttempt } from './routes/crm';
+import crmPatronRoutes, { storePatronRequest } from './routes/crmPatron';
 import { runMigrations, setMigrationResult, getMigrationResult } from './db/migrate';
 
 dotenv.config();
@@ -270,6 +271,8 @@ app.use('/api/crm', crmListsRoutes);
 app.use('/api/crm', crmSessionsRoutes);
 app.use('/api/crm', crmCallsRoutes);
 app.use('/api/crm', crmQrRoutes);
+// Patron requests from the temple site's "Become a Patron" form - each one a lead to ring.
+app.use('/api/crm', crmPatronRoutes);
 // Money a caller collected on a UPI number that no system watched arrive.
 app.use('/api/crm', crmCollectionsRoutes);
 // Sankalpam: the puja on a donor's special day, every year, and the video sent to them.
@@ -396,7 +399,7 @@ async function start(): Promise<void> {
 
   // Start cron jobs
   scheduleBirthdayAnniversaryCheck();
-  scheduleNotifications(storeAbandonedAttempt);
+  scheduleNotifications(storeAbandonedAttempt, storePatronRequest);
   scheduleWhatsAppThanks();
   schedulePhoneCallLinks();
 

@@ -2,10 +2,11 @@ import cron from 'node-cron';
 import pool from '../db/pool';
 import { APP_TIMEZONE } from '../bootTimezone';
 import { pollNearlyGave } from '../services/nearlyGaveWatch';
+import { pollPatronRequests } from '../services/patronWatch';
 import { notify } from '../services/notifications';
 import { thanksTick } from '../services/waThanks';
 import { linkPhoneCalls } from '../services/phoneCalls';
-import type { AbandonedDonation, SiteKey } from '../services/hkmvClient';
+import type { AbandonedDonation, PatronRequest, SiteKey } from '../services/hkmvClient';
 
 // WHAT WAS WRONG WITH THIS JOB, because it ran wrong for a long time and the
 // output looked entirely normal.
@@ -110,11 +111,20 @@ export function schedulePhoneCallLinks() {
   }, { timezone: APP_TIMEZONE });
 }
 
-export function scheduleNotifications(store: (site: SiteKey, d: AbandonedDonation) => Promise<boolean>) {
+export function scheduleNotifications(
+  store: (site: SiteKey, d: AbandonedDonation) => Promise<boolean>,
+  storePatron?: (p: PatronRequest) => Promise<boolean>
+) {
   const opts = { timezone: APP_TIMEZONE };
   cron.schedule('* * * * *', () => {
     void pollNearlyGave(store).catch((e) => console.error('[CRON] nearly gave poll:', (e as Error).message));
   }, opts);
+  // Patron requests from the temple site: stored as leads, and the bell rings once for each.
+  if (storePatron) {
+    cron.schedule('* * * * *', () => {
+      void pollPatronRequests(storePatron).catch((e) => console.error('[CRON] patron poll:', (e as Error).message));
+    }, opts);
+  }
   // Seva wall: a caller asked to ring a donor again on a day - tell the bell when it comes.
   const wallReminders = () =>
     void import('../routes/sevaWall')

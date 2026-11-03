@@ -101,6 +101,8 @@ export const navGroups: NavGroup[] = [
       // Lists are the unit of work now, so they sit at the top of the group.
       { href: "/calling/lists", label: "Lists", icon: "list" },
       { href: "/leads", label: "Leads", icon: "userPlus" },
+      // People who asked, on the website, to become a patron - each one a lead to ring.
+      { href: "/calling/patrons", label: "Patron requests", icon: "sparkle" },
       // "What calls have I made, and to whom" - and where a caller goes when
       // somebody rings back, to find them and log what happened.
       { href: "/calling/calls", label: "My calls", icon: "phone" },
@@ -198,7 +200,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   // Late, due now, or due today. Counting every future reminder would leave a
   // permanent number beside Reminders that means nothing and gets ignored
   // within a week - which is worse than no badge at all.
-  const { dueCount, sankalpam } = useCallingAlerts();
+  const { dueCount, sankalpam, patrons } = useCallingAlerts();
   // Videos due today plus any missed: the day's job, not tomorrow's.
   const sankalpDue = sankalpam ? sankalpam.today + sankalpam.missed : 0;
 
@@ -290,6 +292,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
                     {item.href === "/sankalpam" && sankalpDue > 0 && (
                       <span className="ml-auto grid h-5 min-w-5 flex-none place-items-center rounded-full bg-amber-500 px-1.5 text-2xs font-semibold tabular-nums text-white shadow-flat">
                         {sankalpDue > 99 ? "99+" : sankalpDue}
+                      </span>
+                    )}
+                    {item.href === "/calling/patrons" && (patrons?.now ?? 0) > 0 && (
+                      <span className="ml-auto grid h-5 min-w-5 flex-none place-items-center rounded-full bg-amber-500 px-1.5 text-2xs font-semibold tabular-nums text-white shadow-flat">
+                        {(patrons?.now ?? 0) > 99 ? "99+" : patrons?.now}
                       </span>
                     )}
                     {item.href === "/calling/reminders" && dueCount > 0 && (

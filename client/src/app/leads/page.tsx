@@ -122,6 +122,7 @@ const SOURCES = [
   { key: "donor", label: "Existing donors" },
   { key: "csv", label: "Uploaded sheet" },
   { key: "website", label: "Website enquiry" },
+  { key: "patron", label: "Patron request" },
   { key: "walk_in", label: "Walk-in" },
   { key: "referral", label: "Referral" },
   { key: "event", label: "Event" },

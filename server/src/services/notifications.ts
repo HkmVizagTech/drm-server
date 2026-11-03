@@ -8,7 +8,7 @@ import pool from '../db/pool';
 
 type Db = Pick<PoolClient, 'query'>;
 
-export type NotificationKind = 'nearly_gave' | 'sankalpam' | 'seva_wall';
+export type NotificationKind = 'nearly_gave' | 'sankalpam' | 'seva_wall' | 'patron';
 
 export interface NewNotification {
   kind: NotificationKind;

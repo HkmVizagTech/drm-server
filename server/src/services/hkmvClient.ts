@@ -829,6 +829,48 @@ export async function fetchAbandonedPage(
   return { ...body, donations: body.donations ?? [] };
 }
 
+/* ------------------------------------------------------- patron requests */
+
+export interface PatronRequest {
+  externalId: string;
+  name: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  mobile: string | null;
+  email: string | null;
+  city: string | null;
+  state: string | null;
+  message: string | null;
+  authorization: boolean;
+  requestedAt: string;
+  sourceSite: SiteKey;
+}
+
+export interface PatronRequestPage {
+  page: number;
+  limit: number;
+  total: number;
+  hasMore: boolean;
+  requests: PatronRequest[];
+}
+
+/**
+ * "Become a Patron" form submissions from the temple site, oldest first so a
+ * crawl with `since` never skips one. Only the main site has this form.
+ */
+export async function fetchPatronRequestPage(
+  siteKey: SiteKey,
+  opts: { page?: number; limit?: number; since?: string | null } = {}
+): Promise<PatronRequestPage> {
+  const site = getSite(siteKey);
+  const q = new URLSearchParams({ page: String(opts.page ?? 1), limit: String(opts.limit ?? 200) });
+  if (opts.since) q.set('since', opts.since);
+  const res = await siteFetch(site, `/api/internal/drm/patron-requests?${q.toString()}`);
+  if (!res.ok) throw new Error(`${site.label} did not respond (${res.status}). Try again.`);
+  const body = (await res.json()) as PatronRequestPage;
+  return { ...body, requests: body.requests ?? [] };
+}
+
 /* ----------------------------------------------------- prasadam write-back */
 
 export interface PrasadamWriteBack {

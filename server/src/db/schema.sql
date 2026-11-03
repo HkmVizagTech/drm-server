@@ -3036,3 +3036,50 @@ ON CONFLICT (account_type, sub_category_id, COALESCE(sub_code_id, 0)) DO NOTHING
    including all those before this existed. */
 ALTER TABLE lead_activities ADD COLUMN IF NOT EXISTS counts_as_attempt BOOLEAN NOT NULL DEFAULT TRUE;
 
+
+-- ---------------------------------------------------------------------------
+-- Patron requests: people who filled in "Become a Patron" on the temple site.
+--
+-- Each one is also made a LEAD (leads.source = 'patron', tag 'patron') the
+-- moment it arrives, so everything callers already have - the call screen, the
+-- phone app's recordings, outcomes, reminders, follow-ups and the team-activity
+-- counts - works on a patron unchanged. This table keeps what the visitor
+-- actually typed, and whether the team set the request aside.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS patron_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  source_site VARCHAR(20) NOT NULL DEFAULT 'hkmv',
+  external_id VARCHAR(80) NOT NULL,
+
+  phone VARCHAR(10) NOT NULL,
+  name VARCHAR(255),
+  email VARCHAR(255),
+  city VARCHAR(120),
+  state VARCHAR(120),
+  message TEXT,
+
+  requested_at TIMESTAMPTZ NOT NULL,
+
+  lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  notified_at TIMESTAMPTZ,
+
+  dismissed_at TIMESTAMPTZ,
+  dismissed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+
+  UNIQUE (source_site, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_patron_phone ON patron_requests(phone);
+CREATE INDEX IF NOT EXISTS idx_patron_when ON patron_requests(requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_patron_lead ON patron_requests(lead_id) WHERE lead_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS patron_sync_state (
+  source_site VARCHAR(20) PRIMARY KEY,
+  last_synced_at TIMESTAMPTZ,
+  last_error TEXT,
+  rows_seen INT NOT NULL DEFAULT 0
+);

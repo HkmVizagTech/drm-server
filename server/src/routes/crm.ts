@@ -2668,12 +2668,14 @@ export async function logCallForLead(
       const hrs = await client.query(
         `SELECT key, value FROM crm_settings WHERE key IN ('evening_retry_hour', 'evening_retry_cutoff_hour', 'evening_retry_scope')`
       );
-      // Who gets it. Nearly gave leads (tagged 'abandoned') for now; set
-      // evening_retry_scope to "all" in crm_settings to give it to every lead.
+      // Who gets it. Nearly gave leads (tagged 'abandoned') and patron requests
+      // (tagged 'patron') - both are people who just reached out and are worth a
+      // second try the same day; set evening_retry_scope to "all" in crm_settings
+      // to give it to every lead.
       const scope = String(hrs.rows.find((r) => r.key === 'evening_retry_scope')?.value ?? 'nearly_gave');
       const inScope =
         scope === 'all' ||
-        (await client.query(`SELECT 'abandoned' = ANY(tags) AS ng FROM leads WHERE id = $1`, [leadId])).rows[0]?.ng === true;
+        (await client.query(`SELECT ('abandoned' = ANY(tags) OR 'patron' = ANY(tags)) AS ng FROM leads WHERE id = $1`, [leadId])).rows[0]?.ng === true;
       const hour = (key: string, dflt: number) => {
         const v = Number(hrs.rows.find((r) => r.key === key)?.value);
         return Number.isFinite(v) && v >= 0 && v <= 24 ? Math.floor(v) : dflt;

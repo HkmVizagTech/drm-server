@@ -146,6 +146,11 @@ export function LeadCard({
                 {lead.calls_in ? ` · rang back ${lead.calls_in === 1 ? "once" : `${lead.calls_in}×`}` : ""}
               </Badge>
             )}
+            {lead.tags.includes("patron") && (
+              <Badge tone="brand" icon="sparkle">
+                Patron request
+              </Badge>
+            )}
             {lead.nearly_gave && (
               <Badge tone="warn" icon="sparkle">
                 Nearly gave

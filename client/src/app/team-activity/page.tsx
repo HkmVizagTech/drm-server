@@ -48,6 +48,7 @@ interface Caller {
   idle_gaps: number;
   longest_gap_minutes: number;
   seva_wall_calls: number;
+  patron_calls: number;
   inbound_calls: number;
   donors_reached: number;
   overdue_followups: number;
@@ -394,6 +395,7 @@ function CallerDay({ caller, day, onClose }: { caller: Caller; day: string; onCl
         {caller.talk_real_seconds > 0 && <Badge tone="neutral">Talk {fromSeconds(caller.talk_real_seconds)}</Badge>}
         {caller.inbound_calls > 0 && <Badge tone="neutral">{caller.inbound_calls} from donors</Badge>}
         {caller.seva_wall_calls > 0 && <Badge tone="neutral">{caller.seva_wall_calls} Seva wall</Badge>}
+        {caller.patron_calls > 0 && <Badge tone="neutral">{caller.patron_calls} Patron</Badge>}
         {caller.last_login_at && <Badge tone="neutral">Last login {shortDate(caller.last_login_at)} {clockTime(caller.last_login_at)}</Badge>}
       </div>
 

@@ -73,6 +73,7 @@ export interface Scorecard {
   idle_gaps: number;
   longest_gap_minutes: number;
   seva_wall_calls: number;
+  patron_calls: number;
   inbound_calls: number;
   donors_reached: number;
   overdue_followups: number;
@@ -101,7 +102,9 @@ async function scorecards(day: string): Promise<{ rows: Scorecard[] }> {
     pool.query(
       `WITH c AS (
          SELECT a.user_id, a.occurred_at, a.connected, a.duration_seconds, a.source, a.disposition, a.lead_id, a.direction,
-                a.occurred_at - lag(a.occurred_at) OVER (PARTITION BY a.user_id ORDER BY a.occurred_at) AS gap
+                a.occurred_at - lag(a.occurred_at) OVER (PARTITION BY a.user_id ORDER BY a.occurred_at) AS gap,
+                -- A call to somebody who asked to become a patron: they carry the 'patron' tag.
+                EXISTS (SELECT 1 FROM leads pl WHERE pl.id = a.lead_id AND 'patron' = ANY(pl.tags)) AS is_patron
            FROM lead_activities a
           WHERE ${OUTBOUND_CALL} AND ${IN_DAY}
        )
@@ -117,6 +120,7 @@ async function scorecards(day: string): Promise<{ rows: Scorecard[] }> {
               COUNT(*) FILTER (WHERE gap > INTERVAL '30 minutes')::int                   AS idle_gaps,
               COALESCE(MAX(EXTRACT(EPOCH FROM gap)), 0)::int                             AS longest_gap_seconds,
               COUNT(*) FILTER (WHERE disposition LIKE 'seva_wall%')::int                 AS seva_wall_calls,
+              COUNT(*) FILTER (WHERE is_patron)::int                                     AS patron_calls,
               COUNT(DISTINCT lead_id) FILTER (WHERE connected IS TRUE)::int              AS donors_reached
          FROM c GROUP BY user_id`,
       [day]
@@ -199,6 +203,7 @@ async function scorecards(day: string): Promise<{ rows: Scorecard[] }> {
       idle_gaps: s.idle_gaps ?? 0,
       longest_gap_minutes: Math.round((s.longest_gap_seconds ?? 0) / 60),
       seva_wall_calls: s.seva_wall_calls ?? 0,
+      patron_calls: s.patron_calls ?? 0,
       inbound_calls: s.inbound_calls ?? 0,
       donors_reached: s.donors_reached ?? 0,
       overdue_followups: f.overdue ?? 0,
@@ -268,6 +273,7 @@ async function exportDay(req: import('express').Request, res: import('express').
         { header: 'Calls from donors', value: (r) => r.inbound_calls, kind: 'number' },
         { header: 'Donors reached', value: (r) => r.donors_reached, kind: 'number' },
         { header: 'Seva wall calls', value: (r) => r.seva_wall_calls, kind: 'number' },
+        { header: 'Patron calls', value: (r) => r.patron_calls, kind: 'number' },
         { header: 'Follow-ups overdue (now)', value: (r) => r.overdue_followups, kind: 'number' },
         { header: 'Untouched leads (now)', value: (r) => r.untouched_leads, kind: 'number' },
         { header: 'Money credited', value: (r) => r.raised, kind: 'money' },
