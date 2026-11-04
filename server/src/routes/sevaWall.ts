@@ -51,6 +51,7 @@ import { createHash, randomBytes, randomUUID } from 'crypto';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { isConfigured, putObject, getObject, deleteObject, publicUrl } from '../services/storage';
+import { sendBrickToDevotee } from '../services/whatsappBrick';
 import { notify } from '../services/notifications';
 import { upsertLead, logCallForLead } from './crm';
 import type { UserRole } from '../types';
@@ -150,7 +151,7 @@ const derivedSql = (cut = true) => `
          COALESCE(i.status, 'to_print')::text        AS status,
          i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token,
          COALESCE(i.call_attempts, 0) AS call_attempts, i.last_call_outcome, i.last_call_note, i.last_call_at, i.follow_up_on,
-         i.whatsapp_sent_at, i.awaiting_reply_at
+         i.whatsapp_sent_at, i.awaiting_reply_at, i.created_by
     FROM live_donations d
     JOIN live_people p ON p.id = d.person_id
     LEFT JOIN seva_wall_items i ON i.donation_id = d.id
@@ -165,7 +166,7 @@ const MANUAL = `
          i.kind::text, COALESCE(i.donated_on::timestamptz, i.created_at),
          i.priority::text, i.status::text, i.review_note, i.reviewed_at, i.called_at, i.called_by, i.sent_at, i.sent_by, i.share_token,
          i.call_attempts, i.last_call_outcome, i.last_call_note, i.last_call_at, i.follow_up_on,
-         i.whatsapp_sent_at, i.awaiting_reply_at
+         i.whatsapp_sent_at, i.awaiting_reply_at, i.created_by
     FROM seva_wall_items i
    WHERE i.donation_id IS NULL`;
 
@@ -308,10 +309,11 @@ router.get('/', allow(...LOOK), async (req, res) => {
       pool.query(
         `SELECT w.*, pic.id AS picture_id, pic.r2_key, pic.uploaded_at AS picture_at,
                 prev.id AS previous_picture_id, COALESCE(msg.n, 0) AS message_count, msg.last_by_role AS last_message_role,
-                su.name AS sent_by_name, cu.name AS called_by_name
+                su.name AS sent_by_name, cu.name AS called_by_name, dv.name AS devotee_name
            FROM ${wallSql()} ${PICTURE} ${THREAD}
            LEFT JOIN users su ON su.id = w.sent_by
            LEFT JOIN users cu ON cu.id = w.called_by
+           LEFT JOIN users dv ON dv.id = w.created_by AND dv.role = 'devotee'
            ${clause}
           ORDER BY ${order}
           LIMIT ${limit} OFFSET ${(page - 1) * limit}`,
@@ -339,8 +341,9 @@ router.get('/', allow(...LOOK), async (req, res) => {
     }
 
     const shaped = rows.rows.map((r) => {
-      const { r2_key, picture_id, picture_at, previous_picture_id, item_id: _item, share_token, ...row } = r;
+      const { r2_key, picture_id, picture_at, previous_picture_id, item_id: _item, share_token, created_by: _by, ...row } = r;
       void _item;
+      void _by;
       const full = {
         ...row,
         has_image: !!picture_id,
@@ -569,6 +572,69 @@ router.post('/devotee-record', allow('devotee'), async (req, res) => {
     }
     console.error('seva-wall devotee add error:', (err as Error).message);
     res.status(500).json({ error: 'Could not add the record.' });
+  }
+});
+
+// A devotee's own records: only what they added, with where each stands and, once the brick is printed
+// and its picture is added, the picture (to preview, and to send to the donor on WhatsApp). Nobody
+// else's records are reachable from here.
+router.get('/mine', allow('devotee'), async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT i.id AS ref, i.donor_name, i.honoree_name, i.phone, i.amount::float8 AS amount, i.receipt_number,
+              i.kind::text AS kind, i.status::text AS status, i.created_at, i.share_token,
+              pic.id AS picture_id, pic.r2_key, pic.uploaded_at AS picture_at
+         FROM seva_wall_items i
+         LEFT JOIN LATERAL (
+           -- The picture only once a caller has approved the brick; until then it is the team's.
+           SELECT sp.id, sp.r2_key, sp.uploaded_at FROM seva_wall_pictures sp
+            WHERE sp.item_id = i.id AND sp.state = 'current' AND i.status = 'sent'
+            ORDER BY sp.uploaded_at DESC LIMIT 1
+         ) pic ON TRUE
+        WHERE i.created_by = $1 AND i.donation_id IS NULL
+        -- Bricks not printed yet first, then the rest, newest first.
+        ORDER BY (i.status IN ('to_print', 'needs_reprint')) DESC, i.created_at DESC
+        LIMIT 200`,
+      [req.user!.userId]
+    );
+    const baseUrl = publicBase(req);
+    res.json({
+      rows: r.rows.map(({ r2_key, picture_id, picture_at, share_token, ...row }) => ({
+        ...row,
+        has_image: !!picture_id,
+        uploaded_at: picture_at ?? null,
+        // What the WhatsApp message carries: the picture's own address when it is stored publicly,
+        // else the brick's share page (which shows the picture as a preview card).
+        image_url: picture_id && r2_key ? publicUrl(r2_key) : null,
+        share_url: picture_id && share_token ? `${baseUrl}/b/${share_token}` : null,
+      })),
+    });
+  } catch (err) {
+    console.error('seva-wall mine error:', (err as Error).message);
+    res.status(500).json({ error: 'Could not load your records.' });
+  }
+});
+
+// The picture of one of a devotee's own bricks.
+router.get('/mine/:ref/image', allow('devotee'), async (req, res) => {
+  try {
+    if (!UUID_RE.test(String(req.params.ref))) return res.status(404).json({ error: 'No picture for this record.' });
+    const r = await pool.query(
+      `SELECT sp.mime, sp.data, sp.r2_key
+         FROM seva_wall_pictures sp JOIN seva_wall_items i ON i.id = sp.item_id
+        WHERE i.id = $1 AND i.created_by = $2 AND sp.state = 'current' AND i.status = 'sent'
+        ORDER BY sp.uploaded_at DESC LIMIT 1`,
+      [String(req.params.ref), req.user!.userId]
+    );
+    if (!r.rowCount) return res.status(404).json({ error: 'No picture for this record.' });
+    const bytes: Buffer | null = r.rows[0].r2_key ? await getObject(r.rows[0].r2_key) : r.rows[0].data;
+    if (!bytes) return res.status(404).json({ error: 'The picture could not be read. Try again.' });
+    res.setHeader('Content-Type', r.rows[0].mime);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.send(bytes);
+  } catch (err) {
+    console.error('seva-wall mine image error:', (err as Error).message);
+    res.status(500).json({ error: 'Could not load the picture.' });
   }
 });
 
@@ -1104,6 +1170,72 @@ router.post('/:ref/mark-sent', allow(...REVIEW), async (req, res) => {
   } catch (err) {
     console.error('seva-wall mark-sent error:', (err as Error).message);
     res.status(500).json({ error: 'Could not mark it sent.' });
+  }
+});
+
+// A caller (or admin) approves the picture of a brick a DEVOTEE added. That finishes it, and the devotee
+// is sent the picture on WhatsApp with the donor's name and number, so they can share it with the donor
+// themselves. The brick is approved even if the WhatsApp cannot be sent - the answer says which, and
+// the devotee sees the approved brick in their table either way.
+router.post('/:ref/approve', allow(...REVIEW), async (req, res) => {
+  try {
+    const item = await itemFor(String(req.params.ref));
+    if (!item) return notFound(res);
+    const row = (
+      await pool.query(
+        `SELECT i.id, i.status, i.donor_name, i.honoree_name, i.phone, d.phone AS devotee_phone
+           FROM seva_wall_items i JOIN devotees d ON d.user_id = i.created_by
+          WHERE i.id = $1`,
+        [item.id]
+      )
+    ).rows[0];
+    if (!row) return res.status(409).json({ error: 'Only a brick added by a devotee is approved this way.' });
+    if (row.status !== 'in_review') {
+      return res.status(409).json({ error: 'Only a brick whose picture is waiting for review can be approved.' });
+    }
+    const moved = await pool.query(
+      `UPDATE seva_wall_items
+          SET status = 'sent', sent_at = NOW(), sent_by = $2, reviewed_by = $2, reviewed_at = NOW(),
+              review_note = NULL, awaiting_reply_at = NULL, updated_at = NOW()
+        WHERE id = $1 AND status = 'in_review' RETURNING id`,
+      [item.id, req.user?.userId ?? null]
+    );
+    if (!moved.rowCount) return res.status(409).json({ error: 'That brick was just handled by someone else.' });
+    await logEvent(pool, item.id, 'approved', req.user?.userId);
+
+    // Tell the devotee. Never fatal: the approval stands.
+    let whatsapp: 'sent' | 'not_configured' | 'failed' = 'failed';
+    try {
+      const pic = (
+        await pool.query(
+          `SELECT mime, data, r2_key FROM seva_wall_pictures WHERE item_id = $1 AND state = 'current' ORDER BY uploaded_at DESC LIMIT 1`,
+          [item.id]
+        )
+      ).rows[0];
+      const bytes: Buffer | null = pic ? (pic.r2_key ? await getObject(pic.r2_key) : pic.data) : null;
+      if (bytes) {
+        const out = await sendBrickToDevotee({
+          devoteePhone: String(row.devotee_phone),
+          honoree: row.honoree_name || row.donor_name || '',
+          donorName: row.donor_name || '',
+          donorPhone: row.phone || '',
+          image: { bytes, mime: pic.mime },
+        });
+        if (out.ok) {
+          whatsapp = 'sent';
+          await pool.query(`UPDATE seva_wall_items SET devotee_notified_at = NOW() WHERE id = $1`, [item.id]);
+        } else {
+          whatsapp = out.reason === 'not_configured' ? 'not_configured' : 'failed';
+          if (out.reason !== 'not_configured') console.error('seva-wall devotee WhatsApp:', out.reason, out.detail ?? '');
+        }
+      }
+    } catch (e) {
+      console.error('seva-wall devotee WhatsApp error:', (e as Error).message);
+    }
+    res.json({ ref: String(req.params.ref), status: 'sent', whatsapp });
+  } catch (err) {
+    console.error('seva-wall approve error:', (err as Error).message);
+    res.status(500).json({ error: 'Could not approve it.' });
   }
 });
 

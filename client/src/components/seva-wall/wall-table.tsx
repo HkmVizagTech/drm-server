@@ -57,6 +57,8 @@ interface Row {
   donor_name: string | null;
   honoree_name: string | null;
   phone?: string | null;
+  /** Set when a devotee added this brick: their name. A caller approves it instead of calling the donor. */
+  devotee_name?: string | null;
   amount?: number;
   receipt_number?: string | null;
   kind: Kind;
@@ -201,7 +203,7 @@ function waiting(iso: string): string {
   return d === 0 ? "today" : d === 1 ? "1 day" : `${d} days`;
 }
 
-const WHATSAPP_PATH =
+export const WHATSAPP_PATH =
   "M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z";
 
 /**
@@ -211,7 +213,7 @@ const WHATSAPP_PATH =
  * nirmana seva) filled in from what this donor gave. The link is the donor's brick
  * picture's own link, so WhatsApp shows the picture, right after the thank-you.
  */
-function thanksMessage(r: Row): string {
+export function thanksMessage(r: Pick<Row, "donor_name" | "kind" | "image_url" | "share_url">): string {
   const lines = [
     "Hare Krishna,",
     "",
@@ -235,7 +237,7 @@ function thanksMessage(r: Row): string {
   return lines.join("\n");
 }
 
-function digitsOf(phone: string | null | undefined): string {
+export function digitsOf(phone: string | null | undefined): string {
   const d = (phone ?? "").replace(/\D/g, "");
   return d.length === 10 ? `91${d}` : d;
 }
@@ -579,6 +581,21 @@ export default function WallTable({ view }: { view: WallView }) {
     }
   }
 
+  // Approve a devotee's brick; the server then sends the devotee the picture on WhatsApp.
+  async function approve(row: Row) {
+    setBusy(row.ref);
+    try {
+      const r = await apiClient.post<{ whatsapp?: "sent" | "not_configured" | "failed" }>(`/api/seva-wall/${row.ref}/approve`, {});
+      if (r.whatsapp === "sent") toast.success(`Approved - ${row.devotee_name ?? "the devotee"} was sent the picture on WhatsApp`);
+      else toast.success("Approved. The WhatsApp to the devotee could not be sent - they can still see it in their table.");
+      await load();
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function setRowPriority(ref: string, value: string) {
     try {
       await apiClient.patch(`/api/seva-wall/${ref}`, { priority: value });
@@ -862,7 +879,7 @@ export default function WallTable({ view }: { view: WallView }) {
                     {view === "print" ? printName(r) : r.donor_name || "-"}
                     {r.origin === "manual" && (
                       <span className="ml-2 align-middle">
-                        <Badge tone="neutral">Added by hand</Badge>
+                        <Badge tone="neutral">{r.devotee_name ? `Added by ${r.devotee_name}` : "Added by hand"}</Badge>
                       </span>
                     )}
                     {/* The honoree is what gets printed, so the donor is the small print. */}
@@ -939,7 +956,18 @@ export default function WallTable({ view }: { view: WallView }) {
                   )}
                   {view === "contact" && canContact && (
                     <Td>
-                      {r.status === "in_review" ? (
+                      {r.status === "in_review" && r.devotee_name ? (
+                        // A devotee's brick: the devotee shares it with their donor, so the caller reviews the
+                        // picture and approves it (the devotee is then sent it on WhatsApp) or sends it back.
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button size="xs" variant="primary" icon="check" loading={busy === r.ref} onClick={() => void approve(r)}>
+                            Approve
+                          </Button>
+                          <Button size="xs" variant="ghost" icon="arrowLeft" onClick={() => setSendingBack(r)}>
+                            Send back
+                          </Button>
+                        </div>
+                      ) : r.status === "in_review" ? (
                         <div className="flex flex-wrap items-center gap-2">
                           <Button size="xs" variant="secondary" icon="check" onClick={() => setLogging(r)}>
                             Answered

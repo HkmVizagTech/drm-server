@@ -12,6 +12,8 @@ import pool from '../src/db/pool';
 import { runMigrations } from '../src/db/migrate';
 import { confineRole } from '../src/middleware/auth';
 import { setOtpSender } from '../src/services/whatsappOtp';
+import { setBrickSender, type BrickMessage } from '../src/services/whatsappBrick';
+import { generateToken } from '../src/middleware/auth';
 import devoteeAuthRoutes from '../src/routes/devoteeAuth';
 import sevaWallRoutes from '../src/routes/sevaWall';
 import peopleRoutes from '../src/routes/people';
@@ -34,6 +36,7 @@ async function main() {
   await pool.query(`INSERT INTO devotees (name, code, phone) VALUES ('Test Dasa', 'TSTD', '9000000001'), ('Gone Dasa', 'GONE', '9000000002')`);
   await pool.query(`UPDATE devotees SET active = FALSE WHERE phone = '9000000002'`);
 
+  const U_CALLER = '22222222-2222-2222-2222-222222222222';
   const sent: { phone: string; code: string }[] = [];
   let failNext = false;
   setOtpSender(async (phone, code) => {
@@ -43,7 +46,7 @@ async function main() {
 
   const app = express();
   app.use(express.json());
-  app.use('/api', confineRole('devotee', ['/seva-wall/devotee-record', '/auth/me']));
+  app.use('/api', confineRole('devotee', ['/seva-wall/devotee-record', '/seva-wall/mine', '/auth/me']));
   app.use('/api/devotee-auth', devoteeAuthRoutes);
   app.use('/api/seva-wall', sevaWallRoutes);
   app.use('/api/people', peopleRoutes);
@@ -122,6 +125,69 @@ async function main() {
   r = await call('POST', '/api/seva-wall/devotee-record', { donor_name: 'Donor', honoree_name: 'X', phone: '9222222222', amount: 2000, kind: 'brick', receipt_number: 'R-1002' });
   check('no sign-in, no record', r.status === 401, r);
 
+  console.log('\n--- a devotee sees only their own records, and their pictures ---');
+  // A second devotee, with a record of their own.
+  await pool.query(`INSERT INTO devotees (name, code, phone) VALUES ('Other Dasa', 'OTHD', '9000000003')`);
+  await call('POST', '/api/devotee-auth/otp', { phone: '9000000003' });
+  const otherCode = sent[sent.length - 1].code;
+  const other = (await call('POST', '/api/devotee-auth/verify', { phone: '9000000003', otp: otherCode })).body.token as string;
+  await call('POST', '/api/seva-wall/devotee-record', { donor_name: 'Other Donor', honoree_name: 'Other Honoree', phone: '9333333333', amount: 3000, kind: 'square', receipt_number: 'R-2001' }, other);
+  r = await call('GET', '/api/seva-wall/mine', undefined, token);
+  check('the first devotee sees only their own record', r.status === 200 && r.body.rows.length === 1 && r.body.rows[0].receipt_number === 'R-1001', r);
+  check('with no picture yet', r.body.rows[0].has_image === false && r.body.rows[0].share_url === null, r.body.rows[0]);
+  r = await call('GET', '/api/seva-wall/mine', undefined, other);
+  check('the second sees only theirs', r.body.rows.length === 1 && r.body.rows[0].receipt_number === 'R-2001', r);
+
+  // The printer adds the picture to the first devotee's brick: it goes to the caller for review.
+  const item = (await pool.query(`SELECT id FROM seva_wall_items WHERE receipt_number = 'R-1001'`)).rows[0].id as string;
+  await pool.query(`UPDATE seva_wall_items SET status = 'in_review', share_token = 'tok-test-1' WHERE id = $1`, [item]);
+  await pool.query(`INSERT INTO seva_wall_pictures (item_id, mime, data, size_bytes, state) VALUES ($1, 'image/png', $2, 4, 'current')`, [item, Buffer.from([137, 80, 78, 71])]);
+  const imgStatus = (who: string) =>
+    new Promise<number>((resolve, reject) => {
+      http.get({ port, path: `/api/seva-wall/mine/${item}/image`, headers: { authorization: `Bearer ${who}` } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode ?? 0)); }).on('error', reject);
+    });
+  r = await call('GET', '/api/seva-wall/mine', undefined, token);
+  check('printed but not yet approved: no picture for the devotee', r.body.rows[0].has_image === false && r.body.rows[0].status === 'in_review', r.body.rows[0]);
+  check('and the picture itself is closed to them', (await imgStatus(token)) === 404);
+
+  console.log('\n--- the caller approves it ---');
+  const caller = generateToken({ userId: '22222222-2222-2222-2222-222222222222', role: 'caller' } as never);
+  await pool.query(`INSERT INTO users (id, name, email, password_hash, role) VALUES ('22222222-2222-2222-2222-222222222222', 'Caller', 'c@t', 'x', 'caller') ON CONFLICT DO NOTHING`);
+  const told: BrickMessage[] = [];
+  setBrickSender(async (m) => { told.push(m); return { ok: true }; });
+  r = await call('POST', `/api/seva-wall/${item}/approve`, {}, token);
+  check('a devotee cannot approve', r.status === 403, r);
+  r = await call('POST', `/api/seva-wall/${item}/approve`, {}, caller);
+  check('the caller approves', r.status === 200 && r.body.status === 'sent' && r.body.whatsapp === 'sent', r);
+  check('the devotee was sent the picture with the donor\'s name and number',
+    told.length === 1 && told[0].devoteePhone === '9000000001' && told[0].donorName === 'Donor' && told[0].donorPhone === '9222222222' && told[0].honoree === 'Sri Honoree' && told[0].image.bytes.length === 4, told);
+  check('and it is noted', (await pool.query(`SELECT devotee_notified_at FROM seva_wall_items WHERE id = $1`, [item])).rows[0].devotee_notified_at !== null);
+  r = await call('POST', `/api/seva-wall/${item}/approve`, {}, caller);
+  check('approving twice is refused', r.status === 409, r);
+
+  r = await call('GET', '/api/seva-wall/mine', undefined, token);
+  check('now the devotee sees the picture and the link to send', r.body.rows[0].has_image === true && /\/b\/tok-test-1$/.test((r.body.rows[0].share_url ?? '').trim()), { share: r.body.rows[0].share_url });
+  check('the devotee can open their own picture', (await imgStatus(token)) === 200);
+  check("but not another devotee's", (await imgStatus(other)) === 404);
+
+  console.log('\n--- order, and when WhatsApp cannot be sent ---');
+  await call('POST', '/api/seva-wall/devotee-record', { donor_name: 'D2', honoree_name: 'Second Honoree', phone: '9444444444', amount: 2500, kind: 'brick', receipt_number: 'R-1003' }, token);
+  r = await call('GET', '/api/seva-wall/mine', undefined, token);
+  check('bricks not printed yet come first', r.body.rows[0].receipt_number === 'R-1003' && r.body.rows[1].receipt_number === 'R-1001', r.body.rows.map((x: any) => x.receipt_number));
+  const item2 = (await pool.query(`SELECT id FROM seva_wall_items WHERE receipt_number = 'R-1003'`)).rows[0].id as string;
+  await pool.query(`UPDATE seva_wall_items SET status = 'in_review' WHERE id = $1`, [item2]);
+  await pool.query(`INSERT INTO seva_wall_pictures (item_id, mime, data, size_bytes, state) VALUES ($1, 'image/png', $2, 4, 'current')`, [item2, Buffer.from([137, 80, 78, 71])]);
+  setBrickSender(async () => ({ ok: false, reason: 'not_configured' }));
+  r = await call('POST', `/api/seva-wall/${item2}/approve`, {}, caller);
+  check('with no WhatsApp template set, the brick is still approved and the answer says so', r.status === 200 && r.body.status === 'sent' && r.body.whatsapp === 'not_configured', r);
+  check('and nothing is marked as sent to the devotee', (await pool.query(`SELECT devotee_notified_at FROM seva_wall_items WHERE id = $1`, [item2])).rows[0].devotee_notified_at === null);
+
+  // A brick that was not added by a devotee is not approved this way.
+  const own = (await pool.query(`INSERT INTO seva_wall_items (donor_name, phone, amount, receipt_number, kind, status, created_by) VALUES ('Z','9555555555',2000,'R-3001','brick','in_review',$1) RETURNING id`, [U_CALLER])).rows[0].id as string;
+  r = await call('POST', `/api/seva-wall/${own}/approve`, {}, caller);
+  check('a brick not added by a devotee is refused', r.status === 409, r);
+
+  setBrickSender(null);
   setOtpSender(null);
   server.close();
   await pool.end();

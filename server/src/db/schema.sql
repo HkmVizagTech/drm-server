@@ -3113,3 +3113,7 @@ CREATE TABLE IF NOT EXISTS devotee_otps (
   last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- When the devotee who added a brick was sent its picture on WhatsApp, after a caller approved it.
+-- Null if it was not sent (no template set, or WhatsApp refused it).
+ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS devotee_notified_at TIMESTAMPTZ;
+

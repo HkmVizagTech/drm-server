@@ -184,7 +184,7 @@ app.get('/health', (_req, res) => {
 // A brick printer reaches the Seva wall and nothing else. Must stay ahead of every router.
 app.use('/api', confineRole('brick_printer', ['/seva-wall', '/auth/me', '/auth/change-password']));
 // A devotee reaches Add record and nothing else. (Signing in is public: see devoteeAuth.)
-app.use('/api', confineRole('devotee', ['/seva-wall/devotee-record', '/auth/me']));
+app.use('/api', confineRole('devotee', ['/seva-wall/devotee-record', '/seva-wall/mine', '/auth/me']));
 app.use('/api/auth', authRoutes);
 app.use('/api/devotee-auth', devoteeAuthRoutes);
 // A caller may open People and Donations to look a donor up, and may not
