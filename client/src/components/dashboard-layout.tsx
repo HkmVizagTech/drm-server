@@ -76,6 +76,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const router = useRouter();
   const { user, ready } = useAuth();
   const isPrinter = user?.role === "brick_printer";
+  const isDevotee = user?.role === "devotee";
 
   // Not signed in (never, or the login ran out): go to the sign-in page rather
   // than showing a screen whose every request is refused.
@@ -89,6 +90,11 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (isPrinter) router.replace("/seva-wall/print");
   }, [isPrinter, router]);
+
+  // A devotee has one screen too: Add record.
+  useEffect(() => {
+    if (isDevotee) router.replace("/seva-wall/devotee");
+  }, [isDevotee, router]);
 
   // Close on navigation. Without this, tapping a link on a phone leaves the
   // drawer covering the page you just asked for.
@@ -109,7 +115,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     };
   }, [open]);
 
-  if (isPrinter || !ready || !user) return null;
+  if (isPrinter || isDevotee || !ready || !user) return null;
 
   return (
     // One provider around the whole shell: the bell, the nav count and the

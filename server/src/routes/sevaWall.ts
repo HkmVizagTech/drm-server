@@ -543,6 +543,35 @@ router.post('/', allow(...MANAGE), async (req, res) => {
   }
 });
 
+// A devotee adds a brick record: the honoree's name (what is printed) and the donation receipt
+// number are both required - the receipt is what ties the record to a real donation. Everything
+// else is checked as for any added record, and it joins the same list for the team.
+router.post('/devotee-record', allow('devotee'), async (req, res) => {
+  const b = req.body ?? {};
+  if (!String(b.honoree_name ?? '').trim()) {
+    return res.status(400).json({ error: "Enter the honoree's name - the name to print on the brick." });
+  }
+  if (!String(b.receipt_number ?? '').trim()) {
+    return res.status(400).json({ error: 'Enter the donation receipt number.' });
+  }
+  const cleaned = cleanRecord({ ...b, priority: 'medium' });
+  if (!cleaned.record) {
+    const text = cleaned.error!;
+    return res.status(400).json({ error: text[0].toUpperCase() + text.slice(1) + '.' });
+  }
+  try {
+    const why = await duplicateOf(pool, cleaned.record, { againstDonations: false });
+    if (why) return res.status(409).json({ error: why[0].toUpperCase() + why.slice(1) + '.' });
+    res.status(201).json({ ref: await insertRecord(pool, cleaned.record, req.user?.userId ?? null) });
+  } catch (err) {
+    if ((err as { code?: string }).code === '23505') {
+      return res.status(409).json({ error: 'That receipt number is already on the wall.' });
+    }
+    console.error('seva-wall devotee add error:', (err as Error).message);
+    res.status(500).json({ error: 'Could not add the record.' });
+  }
+});
+
 // Many records from a sheet. The caller sends the sheet as it read it (headings
 // plus rows of text); the headings are matched to the fields here, so the rule for
 // "what counts as a Phone column" lives in one place. With dry_run the rows are

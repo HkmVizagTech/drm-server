@@ -3083,3 +3083,33 @@ CREATE TABLE IF NOT EXISTS patron_sync_state (
   last_error TEXT,
   rows_seen INT NOT NULL DEFAULT 0
 );
+
+/* ---------------------------------------------------------------------------
+   DEVOTEES: temple volunteers who add brick records.
+
+   They sign in with a WhatsApp OTP, not a password: the number must be on this list, a
+   6-digit code goes to that WhatsApp, and typing it signs them in as a 'devotee' user
+   (created on first sign-in and linked here), who can reach only Add record.
+   One row per WhatsApp number. The list is loaded from the office's sheet. */
+CREATE TABLE IF NOT EXISTS devotees (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name VARCHAR(160) NOT NULL,
+  code VARCHAR(40),
+  phone VARCHAR(10) NOT NULL UNIQUE,
+  email VARCHAR(160),
+  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The code last sent to a number, stored only as a hash. Replaced by the next request,
+-- deleted when it is used or runs out of tries.
+CREATE TABLE IF NOT EXISTS devotee_otps (
+  phone VARCHAR(10) PRIMARY KEY,
+  code_hash TEXT NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+

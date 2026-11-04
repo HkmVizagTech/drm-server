@@ -64,12 +64,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = () => {
+    const wasDevotee = user?.role === "devotee";
     localStorage.removeItem("token");
     setUser(null);
     // In the app, signing out also signs the phone out - or the app would sign
     // straight back in with the phone's key on the next screen.
     void signOutPhone();
-    router.push("/login");
+    router.push(wasDevotee ? "/devotee" : "/login");
   };
 
   return <AuthContext.Provider value={{ user, ready, login, logout }}>{children}</AuthContext.Provider>;
@@ -78,6 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 /** Where a person lands after signing in: a caller on their calls, everyone else on the dashboard. */
 export function homeFor(role: string): string {
   if (role === "brick_printer") return "/seva-wall/print";
+  if (role === "devotee") return "/seva-wall/devotee";
   return role === "caller" ? "/calling/start" : "/dashboard";
 }
 

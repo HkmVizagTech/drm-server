@@ -111,6 +111,13 @@ export default function LoginPage() {
           </Button>
         </form>
 
+        <p className="mt-5 text-center text-sm text-ink-muted">
+          Devotee?{" "}
+          <a href="/devotee" className="font-medium text-brand-700 hover:underline">
+            Sign in with WhatsApp
+          </a>
+        </p>
+
         <p className="mt-6 text-center text-xs text-ink-faint">
           Hare Krishna Movement, Visakhapatnam
         </p>

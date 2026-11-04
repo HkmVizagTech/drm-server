@@ -12,7 +12,7 @@ import { useAuth } from "@/lib/auth-context";
  * They have one job on one screen, and the rest of the shell would only show
  * them things the server refuses them. Everybody else gets the normal admin shell.
  */
-function PrinterShell({ children }: { children: ReactNode }) {
+function PrinterShell({ children, subtitle = "Brick printing" }: { children: ReactNode; subtitle?: string }) {
   const { user, logout } = useAuth();
   return (
     <div className="min-h-screen bg-page text-ink">
@@ -21,7 +21,7 @@ function PrinterShell({ children }: { children: ReactNode }) {
           <BrandMark />
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold text-ink">HKM Vizag</p>
-            <p className="truncate text-xs text-ink-muted">Brick printing</p>
+            <p className="truncate text-xs text-ink-muted">{subtitle}</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -48,5 +48,7 @@ export default function SevaWallLayout({ children }: LayoutProps<"/seva-wall">) 
   // calling endpoints the moment it mounts, which a printer's token is refused.
   if (!ready || !user) return null;
   if (user.role === "brick_printer") return <PrinterShell>{children}</PrinterShell>;
+  // A devotee gets the same bare page: one screen, Add record.
+  if (user.role === "devotee") return <PrinterShell subtitle="Add record">{children}</PrinterShell>;
   return <DashboardLayout>{children}</DashboardLayout>;
 }

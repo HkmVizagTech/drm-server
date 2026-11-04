@@ -23,6 +23,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import pool, { verifyTimezone } from './db/pool';
 import authRoutes from './routes/auth';
+import devoteeAuthRoutes from './routes/devoteeAuth';
 import peopleRoutes from './routes/people';
 import donationsRoutes from './routes/donations';
 import sevaRoutes from './routes/seva';
@@ -182,7 +183,10 @@ app.get('/health', (_req, res) => {
 // Routes
 // A brick printer reaches the Seva wall and nothing else. Must stay ahead of every router.
 app.use('/api', confineRole('brick_printer', ['/seva-wall', '/auth/me', '/auth/change-password']));
+// A devotee reaches Add record and nothing else. (Signing in is public: see devoteeAuth.)
+app.use('/api', confineRole('devotee', ['/seva-wall/devotee-record', '/auth/me']));
 app.use('/api/auth', authRoutes);
+app.use('/api/devotee-auth', devoteeAuthRoutes);
 // A caller may open People and Donations to look a donor up, and may not
 // change anything there. Enforced here, ahead of the routers, rather than on
 // each handler: a guard you have to remember to add to the next endpoint is a
