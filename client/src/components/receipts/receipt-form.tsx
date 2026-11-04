@@ -357,6 +357,8 @@ export function ManualReceiptDialog({ onClose, onSaved }: { onClose: () => void;
       ? mode === "cheque"
         ? "Enter the Cheque No."
         : "Enter the Transaction ID (UTR)."
+      : needTxn && mode !== "cheque" && txn.trim().length < 12
+      ? "The Transaction ID (UTR) must be at least 12 characters."
       : receiptProblems(v, { needSite: true });
 
   async function send() {

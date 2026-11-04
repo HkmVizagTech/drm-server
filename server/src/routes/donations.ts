@@ -522,6 +522,11 @@ router.post('/offline', async (req, res) => {
   if (!['cash', 'cheque', 'upi', 'bank'].includes(String(payment_mode))) {
     errors.push('Pick Cash, UPI, Cheque or Bank Transfer.');
   }
+  // UPI and bank go to DCC as "Online", where the UTR is the Transaction Number and
+  // DCC refuses one shorter than 12 characters.
+  if (ref && (payment_mode === 'upi' || payment_mode === 'bank') && ref.length < 12) {
+    errors.push('The Transaction ID (UTR) must be at least 12 characters.');
+  }
   if (want_prasadam && !String(prasadam_address || '').trim()) {
     errors.push('Enter the address for Maha Prasadam.');
   }

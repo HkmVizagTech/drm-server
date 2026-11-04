@@ -766,7 +766,17 @@ function DonationDetail({ donation, onChanged }: { donation: Donation; onChanged
         <DetailField label="Page" value={donation.source_page} mono />
         <DetailField label="Campaign" value={donation.campaign} />
         <DetailField label="Payment mode" value={titleCase(donation.payment_mode)} />
-        <DetailField label="Payment ref" value={donation.payment_ref} mono />
+        <DetailField
+          label={
+            donation.payment_mode === "cheque"
+              ? "Cheque no."
+              : donation.payment_mode === "upi" || donation.payment_mode === "bank"
+              ? "UTR"
+              : "Payment ref"
+          }
+          value={donation.payment_ref}
+          mono
+        />
 
         <DetailField label="Receipt no." value={donation.receipt_number} mono />
         <DetailField label="Receipt issued" value={donation.receipt_issued_at ? dateTime(donation.receipt_issued_at) : null} />
