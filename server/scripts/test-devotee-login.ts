@@ -187,6 +187,28 @@ async function main() {
   r = await call('POST', `/api/seva-wall/${own}/approve`, {}, caller);
   check('a brick not added by a devotee is refused', r.status === 409, r);
 
+  console.log('\n--- the callers\' filter: bricks added by devotees ---');
+  const devUserId = (await pool.query(`SELECT user_id FROM devotees WHERE phone = '9000000001'`)).rows[0].user_id as string;
+  const otherUserId = (await pool.query(`SELECT user_id FROM devotees WHERE phone = '9000000003'`)).rows[0].user_id as string;
+  r = await call('GET', '/api/seva-wall?view=contact', undefined, caller);
+  check('the caller\'s table lists the devotees who have added bricks', Array.isArray(r.body.devotees) && r.body.devotees.some((d: any) => d.name === 'Test Dasa'), r.body.devotees);
+  const all = r.body.rows.length;
+  r = await call('GET', '/api/seva-wall?view=contact&devotee=any', undefined, caller);
+  check('"added by devotees" shows only those bricks, each with the devotee\'s name', r.body.rows.length > 0 && r.body.rows.length < all && r.body.rows.every((x: any) => !!x.devotee_name), { n: r.body.rows.length, all });
+  r = await call('GET', `/api/seva-wall?view=contact&devotee=${devUserId}`, undefined, caller);
+  check('one devotee\'s bricks', r.body.rows.length > 0 && r.body.rows.every((x: any) => x.devotee_name === 'Test Dasa'), r.body.rows.map((x: any) => x.devotee_name));
+  r = await call('GET', `/api/seva-wall?view=contact&devotee=${otherUserId}`, undefined, caller);
+  check('another devotee, who has none in review or sent, shows none of the first one\'s', r.body.rows.every((x: any) => x.devotee_name !== 'Test Dasa'), r.body.rows.map((x: any) => x.devotee_name));
+
+  // A brick still waiting for approval comes before the ones already approved (message sent).
+  await call('POST', '/api/seva-wall/devotee-record', { donor_name: 'D4', honoree_name: 'Fourth Honoree', phone: '9666666666', amount: 2100, kind: 'brick', receipt_number: 'R-1004' }, token);
+  const item4 = (await pool.query(`SELECT id FROM seva_wall_items WHERE receipt_number = 'R-1004'`)).rows[0].id as string;
+  await pool.query(`UPDATE seva_wall_items SET status = 'in_review' WHERE id = $1`, [item4]);
+  await pool.query(`INSERT INTO seva_wall_pictures (item_id, mime, data, size_bytes, state) VALUES ($1, 'image/png', $2, 4, 'current')`, [item4, Buffer.from([137, 80, 78, 71])]);
+  r = await call('GET', '/api/seva-wall?view=contact&devotee=any', undefined, caller);
+  const order = r.body.rows.map((x: any) => `${x.receipt_number}:${x.status}`);
+  check('not approved first, approved last', r.body.rows[0].receipt_number === 'R-1004' && r.body.rows[r.body.rows.length - 1].status === 'sent' && r.body.rows.findIndex((x: any) => x.status === 'sent') > r.body.rows.findIndex((x: any) => x.status === 'in_review'), order);
+
   setBrickSender(null);
   setOtpSender(null);
   server.close();

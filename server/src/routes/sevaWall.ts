@@ -263,6 +263,16 @@ router.get('/', allow(...LOOK), async (req, res) => {
     values.push(priority);
     where.push(`w.priority = $${values.length}`);
   }
+  // Only the bricks devotees added: all of them ("any"), or one devotee's. For the people who review them.
+  const devoteeAsked = String(req.query.devotee ?? '');
+  if (devoteeAsked && role !== 'brick_printer') {
+    if (UUID_RE.test(devoteeAsked)) {
+      values.push(devoteeAsked);
+      where.push(`w.created_by = $${values.length}::uuid`);
+    } else {
+      where.push(`w.created_by IN (SELECT id FROM users WHERE role = 'devotee')`);
+    }
+  }
   if (search && role !== 'brick_printer') {
     values.push(`%${search}%`);
     const n = values.length;
@@ -315,7 +325,7 @@ router.get('/', allow(...LOOK), async (req, res) => {
            LEFT JOIN users cu ON cu.id = w.called_by
            LEFT JOIN users dv ON dv.id = w.created_by AND dv.role = 'devotee'
            ${clause}
-          ORDER BY ${order}
+          ORDER BY ${devoteeAsked && role !== 'brick_printer' ? `(w.status = 'sent') ASC, ` : ''}${order}
           LIMIT ${limit} OFFSET ${(page - 1) * limit}`,
         values
       ),
@@ -331,6 +341,15 @@ router.get('/', allow(...LOOK), async (req, res) => {
     ]);
 
     const baseUrl = publicBase(req);
+    // The devotees who have added bricks, for the "Added by" filter. Not for the printer.
+    const devotees =
+      role === 'brick_printer'
+        ? []
+        : (
+            await pool.query(
+              `SELECT DISTINCT u.id, u.name FROM seva_wall_items i JOIN users u ON u.id = i.created_by AND u.role = 'devotee' ORDER BY u.name`
+            )
+          ).rows;
     const counts: Record<string, number> = { to_print: 0, needs_reprint: 0, to_call: 0, called: 0, sent: 0, due: 0, questions: 0 };
     for (const r of tally.rows) {
       counts.questions += r.asked;
@@ -370,6 +389,7 @@ router.get('/', allow(...LOOK), async (req, res) => {
       view,
       views: allowed,
       rows: shaped,
+      devotees,
       total,
       page,
       limit,

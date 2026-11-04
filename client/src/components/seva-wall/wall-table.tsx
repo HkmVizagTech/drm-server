@@ -99,6 +99,8 @@ interface Response {
   view: WallView;
   views: WallView[];
   rows: Row[];
+  /** The devotees who have added bricks, for the "Added by" filter. */
+  devotees?: { id: string; name: string }[];
   total: number;
   page: number;
   limit: number;
@@ -505,6 +507,8 @@ export default function WallTable({ view }: { view: WallView }) {
   const [stage, setStage] = useState("");
   const [kind, setKind] = useState("");
   const [priority, setPriority] = useState("");
+  // "": every brick; "any": only bricks a devotee added; otherwise one devotee's id.
+  const [devotee, setDevotee] = useState("");
   // A notification opens this page as /seva-wall?search=<phone>, so the brick it is
   // about is already there. Read once; nothing renders until the person is known,
   // so the server's empty first render cannot disagree with this.
@@ -543,6 +547,7 @@ export default function WallTable({ view }: { view: WallView }) {
       if (stage) qs.set("stage", stage);
       if (kind) qs.set("kind", kind);
       if (priority) qs.set("priority", priority);
+      if (devotee) qs.set("devotee", devotee);
       if (query) qs.set("search", query);
       try {
         setData(await apiClient.get<Response>(`/api/seva-wall?${qs}`, { signal }));
@@ -552,7 +557,7 @@ export default function WallTable({ view }: { view: WallView }) {
         setError((e as Error).message);
       }
     },
-    [role, allowed, view, stage, kind, priority, query, page]
+    [role, allowed, view, stage, kind, priority, devotee, query, page]
   );
 
   useEffect(() => {
@@ -770,6 +775,25 @@ export default function WallTable({ view }: { view: WallView }) {
           <option value="square">Square foot seva</option>
           <option value="mandir">Mandir nirmana seva</option>
         </Select>
+        {!isPrinter && (data?.devotees?.length ?? 0) > 0 && (
+          <Select
+            value={devotee}
+            onChange={(v) => {
+              setDevotee(v);
+              setPage(1);
+            }}
+            ariaLabel="Added by"
+            className="w-56"
+          >
+            <option value="">All bricks</option>
+            <option value="any">Added by devotees</option>
+            {data!.devotees!.map((d) => (
+              <option key={d.id} value={d.id}>
+                Added by {d.name}
+              </option>
+            ))}
+          </Select>
+        )}
         {view !== "contact" && (
           <Select
             value={priority}
