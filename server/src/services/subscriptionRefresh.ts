@@ -15,12 +15,27 @@ import { upsertDonorSnapshot } from './hkmvSync';
 export type SnapshotFetcher = (site: SiteKey, phone: string) => Promise<HkmvDonorSnapshot>;
 
 let running = false;
+let startedAt = 0;
+// A run that never came back (a site that accepted the connection and then said nothing) must not block every
+// later refresh: after this long the lock is treated as stale.
+const STALE_LOCK_MS = 15 * 60 * 1000;
+// One donor's lookup is given this long; the site asks Razorpay for each subscription, so it can be slow.
+const DONOR_TIMEOUT_MS = 40 * 1000;
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let t: NodeJS.Timeout;
+  return Promise.race([
+    p,
+    new Promise<T>((_, rej) => { t = setTimeout(() => rej(new Error('the site took too long')), ms); }),
+  ]).finally(() => clearTimeout(t));
+}
 
 export async function refreshSubscriptions(
   fetcher: SnapshotFetcher = fetchDonorSnapshot
 ): Promise<{ checked: number; updated: number; failed: number; skipped: boolean }> {
-  if (running) return { checked: 0, updated: 0, failed: 0, skipped: true };
+  if (running && Date.now() - startedAt < STALE_LOCK_MS) return { checked: 0, updated: 0, failed: 0, skipped: true };
   running = true;
+  startedAt = Date.now();
   const out = { checked: 0, updated: 0, failed: 0, skipped: false };
   try {
     // Donors with a subscription a site told us about, that is not already finished.
@@ -34,7 +49,7 @@ export async function refreshSubscriptions(
       if (!isSiteConfigured(d.source_site)) continue;
       out.checked++;
       try {
-        const snap = await fetcher(d.source_site, String(d.phone));
+        const snap = await withTimeout(fetcher(d.source_site, String(d.phone)), DONOR_TIMEOUT_MS);
         if (snap?.found) {
           await upsertDonorSnapshot(snap as never, d.source_site);
           out.updated++;
