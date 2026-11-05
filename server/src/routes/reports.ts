@@ -158,6 +158,10 @@ router.get('/dashboard', async (_req, res) => {
     // out, as in every other figure here (live_people) - and the Recurring screen uses the same rule.
     pool.query(`
       SELECT COUNT(*) FILTER (WHERE ${REALLY_ACTIVE('s')}) AS active_count,
+             COUNT(*) FILTER (WHERE ${REALLY_ACTIVE('s')} AND s.source_site = 'hkmv') AS hkmv_count,
+             COALESCE(SUM(s.amount) FILTER (WHERE ${REALLY_ACTIVE('s')} AND s.source_site = 'hkmv' AND s.frequency = 'monthly'), 0) AS hkmv_value,
+             COUNT(*) FILTER (WHERE ${REALLY_ACTIVE('s')} AND s.source_site = 'annadan') AS annadan_count,
+             COALESCE(SUM(s.amount) FILTER (WHERE ${REALLY_ACTIVE('s')} AND s.source_site = 'annadan' AND s.frequency = 'monthly'), 0) AS annadan_value,
              COALESCE(SUM(CASE s.frequency
                             WHEN 'monthly'   THEN s.amount
                             WHEN 'quarterly' THEN s.amount / 3
@@ -284,6 +288,10 @@ router.get('/dashboard', async (_req, res) => {
     recurring: {
       activeCount: Number(rr.active_count),
       monthlyValue: Number(rr.monthly_value),
+      bySite: {
+        hkmv: { count: Number(rr.hkmv_count), monthlyValue: Number(rr.hkmv_value) },
+        annadan: { count: Number(rr.annadan_count), monthlyValue: Number(rr.annadan_value) },
+      },
       pausedCount: Number(rr.paused_count),
     },
     operations: {

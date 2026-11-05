@@ -502,16 +502,21 @@ async function upsertSubscription(
   // So for the main site a completed charge made lately is active, and an old one is lapsed.
   const lastCharge = s.lastChargedAt ? new Date(s.lastChargedAt).getTime() : null;
   const chargedLately = lastCharge !== null && Date.now() - lastCharge < 35 * 86400000;
+  const live = s.liveStatus ? String(s.liveStatus).toLowerCase().slice(0, 20) : null;
+  // Razorpay's live status, when the site gives it, is the truth.
   const status =
-    site === 'hkmv' && s.status === 'completed'
+    live === 'active' ? 'active'
+    : live === 'paused' || live === 'halted' ? 'paused'
+    : live === 'cancelled' || live === 'completed' || live === 'expired' ? 'cancelled'
+    : site === 'hkmv' && s.status === 'completed'
       ? chargedLately
         ? 'active'
         : 'cancelled'
       : hkmvMappers.SUBSCRIPTION_STATUS_MAP[s.status] || 'active';
   await client.query(
     `INSERT INTO subscriptions (person_id, amount, frequency, purpose, status, gateway_subscription_id, start_date, external_ref, source_site,
-                                site_status, last_charged_at, charge_count)
-     VALUES ($1, $2, 'monthly', $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                                site_status, last_charged_at, charge_count, live_status, next_charge_date)
+     VALUES ($1, $2, 'monthly', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
      ON CONFLICT (external_ref) DO UPDATE SET
        amount          = EXCLUDED.amount,
        status          = EXCLUDED.status,
@@ -519,12 +524,16 @@ async function upsertSubscription(
        site_status     = EXCLUDED.site_status,
        last_charged_at = EXCLUDED.last_charged_at,
        charge_count    = EXCLUDED.charge_count,
+       live_status     = EXCLUDED.live_status,
+       next_charge_date = COALESCE(EXCLUDED.next_charge_date, subscriptions.next_charge_date),
        updated_at      = NOW()`,
     [
       personId, s.amount, hkmvMappers.truncate30(s.sevaName), status, s.subscriptionId, s.startedAt, s.subscriptionId, site,
       String(s.status ?? '').slice(0, 20) || null,
       s.lastChargedAt ?? null,
       Number.isFinite(Number(s.chargeCount)) ? Number(s.chargeCount) : null,
+      live,
+      s.nextChargeAt ? String(s.nextChargeAt).slice(0, 10) : null,
     ]
   );
 }

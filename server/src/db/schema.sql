@@ -3005,6 +3005,9 @@ ALTER TABLE leads ADD COLUMN IF NOT EXISTS retry_hold_until TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS site_status VARCHAR(20);
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_charged_at TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS charge_count INTEGER;
+/* Razorpay's own live status, passed on by the main site ('active', 'cancelled', 'halted', 'paused'...).
+   When present it is the truth for 'really active'; null where the site cannot tell. */
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS live_status VARCHAR(20);
 
 /* TSC receipts. The main site sends DCC an account type with every donation: 4
    for the HKMI sevas, 5 for TSC. DRM works the number out from the seva chosen

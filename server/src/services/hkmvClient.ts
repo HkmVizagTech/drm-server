@@ -165,6 +165,9 @@ export interface HkmvSubscription {
   startedAt: string;
   lastChargedAt?: string | null;
   chargeCount: number;
+  /** Razorpay's live status, from the main site (absent on older deploys / annadan). */
+  liveStatus?: string | null;
+  nextChargeAt?: string | null;
 }
 
 export interface HkmvDonorSnapshot {

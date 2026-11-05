@@ -60,6 +60,7 @@ async function main() {
   await sub('pending', { ext: 'sub_e', status: 'active', site: 'annadan', site_status: 'pending', last: null, amount: 800 });
   await sub('never confirmed', { ext: 'sub_f', status: 'active', site: 'annadan', site_status: null, last: null, amount: 900 });
   await sub('yearly', { ext: 'sub_g', status: 'active', site: 'hkmv', site_status: 'completed', last: '200 days', freq: 'yearly', amount: 1200 });
+  await sub('annadan ended', { ext: 'sub_i', status: 'active', site: 'annadan', site_status: 'completed', last: '10 days', amount: 600 });
   await sub('cancelled', { ext: 'sub_h', status: 'cancelled', site: 'hkmv', site_status: 'cancelled', last: '3 days', amount: 400 });
 
   const app = express();
@@ -83,7 +84,7 @@ async function main() {
   check('the Active tab: by hand, paid lately, annadan active, yearly within its year', JSON.stringify(names) === JSON.stringify(['annadan active', 'manual', 'paid lately', 'yearly']), names);
   r = await get('/api/subscriptions?status=lapsed');
   const lapsed = (r.subscriptions as { donor_name: string; really_active: boolean }[]).map((x) => x.donor_name).sort();
-  check('"Not charging": paid long ago, pending, never confirmed', JSON.stringify(lapsed) === JSON.stringify(['never confirmed', 'paid long ago', 'pending']), lapsed);
+  check('"Not charging": an annadan one that ended, paid long ago, pending, never confirmed', JSON.stringify(lapsed) === JSON.stringify(['annadan ended', 'never confirmed', 'paid long ago', 'pending']), lapsed);
   check('and each says it is not really active', r.subscriptions.every((x: any) => x.really_active === false), r.subscriptions);
   r = await get('/api/subscriptions?status=cancelled');
   check('a cancelled one stays under Cancelled', r.subscriptions.length === 1, r);
@@ -115,6 +116,32 @@ async function main() {
   check('the one that has paid since is active again', c.status === 'active' && c.site_status === 'completed', c);
   r = await get('/api/subscriptions?status=active');
   check('and now shown on the Active tab', (r.subscriptions as { donor_name: string }[]).some((x) => x.donor_name === 'paid long ago'), r.subscriptions.map((x: any) => x.donor_name));
+
+  console.log('\n--- Razorpay live status is the truth when the main site passes it on ---');
+  const snapFor = (phone: string, name: string, subs: unknown[]) =>
+    ({ success: true, found: true, donor: { externalId: `ext-${phone}`, name, mobile: phone }, donations: [], subscriptions: subs }) as never;
+  const iso = (d: number) => new Date(Date.now() - d * 86400000).toISOString();
+  await refreshSubscriptions(async (_site, phone) => {
+    // paid 2 days ago, yet Razorpay says it was cancelled: must NOT count
+    if (phone === old.phone)
+      return snapFor(phone, 'paid long ago', [{ subscriptionId: 'sub_c', sevaName: 'Annadanam', amount: 700, status: 'completed', startedAt: iso(200), lastChargedAt: iso(2), chargeCount: 6, liveStatus: 'cancelled' }]);
+    // last charge 60 days ago, yet Razorpay says active (e.g. paid on a long cycle): counts
+    if (phone === paid.phone)
+      return snapFor(phone, 'paid lately', [{ subscriptionId: 'sub_b', sevaName: 'Seva', amount: 1000, status: 'completed', startedAt: iso(200), lastChargedAt: iso(60), chargeCount: 3, liveStatus: 'active', nextChargeAt: new Date(Date.now() + 5 * 86400000).toISOString() }]);
+    return { success: true, found: false } as never;
+  });
+  const lc = (await pool.query(`SELECT status, live_status FROM subscriptions WHERE external_ref = 'sub_c'`)).rows[0];
+  check('Razorpay-cancelled is cancelled even though it charged lately', lc.status === 'cancelled' && lc.live_status === 'cancelled', lc);
+  const lb = (await pool.query(`SELECT status, live_status, next_charge_date FROM subscriptions WHERE external_ref = 'sub_b'`)).rows[0];
+  check('Razorpay-active counts, with its next charge date kept', lb.status === 'active' && lb.live_status === 'active' && !!lb.next_charge_date, lb);
+  r = await get('/api/subscriptions?status=active');
+  const act = (r.subscriptions as { donor_name: string }[]).map((x) => x.donor_name);
+  check('Active tab: cancelled one gone, live-active one present', !act.includes('paid long ago') && act.includes('paid lately'), act);
+  r = await get('/api/reports/dashboard');
+  const hk = r.recurring?.bySite?.hkmv;
+  // hkmv really active: sub_b (1000 monthly) and the yearly one (counted, not in the monthly sum)
+  check('the card splits by site: HKM total is the Razorpay-active sum', hk?.count === 2 && hk?.monthlyValue === 1000, r.recurring);
+  check('and the sites add up to the card', r.recurring.bySite.hkmv.count + r.recurring.bySite.annadan.count + 1 === r.recurring.activeCount, r.recurring);
 
   server.close();
   await pool.end();

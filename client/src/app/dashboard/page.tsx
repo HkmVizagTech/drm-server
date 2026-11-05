@@ -37,7 +37,12 @@ interface Dashboard {
     thisMonthCount: number;
     lastMonth: number;
   };
-  recurring: { activeCount: number; monthlyValue: number; pausedCount: number };
+  recurring: {
+    activeCount: number;
+    monthlyValue: number;
+    pausedCount: number;
+    bySite?: { hkmv: { count: number; monthlyValue: number }; annadan: { count: number; monthlyValue: number } };
+  };
   operations: {
     prasadamPending: number;
     receiptsPending: number;
@@ -213,7 +218,11 @@ export default function DashboardPage() {
         <StatTile
           label="Recurring / month"
           value={currency(recurring.monthlyValue)}
-          sub={`${number(recurring.activeCount)} active`}
+          sub={
+            recurring.bySite
+              ? `${number(recurring.activeCount)} active · HKM ${number(recurring.bySite.hkmv.count)} (${currency(recurring.bySite.hkmv.monthlyValue)}) · Annadan ${number(recurring.bySite.annadan.count)} (${currency(recurring.bySite.annadan.monthlyValue)})`
+              : `${number(recurring.activeCount)} active`
+          }
           icon="refresh"
           accent="good"
         />

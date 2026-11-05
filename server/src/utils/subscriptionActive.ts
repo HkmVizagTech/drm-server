@@ -6,8 +6,9 @@
 // "active":
 //
 //   - entered by hand in DRM (no id from a site): active if DRM says active - somebody typed it in;
-//   - from a site: the site reports it active, or its latest charge went through ('completed' is how
-//     the main site reports a paid charge), AND a charge has gone through lately - within a month
+//   - from a site: the site reports it active, or (main site only) its latest charge went through
+//     ('completed' is how the main site reports a paid charge; on annadan it means the subscription
+//     ENDED), AND a charge has gone through lately - within a month
 //     (a quarter / a year for those frequencies, with a few days' grace). One that never charged is
 //     counted only while it is still that new.
 //
@@ -19,8 +20,11 @@
 export const REALLY_ACTIVE = (a = 's') => `(
   ${a}.status = 'active' AND (
     (${a}.external_ref IS NULL)
-    OR (
-      ${a}.site_status IN ('active', 'completed')
+    -- Razorpay's own live status, when the main site passed it on, is the truth.
+    OR COALESCE(${a}.live_status, '') = 'active'
+    OR (${a}.live_status IS NULL AND
+      -- 'completed' is a paid charge on the main site, but a subscription that has ENDED on annadan.
+      (${a}.site_status = 'active' OR (${a}.source_site = 'hkmv' AND ${a}.site_status = 'completed'))
       AND COALESCE(${a}.last_charged_at, ${a}.start_date::timestamptz) >
           NOW() - (CASE ${a}.frequency
                      WHEN 'yearly'    THEN INTERVAL '380 days'
