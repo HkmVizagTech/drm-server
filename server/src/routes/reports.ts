@@ -5,6 +5,7 @@ import { Router } from 'express';
 import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { displayPurposeSql } from '../utils/donationLabel';
+import { REALLY_ACTIVE } from '../utils/subscriptionActive';
 import {
   GROUP_LABELS,
   canonPageSql,
@@ -150,20 +151,18 @@ router.get('/dashboard', async (_req, res) => {
       WHERE created_at >= date_trunc('month', NOW()) - INTERVAL '1 month'
         AND created_at <  date_trunc('month', NOW())
     `),
-    // "Recurring / month" is the MONTHLY EQUIVALENT of every active subscription:
-    // a quarterly one counts a third of its amount, a yearly one a twelfth. It used
-    // to add up monthly ones only, so any other frequency vanished from the card.
-    // Donors hidden as test donors are left out, as in every other figure here
-    // (live_people / live_donations) - and as on the Subscriptions screen.
-    // A site's 'pending' subscription (set up, never charged) is not recurring money
-    // yet; DRM's status folds it into 'active', site_status keeps the difference.
+    // "Recurring / month" is the MONTHLY EQUIVALENT of the REALLY ACTIVE recurring donations only
+    // (utils/subscriptionActive.ts): ones the site confirms and that have charged lately. A quarterly one
+    // counts a third of its amount, a yearly one a twelfth. Pending, failed, lapsed and never-confirmed
+    // ones are left out, so the tile is money actually coming in. Donors hidden as test donors are left
+    // out, as in every other figure here (live_people) - and the Recurring screen uses the same rule.
     pool.query(`
-      SELECT COUNT(*) FILTER (WHERE s.status = 'active' AND s.site_status IS DISTINCT FROM 'pending') AS active_count,
+      SELECT COUNT(*) FILTER (WHERE ${REALLY_ACTIVE('s')}) AS active_count,
              COALESCE(SUM(CASE s.frequency
                             WHEN 'monthly'   THEN s.amount
                             WHEN 'quarterly' THEN s.amount / 3
                             WHEN 'yearly'    THEN s.amount / 12
-                            ELSE 0 END) FILTER (WHERE s.status = 'active' AND s.site_status IS DISTINCT FROM 'pending'), 0) AS monthly_value,
+                            ELSE 0 END) FILTER (WHERE ${REALLY_ACTIVE('s')}), 0) AS monthly_value,
              COUNT(*) FILTER (WHERE s.status = 'paused') AS paused_count
       FROM subscriptions s
       JOIN live_people p ON p.id = s.person_id

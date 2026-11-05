@@ -495,7 +495,19 @@ async function upsertSubscription(
   s: HkmvSubscription,
   site: SiteKey
 ): Promise<void> {
-  const status = hkmvMappers.SUBSCRIPTION_STATUS_MAP[s.status] || 'active';
+  // The site's `status` is NOT always a subscription's own. The main site builds each subscription from
+  // its donations and reports the LATEST DONATION's status: 'completed' there means a charge was paid
+  // (the subscription is running), not that the subscription ended. Reading it as ended is what put
+  // every paying main-site donor under Cancelled. Annadan reports the subscription's own status.
+  // So for the main site a completed charge made lately is active, and an old one is lapsed.
+  const lastCharge = s.lastChargedAt ? new Date(s.lastChargedAt).getTime() : null;
+  const chargedLately = lastCharge !== null && Date.now() - lastCharge < 35 * 86400000;
+  const status =
+    site === 'hkmv' && s.status === 'completed'
+      ? chargedLately
+        ? 'active'
+        : 'cancelled'
+      : hkmvMappers.SUBSCRIPTION_STATUS_MAP[s.status] || 'active';
   await client.query(
     `INSERT INTO subscriptions (person_id, amount, frequency, purpose, status, gateway_subscription_id, start_date, external_ref, source_site,
                                 site_status, last_charged_at, charge_count)

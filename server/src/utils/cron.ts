@@ -6,6 +6,7 @@ import { pollPatronRequests } from '../services/patronWatch';
 import { notify } from '../services/notifications';
 import { thanksTick } from '../services/waThanks';
 import { linkPhoneCalls } from '../services/phoneCalls';
+import { refreshSubscriptions } from '../services/subscriptionRefresh';
 import type { AbandonedDonation, PatronRequest, SiteKey } from '../services/hkmvClient';
 
 // WHAT WAS WRONG WITH THIS JOB, because it ran wrong for a long time and the
@@ -109,6 +110,17 @@ export function schedulePhoneCallLinks() {
   cron.schedule('*/3 * * * *', () => {
     void linkPhoneCalls().catch((e) => console.error('[CRON] phone call links:', (e as Error).message));
   }, { timezone: APP_TIMEZONE });
+}
+
+/**
+ * Recurring donations: ask the sites for what they say about each one DRM knows, once a night and a couple
+ * of minutes after the server starts, so the Recurring screen and the dashboard card show what is really
+ * active. Read-only against the sites. See services/subscriptionRefresh.ts.
+ */
+export function scheduleSubscriptionRefresh() {
+  const run = () => void refreshSubscriptions().catch((e) => console.error('[CRON] subscription refresh:', (e as Error).message));
+  cron.schedule('30 3 * * *', run, { timezone: APP_TIMEZONE });
+  setTimeout(run, 2 * 60_000);
 }
 
 export function scheduleNotifications(

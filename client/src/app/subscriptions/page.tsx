@@ -3,10 +3,13 @@
 import { useCallback, useEffect, useState, FormEvent } from "react";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
+import { toast } from "@/components/toast";
 import { ExportButton } from "@/components/export-button";
 import { number, shortDate } from "@/lib/format";
 import {
   Alert,
+  Badge,
   Button,
   EmptyState,
   Field,
@@ -33,15 +36,17 @@ interface Subscription {
   frequency: string;
   purpose: string;
   status: string;
+  /** Marked active AND money is really coming in; false for pending, failed, lapsed or unconfirmed ones. */
+  really_active?: boolean;
   next_charge_date?: string;
   created_at: string;
 }
 
-const statusTabs = ["active", "paused", "cancelled", "all"] as const;
+const statusTabs = ["active", "lapsed", "paused", "cancelled", "all"] as const;
 
 const TABS = statusTabs.map((s) => ({
   key: s,
-  label: s === "all" ? "All" : s[0].toUpperCase() + s.slice(1),
+  label: s === "all" ? "All" : s === "lapsed" ? "Not charging" : s[0].toUpperCase() + s.slice(1),
 }));
 
 export default function SubscriptionsPage() {
@@ -49,6 +54,22 @@ export default function SubscriptionsPage() {
   const [total, setTotal] = useState(0);
   const [tab, setTab] = useState<(typeof statusTabs)[number]>("active");
   const [showModal, setShowModal] = useState(false);
+  const { user } = useAuth();
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Ask the sites for the latest on every recurring donation. It runs in the background, so the list is
+  // reloaded a little later (it also refreshes by itself every night).
+  async function refreshFromSites() {
+    setRefreshing(true);
+    try {
+      await apiClient.post("/api/subscriptions/refresh", {});
+      toast.success("Asking the sites for the latest. Reload this list in a minute.");
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   // The one place the tab becomes query params, so the list request and the
   // download are built from the same value. Rebuilding them separately is how
@@ -77,9 +98,14 @@ export default function SubscriptionsPage() {
       <PageHeader
         eyebrow="Donors"
         title="Recurring donations"
-        subtitle="Monthly, quarterly and yearly donations"
+        subtitle="Active shows only donations that are really charging - confirmed by the site and paid lately"
         actions={
           <>
+            {(user?.role === "admin" || user?.role === "accountant") && (
+              <Button variant="secondary" icon="refresh" loading={refreshing} onClick={() => void refreshFromSites()}>
+                Refresh from sites
+              </Button>
+            )}
             <ExportButton
               path="/api/subscriptions/export"
               params={filterParams()}
@@ -141,7 +167,11 @@ export default function SubscriptionsPage() {
                 <Td className="capitalize">{s.purpose.replace("_", " ")}</Td>
                 <Td className="text-ink-muted">{shortDate(s.next_charge_date)}</Td>
                 <Td>
-                  <StatusBadge status={s.status} />
+                  {s.status === "active" && s.really_active === false ? (
+                    <Badge tone="warn">Not charging</Badge>
+                  ) : (
+                    <StatusBadge status={s.status} />
+                  )}
                 </Td>
               </tr>
             ))}

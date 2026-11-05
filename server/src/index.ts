@@ -53,7 +53,7 @@ import crmQrRoutes, { webhookRouter as razorpayWebhook } from './routes/crmQr';
 import profilesRoutes from './routes/profiles';
 import filesRoutes from './routes/files';
 import { confineRole, denyRole, readOnlyFor } from './middleware/auth';
-import { scheduleBirthdayAnniversaryCheck, scheduleNotifications, schedulePhoneCallLinks, scheduleWhatsAppThanks } from './utils/cron';
+import { scheduleBirthdayAnniversaryCheck, scheduleNotifications, schedulePhoneCallLinks, scheduleSubscriptionRefresh, scheduleWhatsAppThanks } from './utils/cron';
 import notificationsRoutes from './routes/notifications';
 import waThanksRoutes from './routes/waThanks';
 import phoneAppRoutes from './routes/phoneApp';
@@ -406,6 +406,7 @@ async function start(): Promise<void> {
   scheduleNotifications(storeAbandonedAttempt, storePatronRequest);
   scheduleWhatsAppThanks();
   schedulePhoneCallLinks();
+  scheduleSubscriptionRefresh();
 
   // Bind explicitly to 0.0.0.0 - Railway's proxy connects to the container over
   // its own network interface, not loopback, so binding to the default host can

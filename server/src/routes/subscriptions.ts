@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import pool from '../db/pool';
-import { authenticate } from '../middleware/auth';
+import { authenticate, authorize } from '../middleware/auth';
+import { REALLY_ACTIVE, NOT_CHARGING } from '../utils/subscriptionActive';
+import { refreshSubscriptions } from '../services/subscriptionRefresh';
 import {
   describeFilters,
   sendExport,
@@ -21,13 +23,17 @@ function buildSubscriptionFilters(
   const values: unknown[] = [];
   let idx = 1;
 
-  if (status) { conditions.push(`s.status = $${idx}`); values.push(status); idx++; }
+  // Active means REALLY active (utils/subscriptionActive.ts); "lapsed" is the ones marked active that are
+  // not charging. Every other tab is the plain status.
+  if (status === 'active') conditions.push(REALLY_ACTIVE('s'));
+  else if (status === 'lapsed') conditions.push(NOT_CHARGING('s'));
+  else if (status) { conditions.push(`s.status = $${idx}`); values.push(status); idx++; }
   if (person_id) { conditions.push(`s.person_id = $${idx}`); values.push(person_id); idx++; }
 
   return { where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '', values, next: idx };
 }
 
-const SUBSCRIPTION_SELECT = `s.*, p.name as donor_name, p.phone as donor_phone`;
+const SUBSCRIPTION_SELECT = `s.*, p.name as donor_name, p.phone as donor_phone, ${REALLY_ACTIVE('s')} AS really_active`;
 // Donors hidden as test donors are not listed, so the screen agrees with the dashboard card.
 const SUBSCRIPTION_FROM = `FROM subscriptions s JOIN people p ON s.person_id = p.id AND p.hidden_at IS NULL`;
 
@@ -100,6 +106,13 @@ async function exportSubscriptionsFile(
 }
 
 // Above GET '/:id' below, or Express reads "export.csv" as a subscription id.
+// Ask the sites for the latest on every recurring donation, now. Runs in the background (it asks the sites
+// donor by donor); the screen is reloaded a minute later. Also runs by itself every night.
+router.post('/refresh', authorize('admin', 'accountant'), (_req, res) => {
+  void refreshSubscriptions().catch((e) => console.error('subscriptions.refresh error:', (e as Error).message));
+  res.status(202).json({ started: true });
+});
+
 router.get('/export.csv', (req, res) => exportSubscriptionsFile(req, res, 'csv'));
 router.get('/export.xlsx', (req, res) => exportSubscriptionsFile(req, res, 'xlsx'));
 
