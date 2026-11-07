@@ -263,9 +263,12 @@ router.post('/conversations/:id/media', (req, res) =>
 router.post('/conversations/:id/template', (req, res) =>
   send(req, res, async () => {
     if (!req.body?.name) return 'Choose a template.';
+    const b64 = req.body?.base64 ? String(req.body.base64) : '';
+    if (b64.length > Math.ceil((MAX_MEDIA_BYTES * 4) / 3) + 8) return `That file is too large. The limit is ${Math.floor(MAX_MEDIA_BYTES / 1048576)} MB.`;
     return {
       kind: 'template', name: String(req.body.name), language: String(req.body.language ?? 'en'),
       params: Array.isArray(req.body.params) ? req.body.params.map(String) : [], clientRef: req.body?.client_ref,
+      file: b64 ? { bytes: Buffer.from(b64, 'base64'), mime: String(req.body?.mime ?? ''), filename: String(req.body?.filename ?? 'file').slice(0, 200) } : undefined,
     };
   }).catch((e) => { console.error('waChat.template error:', e); res.status(500).json({ error: 'Could not send. Try again.' }); })
 );

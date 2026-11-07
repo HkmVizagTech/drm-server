@@ -449,3 +449,8 @@ aside::-webkit-scrollbar-thumb {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* The phone's bottom bar gives way to an open WhatsApp conversation, so the message box has the screen. */
+body[data-chat-open="1"] .mobile-tabs {
+  display: none;
+}

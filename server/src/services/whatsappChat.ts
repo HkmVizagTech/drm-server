@@ -121,8 +121,8 @@ export interface TemplateInfo {
   language: string;
   body: string;
   paramCount: number;
-  /** A template whose header is a picture/video/document needs that file, which chat cannot supply. */
-  needsMedia: boolean;
+  /** The picture/video/document the template carries in its header, or null for a text-only template. */
+  header: 'IMAGE' | 'VIDEO' | 'DOCUMENT' | null;
 }
 
 export interface WaProvider {
@@ -131,6 +131,8 @@ export interface WaProvider {
   sendText(to: string, text: string): Promise<SendResult>;
   sendMedia(to: string, file: { bytes: Buffer; mime: string; filename: string; kind: MediaKind }, caption: string): Promise<SendResult>;
   sendTemplate(to: string, name: string, language: string, params: string[]): Promise<SendResult>;
+  /** A template whose header is a picture/video/document, sent with that file. */
+  sendTemplateWithMedia(to: string, name: string, language: string, params: string[], file: { bytes: Buffer; mime: string; filename: string }): Promise<SendResult>;
   listTemplates(): Promise<TemplateInfo[]>;
   /** An error the provider recorded after accepting the message, or null if none (yet). */
   messageError(providerMsgId: string): Promise<string | null>;
@@ -208,6 +210,29 @@ export const flaxxaProvider: WaProvider = {
     }
   },
 
+  async sendTemplateWithMedia(to, name, language, params, file) {
+    const token = process.env.FLAXXA_TOKEN;
+    if (!token) return { ok: false, reason: 'not_configured', detail: 'FLAXXA_TOKEN is not set' };
+    try {
+      const form = new FormData();
+      form.append('token', token);
+      form.append('phone', to);
+      form.append('template_name', name);
+      form.append('template_language', language || 'en');
+      form.append('components', JSON.stringify(params.length ? [{ type: 'body', parameters: params.map((text) => ({ type: 'text', text })) }] : []));
+      form.append('header_attachment', new Blob([new Uint8Array(file.bytes)], { type: file.mime }), file.filename);
+      const res = await fetch(`${FLAXXA}/sendtemplatemessage_withattachment`, { method: 'POST', body: form, signal: AbortSignal.timeout(60000) });
+      const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      // This endpoint answers with the WhatsApp id when it accepted the message (as the brick message relies on).
+      if (body.message_wamid || body.wamid || (body.status === 'success' && body.message_id)) {
+        return { ok: true, providerMsgId: body.message_id != null ? String(body.message_id) : null, wamid: String(body.message_wamid ?? body.wamid ?? '') || null };
+      }
+      return { ok: false, reason: 'rejected', detail: String(body.message ?? body.msg ?? `HTTP ${res.status}`).slice(0, 200) };
+    } catch (e) {
+      return { ok: false, reason: 'failed', detail: (e as Error).message };
+    }
+  },
+
   async listTemplates() {
     const token = process.env.FLAXXA_TOKEN;
     if (!token) return [];
@@ -230,7 +255,7 @@ export const flaxxaProvider: WaProvider = {
         language: String(t.language ?? 'en'),
         body,
         paramCount: nums.length ? Math.max(...nums) : 0,
-        needsMedia: !!header && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(String(header.format).toUpperCase()),
+        header: header && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(String(header.format).toUpperCase()) ? (String(header.format).toUpperCase() as 'IMAGE' | 'VIDEO' | 'DOCUMENT') : null,
       });
     }
     return out.sort((a, b) => a.name.localeCompare(b.name));
@@ -261,10 +286,10 @@ export function providerFor(_name = 'flaxxa'): WaProvider {
 }
 
 let templateCache: { at: number; list: TemplateInfo[] } | null = null;
-/** Approved templates that need nothing but text values, cached for 10 minutes. */
+/** Approved templates (text ones, and ones that carry a picture/video/document), cached for 10 minutes. */
 export async function chatTemplates(force = false): Promise<TemplateInfo[]> {
   if (!force && templateCache && Date.now() - templateCache.at < 10 * 60 * 1000) return templateCache.list;
-  const list = (await providerFor().listTemplates()).filter((t) => !t.needsMedia);
+  const list = await providerFor().listTemplates();
   templateCache = { at: Date.now(), list };
   return list;
 }
@@ -614,7 +639,7 @@ export function sendAllowed(userId: string, now = Date.now()): boolean {
 export type OutboundInput =
   | { kind: 'text'; text: string; clientRef?: string }
   | { kind: 'media'; bytes: Buffer; mime: string; filename: string; caption?: string; clientRef?: string }
-  | { kind: 'template'; name: string; language: string; params: string[]; clientRef?: string };
+  | { kind: 'template'; name: string; language: string; params: string[]; file?: { bytes: Buffer; mime: string; filename: string }; clientRef?: string };
 
 const MESSAGE_COLS = `id, conversation_id, direction, msg_type, body, media_key, media_mime, media_name, media_size,
   template_name, status, error, sent_by, created_at, delivered_at, read_at`;
@@ -677,10 +702,28 @@ export async function sendOutbound(conv: Conversation, userId: string, input: Ou
     if (!tpl) return fail(400, 'bad_template', 'That template is not available.');
     const params = input.params.map((p) => String(p ?? '').trim());
     if (params.length !== tpl.paramCount || params.some((p) => !p)) return fail(400, 'bad_params', `Fill in all ${tpl.paramCount} value${tpl.paramCount === 1 ? '' : 's'} for this template.`);
-    msgType = 'template';
     templateName = tpl.name;
+    msgType = 'template';
     body = tpl.body.replace(/\{\{(\d+)\}\}/g, (_m, n) => params[Number(n) - 1] ?? '');
-    send = () => provider.sendTemplate(to, tpl.name, tpl.language, params);
+    if (tpl.header) {
+      // A template with a picture/video/document in its header cannot go without that file.
+      if (!input.file) return fail(400, 'bad_file', `This template carries a ${tpl.header.toLowerCase()}. Attach one to send it.`);
+      const check = checkOutboundMedia(input.file.bytes, input.file.mime, input.file.filename);
+      if (!check.ok) return fail(400, 'bad_file', check.error);
+      const want = tpl.header.toLowerCase();
+      if (check.kind !== want) return fail(400, 'bad_file', `This template needs a ${want}, not a ${check.kind}.`);
+      msgType = check.kind;
+      mediaMime = check.mime;
+      mediaName = check.filename;
+      mediaSize = input.file.bytes.length;
+      mediaKey = await saveMedia(input.file.bytes, check.mime, check.filename);
+      if (!mediaKey) return fail(500, 'storage', 'Could not store the file. Try again.');
+      const f = { bytes: input.file.bytes, mime: check.mime, filename: check.filename };
+      send = () => provider.sendTemplateWithMedia(to, tpl.name, tpl.language, params, f);
+    } else {
+      if (input.file) return fail(400, 'bad_file', 'This template has no picture. Choose one that does, or remove the attachment.');
+      send = () => provider.sendTemplate(to, tpl.name, tpl.language, params);
+    }
   }
 
   let msgId: string;

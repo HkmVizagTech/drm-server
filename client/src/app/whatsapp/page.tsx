@@ -50,10 +50,11 @@ interface Msg {
   has_media: boolean;
   sent_by_name: string | null;
 }
-interface Tpl { name: string; language: string; body: string; paramCount: number }
+interface Tpl { name: string; language: string; body: string; paramCount: number; header: "IMAGE" | "VIDEO" | "DOCUMENT" | null }
 interface Team { id: string; name: string; role: string }
 interface AttachedFile { name: string; mime: string; size: number; base64: string; preview: string | null }
 
+const HEADER_ACCEPT = { IMAGE: "image/jpeg,image/png", VIDEO: "video/mp4,video/3gpp", DOCUMENT: ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt" } as const;
 const MAX_MB = 15;
 const ACCEPT = "image/jpeg,image/png,video/mp4,video/3gpp,audio/mpeg,audio/ogg,audio/aac,audio/mp4,audio/amr,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt";
 // Quick replies a caller can drop into the box and edit before sending.
@@ -319,10 +320,16 @@ function ChatInner() {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const fileInput = useRef<HTMLInputElement>(null);
+  const tplFileInput = useRef<HTMLInputElement>(null);
   const activeRef = useRef<string | null>(null);
   const listTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     activeRef.current = activeId;
+    // On a phone the bottom bar steps aside while a conversation is open (see globals.css).
+    document.body.dataset.chatOpen = activeId ? "1" : "";
+    return () => {
+      delete document.body.dataset.chatOpen;
+    };
   }, [activeId]);
 
   const active = useMemo(() => convs.find((c) => c.id === activeId) ?? null, [convs, activeId]);
@@ -576,10 +583,14 @@ function ChatInner() {
     setSending(true);
     try {
       applySent(
-        await apiClient.post(`/api/wa-chat/conversations/${current.id}/template`, { name: tpl.name, language: tpl.language, params: tplParams.slice(0, tpl.paramCount), client_ref: uid() })
+        await apiClient.post(`/api/wa-chat/conversations/${current.id}/template`, {
+          name: tpl.name, language: tpl.language, params: tplParams.slice(0, tpl.paramCount), client_ref: uid(),
+          ...(tpl.header && file ? { filename: file.name, mime: file.mime, base64: file.base64 } : {}),
+        })
       );
       setTplName("");
       setTplParams([]);
+      setFile(null);
     } catch (e) {
       toast((e as Error).message, { tone: "danger" });
     } finally {
@@ -605,7 +616,7 @@ function ChatInner() {
   const totalUnread = convs.reduce((n, c) => n + (c.unread_count > 0 ? 1 : 0), 0);
 
   return (
-    <div className="flex h-[calc(100dvh-3.5rem)] min-h-[480px] overflow-hidden border-line-soft bg-surface sm:h-[calc(100dvh-5rem)] sm:rounded-2xl sm:border sm:shadow-sm">
+    <div className={`flex min-h-[420px] overflow-hidden border-line-soft bg-surface lg:h-[calc(100dvh-5rem)] lg:rounded-2xl lg:border lg:shadow-sm ${activeId ? "h-[calc(100dvh-3.5rem)]" : "h-[calc(100dvh-7.5rem-env(safe-area-inset-bottom))]"}`}>
       {/* ---------------------------------------------------- conversations */}
       <aside className={`${activeId ? "hidden md:flex" : "flex"} w-full flex-none flex-col border-r border-line-soft bg-surface md:w-[22rem] xl:w-[28rem]`}>
         <div className="space-y-3 px-4 pb-3 pt-4">
@@ -811,24 +822,35 @@ function ChatInner() {
                 <div className="space-y-2">
                   <Alert tone="info">
                     {current.last_message_at && current.window_ends_at
-                      ? "More than 24 hours since this donor last wrote, so WhatsApp only allows an approved template message. Once they reply you can chat freely."
-                      : "This donor has not written to us yet, so the first message has to be an approved template."}
+                      ? "WhatsApp only lets us start a chat with an approved template (it can carry a picture). Pick one below. Once they reply you can type freely and send any picture or file."
+                      : "This person has not written to us yet, and WhatsApp only lets us start with an approved template (it can carry a picture). Pick one below. Once they reply you can type freely and send any picture or file."}
                   </Alert>
                   {templates === null ? <Skeleton className="h-9 w-full" /> : templates.length === 0 ? (
                     <p className="text-sm text-ink-muted">No approved text templates are available.</p>
                   ) : (
                     <div className="space-y-2">
-                      <select className="h-10 w-full rounded-control border border-line-strong bg-surface px-3 text-sm" value={tplName} onChange={(e) => { setTplName(e.target.value); setTplParams([]); }}>
+                      <select className="h-10 w-full rounded-control border border-line-strong bg-surface px-3 text-sm" value={tplName} onChange={(e) => { setTplName(e.target.value); setTplParams([]); setFile(null); }}>
                         <option value="">Choose a template…</option>
-                        {templates.map((t) => <option key={t.name} value={t.name}>{t.name}</option>)}
+                        {templates.map((t) => <option key={t.name} value={t.name}>{t.header === "IMAGE" ? "📷 " : t.header ? "📎 " : ""}{t.name}</option>)}
                       </select>
                       {tpl && (
                         <>
                           {Array.from({ length: tpl.paramCount }, (_v, i) => (
                             <Input key={i} placeholder={`Value for {{${i + 1}}}`} value={tplParams[i] ?? ""} onChange={(e) => setTplParams((p) => { const n = [...p]; n[i] = e.target.value; return n; })} />
                           ))}
+                          {tpl.header && (
+                            <div className="flex items-center gap-3 rounded-xl border border-dashed border-line-strong bg-sunken p-2.5">
+                              <input ref={tplFileInput} type="file" accept={HEADER_ACCEPT[tpl.header]} className="hidden" onChange={(e) => { pickFile(e.target.files?.[0]); e.target.value = ""; }} />
+                              {file?.preview ? /* eslint-disable-next-line @next/next/no-img-element */ <img src={file.preview} alt="" className="h-16 w-16 rounded-lg object-cover" /> : <span className="grid h-16 w-16 flex-none place-items-center rounded-lg bg-white text-brand-700"><Icon name="file" size={24} /></span>}
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-medium">{file ? file.name : `This template carries a ${tpl.header.toLowerCase()}`}</p>
+                                <p className="text-xs text-ink-faint">{file ? `${Math.max(1, Math.round(file.size / 1024))} KB` : "Attach it to send the message"}</p>
+                              </div>
+                              <Button size="sm" variant="secondary" icon="upload" onClick={() => tplFileInput.current?.click()}>{file ? "Change" : `Attach ${tpl.header.toLowerCase()}`}</Button>
+                            </div>
+                          )}
                           <p className="whitespace-pre-wrap rounded-xl bg-[#d9fdd3]/60 p-3 text-sm text-ink-soft">{tplPreview}</p>
-                          <Button variant="whatsapp" loading={sending} disabled={Array.from({ length: tpl.paramCount }, (_v, i) => (tplParams[i] ?? "").trim()).some((v) => !v)} onClick={() => void sendTemplate()}>Send template</Button>
+                          <Button variant="whatsapp" loading={sending} disabled={Array.from({ length: tpl.paramCount }, (_v, i) => (tplParams[i] ?? "").trim()).some((v) => !v) || (!!tpl.header && !file)} onClick={() => void sendTemplate()}>Send {tpl.header ? "with picture" : "message"}</Button>
                         </>
                       )}
                     </div>

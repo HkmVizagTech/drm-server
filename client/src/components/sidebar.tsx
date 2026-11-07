@@ -1,10 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
-import { apiClient } from "@/lib/api";
+import { useWhatsAppUnread } from "@/lib/wa-unread";
 import { useCallingAlerts } from "./calling-alerts";
 import { Icon, type IconName } from "./icons";
 import { useInApp } from "@/lib/phone-app";
@@ -205,20 +204,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   // permanent number beside Reminders that means nothing and gets ignored
   // within a week - which is worse than no badge at all.
   const { dueCount, sankalpam, patrons } = useCallingAlerts();
-  // Chats waiting for an answer: asked every 30 seconds, only for the people who can open them.
-  const [waUnread, setWaUnread] = useState(0);
-  const canChat = user?.role === "admin" || user?.role === "caller";
-  useEffect(() => {
-    if (!canChat) return;
-    let dead = false;
-    const ask = () => {
-      if (document.visibilityState !== "visible") return;
-      apiClient.get<{ chats: number }>("/api/wa-chat/unread-count").then((r) => !dead && setWaUnread(r.chats)).catch(() => undefined);
-    };
-    ask();
-    const t = setInterval(ask, 30000);
-    return () => { dead = true; clearInterval(t); };
-  }, [canChat]);
+  // Chats waiting for an answer: one shared poll (lib/wa-unread.ts), also behind the phone's bottom bar.
+  const waUnread = useWhatsAppUnread(user?.role);
   // Videos due today plus any missed: the day's job, not tomorrow's.
   const sankalpDue = sankalpam ? sankalpam.today + sankalpam.missed : 0;
 

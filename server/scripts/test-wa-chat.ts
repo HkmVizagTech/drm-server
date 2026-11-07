@@ -222,11 +222,20 @@ async function main() {
       ] }
     : { status: 'success', message_id: ++nextId };
   const t = await call('GET', '/api/wa-chat/templates?refresh=1');
-  check('only approved, text-only templates are offered', t.json.templates.length === 1 && t.json.templates[0].name === 'follow_up' && t.json.templates[0].paramCount === 2, t.json);
+  check('only approved templates are offered, with the picture ones marked', t.json.templates.length === 2 && t.json.templates.find((x: { name: string }) => x.name === 'follow_up').paramCount === 2 && t.json.templates.find((x: { name: string }) => x.name === 'with_image').header === 'IMAGE' && t.json.templates.find((x: { name: string }) => x.name === 'follow_up').header === null, t.json);
   s = await call('POST', `/api/wa-chat/conversations/${convId}/template`, { name: 'follow_up', language: 'en', params: ['Radha'] });
   check('a template with a missing value is refused', s.status === 400 && s.json.code === 'bad_params', s.json);
+  calls.length = 0;
   s = await call('POST', `/api/wa-chat/conversations/${convId}/template`, { name: 'with_image', language: 'en', params: [] });
-  check('a template that needs a picture header is not available here', s.status === 400, s.json);
+  check('a picture template without its picture is refused, nothing sent', s.status === 400 && s.json.code === 'bad_file' && /image/i.test(s.json.error) && calls.length === 0, s.json);
+  s = await call('POST', `/api/wa-chat/conversations/${convId}/template`, { name: 'with_image', language: 'en', params: [], filename: 'a.pdf', mime: 'application/pdf', base64: Buffer.from('%PDF-1.4 hello world').toString('base64') });
+  check('a PDF cannot go where the template needs a picture', s.status === 400 && /image/i.test(s.json.error) && calls.length === 0, s.json);
+  s = await call('POST', `/api/wa-chat/conversations/${convId}/template`, { name: 'follow_up', language: 'en', params: ['a', 'b'], filename: 'a.png', mime: 'image/png', base64: PNG.toString('base64') });
+  check('a text template refuses a picture it cannot carry', s.status === 400 && calls.length === 0, s.json);
+  s = await call('POST', `/api/wa-chat/conversations/${convId}/template`, { name: 'with_image', language: 'en', params: [], filename: 'seva.png', mime: 'image/png', base64: PNG.toString('base64'), client_ref: 'tp1' });
+  const pc = calls[calls.length - 1];
+  check('with its picture it goes out as a template with an attachment', s.status === 201 && pc?.url.endsWith('/sendtemplatemessage_withattachment') && pc.form?.template_name === 'with_image' && String(pc.form?.header_attachment).startsWith('[file image/png'), { s: s.json, pc });
+  check('and the thread shows it as a picture message, kept for later', s.json.message.msg_type === 'image' && s.json.message.template_name === 'with_image' && (await call('GET', `/api/wa-chat/messages/${s.json.message.id}/media`)).status === 200, s.json);
   calls.length = 0;
   s = await call('POST', `/api/wa-chat/conversations/${convId}/template`, { name: 'follow_up', language: 'en', params: ['Radha', 'Annadana seva'] });
   const tb = calls[0]?.body as { template_name: string; components: { parameters: { text: string }[] }[] } | undefined;
