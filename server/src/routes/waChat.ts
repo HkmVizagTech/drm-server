@@ -107,6 +107,15 @@ router.get('/status', (_req, res) => {
   });
 });
 
+// Has this number written to the temple in the last 24 hours (as far as DRM has seen)? The Seva wall asks
+// before opening a chat, so a caller is told up front when only their own WhatsApp can send.
+router.get('/window', async (req, res) => {
+  const key = phoneKey(String(req.query.phone ?? ''));
+  if (!isValidKey(key)) return res.status(400).json({ error: 'Enter a valid WhatsApp number.' });
+  const c = (await pool.query(`SELECT last_inbound_at, opted_out FROM wa_conversations WHERE phone = $1`, [key])).rows[0];
+  res.json({ replied: c ? windowOpen(c) : false, ends_at: c ? windowEndsAt(c) : null, opted_out: !!c?.opted_out });
+});
+
 router.get('/unread-count', async (_req, res) => {
   const r = await pool.query(`SELECT COALESCE(SUM(unread_count), 0)::int AS n, COUNT(*) FILTER (WHERE unread_count > 0)::int AS chats FROM wa_conversations`);
   res.json({ count: r.rows[0].n, chats: r.rows[0].chats });

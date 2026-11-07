@@ -30,6 +30,7 @@ import {
   Field,
   Input,
   Modal,
+  buttonClass,
   PageHeader,
   Pagination,
   SearchInput,
@@ -255,13 +256,70 @@ export function digitsOf(phone: string | null | undefined): string {
 }
 
 
+/**
+ * The donor has not written to the temple in the last 24 hours, so WhatsApp will not let the temple's
+ * number send them a normal message. Said before anything is tried, with the caller's own WhatsApp ready.
+ */
+function CannotSendDialog({ row, to, onClose, onOpenChat }: { row: Row; to: string; onClose: () => void; onOpenChat: () => void }) {
+  const text = thanksMessage(row);
+  return (
+    <Modal
+      title="This message cannot go from the temple's number"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="ghost" className="mr-auto" onClick={onOpenChat}>Open DRM chat (template)</Button>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <a href={`https://wa.me/${to}?text=${encodeURIComponent(text)}`} target="_blank" rel="noreferrer" onClick={onClose} className={buttonClass("whatsapp", "md")}>
+            Open in my WhatsApp
+          </a>
+        </>
+      }
+    >
+      <div className="space-y-3 text-sm">
+        <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
+          {row.donor_name ?? "This donor"} has not written to the temple&apos;s WhatsApp in the last 24 hours. WhatsApp only lets the
+          temple&apos;s number send them an approved template, so the picture and message cannot be sent from DRM.
+        </p>
+        <p className="text-ink-soft">
+          Send it from your own WhatsApp instead: it opens with the message below, and the brick picture as a link. After sending, tap
+          <b> WhatsApp sent</b> on this brick.
+        </p>
+        <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg bg-[#d9fdd3] p-3 font-sans text-[13px] leading-snug text-ink">{text}</pre>
+      </div>
+    </Modal>
+  );
+}
+
 /** Where the Seva wall hands the WhatsApp chat a brick to send (read once by app/whatsapp). */
 export const WA_PREFILL_KEY = "drm.waPrefill";
 
 /** The phone and WhatsApp icons: round, one tap each. */
 function ContactIcons({ row }: { row: Row }) {
   const router = useRouter();
+  const [checking, setChecking] = useState(false);
+  const [blocked, setBlocked] = useState(false);
   const to = digitsOf(row.phone);
+  const openChat = () => {
+    try {
+      sessionStorage.setItem(WA_PREFILL_KEY, JSON.stringify({ ref: row.ref, phone: to.slice(-10), message: thanksMessage(row, true) }));
+    } catch {
+      /* the chat still opens; the caller attaches the picture by hand */
+    }
+    router.push(`/whatsapp?phone=${to.slice(-10)}`);
+  };
+  const openWhatsApp = async () => {
+    setChecking(true);
+    try {
+      const w = await apiClient.get<{ replied: boolean }>(`/api/wa-chat/window?phone=${to.slice(-10)}`);
+      if (w.replied) openChat();
+      else setBlocked(true);
+    } catch {
+      setBlocked(true);
+    } finally {
+      setChecking(false);
+    }
+  };
   if (to.length < 10) return <span className="text-ink-faint">-</span>;
   const name = row.donor_name ?? "donor";
   const base =
@@ -283,24 +341,20 @@ function ContactIcons({ row }: { row: Row }) {
       </a>
       <button
         type="button"
-        // Opens DRM's own WhatsApp chat with this donor, the brick picture and the thank-you already in
-        // the message box: the caller checks it and presses Send, from the temple's number.
-        onClick={() => {
-          try {
-            sessionStorage.setItem(WA_PREFILL_KEY, JSON.stringify({ ref: row.ref, phone: to.slice(-10), message: thanksMessage(row, true) }));
-          } catch {
-            /* the chat still opens; the caller attaches the picture by hand */
-          }
-          router.push(`/whatsapp?phone=${to.slice(-10)}`);
-        }}
+        // First: has the donor written to the temple in the last 24 hours? Then the temple's number can send,
+        // and DRM's chat opens with the brick picture and thank-you in the box. If not, WhatsApp would refuse
+        // it, so the caller is told so and offered their own WhatsApp instead.
+        onClick={() => void openWhatsApp()}
+        disabled={checking}
         title={`WhatsApp ${name} the brick picture and message`}
         aria-label={`WhatsApp ${name} the brick picture and message`}
-        className={`${base} text-[#25D366] hover:bg-[#25D366]/10`}
+        className={`${base} text-[#25D366] hover:bg-[#25D366]/10 disabled:opacity-50`}
       >
         <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
           <path d={WHATSAPP_PATH} />
         </svg>
       </button>
+      {blocked && <CannotSendDialog row={row} to={to} onClose={() => setBlocked(false)} onOpenChat={openChat} />}
     </div>
   );
 }
