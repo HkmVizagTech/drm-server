@@ -3213,3 +3213,8 @@ INSERT INTO wa_contact_sync (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 INSERT INTO crm_dispositions (slug, label, counts_connected, suggests_status, wants_follow_up, sort_order) VALUES
   ('temporarily_unavailable', 'Temporarily unavailable', FALSE, 'attempting', TRUE, 85)
 ON CONFLICT (slug) DO NOTHING;
+
+/* A WhatsApp message sent for a Seva wall brick. The brick is marked "WhatsApp sent" only when WhatsApp
+   reports the message DELIVERED (or read) - not when it was handed over, since WhatsApp can still refuse it
+   (e.g. 131047, more than 24 hours since the donor last wrote). */
+ALTER TABLE wa_messages ADD COLUMN IF NOT EXISTS wall_item_id UUID REFERENCES seva_wall_items(id) ON DELETE SET NULL;

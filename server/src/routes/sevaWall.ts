@@ -1203,7 +1203,8 @@ router.post('/:ref/mark-sent', allow(...REVIEW), async (req, res) => {
 // when FLAXXA_SEVA_THANKS_TEMPLATE names one (body {{1}} donor name, {{2}} the seva). With neither, the
 // answer says so and the screen offers the caller's own WhatsApp (the wa.me link) instead.
 //
-// On success the brick is marked "WhatsApp sent", as the caller's own tap on that button would.
+// The brick is marked "WhatsApp sent" once WhatsApp reports the message delivered - not when it is handed
+// over, because WhatsApp can still refuse it.
 router.post('/:ref/send-whatsapp', allow(...REVIEW), async (req, res) => {
   try {
     const ref = String(req.params.ref);
@@ -1246,7 +1247,7 @@ router.post('/:ref/send-whatsapp', allow(...REVIEW), async (req, res) => {
     const file = { bytes, mime, filename: 'brick.jpg' };
     let out;
     if (windowOpen(conv)) {
-      out = await sendOutbound(conv, req.user!.userId, { kind: 'media', bytes, mime, filename: 'brick.jpg', caption: message, clientRef: req.body?.client_ref });
+      out = await sendOutbound(conv, req.user!.userId, { kind: 'media', bytes, mime, filename: 'brick.jpg', caption: message, clientRef: req.body?.client_ref, wallRef: item.id });
     } else {
       const name = process.env.FLAXXA_SEVA_THANKS_TEMPLATE;
       const tpl = name ? (await chatTemplates().catch(() => [])).find((t) => t.name === name) : null;
@@ -1259,23 +1260,12 @@ router.post('/:ref/send-whatsapp', allow(...REVIEW), async (req, res) => {
         });
       }
       const params = [String(row?.donor_name ?? 'Devotee').trim() || 'Devotee', String(req.body?.seva_label ?? 'seva').trim().slice(0, 60) || 'seva'].slice(0, tpl.paramCount);
-      out = await sendOutbound(conv, req.user!.userId, { kind: 'template', name: tpl.name, language: tpl.language, params, file, clientRef: req.body?.client_ref });
+      out = await sendOutbound(conv, req.user!.userId, { kind: 'template', name: tpl.name, language: tpl.language, params, file, clientRef: req.body?.client_ref, wallRef: item.id });
     }
     if (!out.ok) return res.status(out.httpStatus).json({ error: out.error, code: out.code });
     if (out.message.status === 'failed') return res.status(502).json({ error: out.message.error || 'WhatsApp did not accept the message.', code: 'failed' });
 
-    await pool.query(
-      `UPDATE seva_wall_items
-          SET whatsapp_sent_at = COALESCE(whatsapp_sent_at, NOW()),
-              whatsapp_sent_by = COALESCE(whatsapp_sent_by, $2),
-              status  = CASE WHEN called_at IS NOT NULL AND follow_up_on IS NULL THEN 'sent' ELSE status END,
-              sent_at = CASE WHEN called_at IS NOT NULL AND follow_up_on IS NULL THEN COALESCE(whatsapp_sent_at, NOW()) ELSE sent_at END,
-              sent_by = CASE WHEN called_at IS NOT NULL AND follow_up_on IS NULL THEN COALESCE(whatsapp_sent_by, $2) ELSE sent_by END,
-              updated_at = NOW()
-        WHERE id = $1 AND status = 'in_review'`,
-      [item.id, req.user?.userId ?? null]
-    );
-    await logEvent(pool, item.id, 'whatsapp_sent', req.user?.userId, 'sent from DRM');
+    // The brick is marked "WhatsApp sent" when WhatsApp reports it delivered (services/whatsappChat.ts).
     res.json({ ok: true, conversation_id: conv.id, via: windowOpen(conv) ? 'chat' : 'template' });
   } catch (err) {
     console.error('seva-wall send-whatsapp error:', (err as Error).message);

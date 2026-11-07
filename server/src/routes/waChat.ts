@@ -173,8 +173,8 @@ router.get('/conversations/:id/messages', async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
   const cols = `m.id, m.direction, m.msg_type, m.body, m.media_mime, m.media_name, m.media_size, m.template_name, m.status, m.error,
                 m.created_at, m.delivered_at, m.read_at, (m.media_key IS NOT NULL) AS has_media, (m.media_src_url IS NOT NULL) AS media_pending_src,
-                u.name AS sent_by_name`;
-  const from = `FROM wa_messages m LEFT JOIN users u ON u.id = m.sent_by WHERE m.conversation_id = $1`;
+                u.name AS sent_by_name, wi.share_token AS wall_share_token`;
+  const from = `FROM wa_messages m LEFT JOIN users u ON u.id = m.sent_by LEFT JOIN seva_wall_items wi ON wi.id = m.wall_item_id WHERE m.conversation_id = $1`;
   let rows;
   if (req.query.after) {
     // The live refresh: only what is new or has changed a tick since.
@@ -193,6 +193,10 @@ router.get('/conversations/:id/messages', async (req, res) => {
   }
   const more = !req.query.after && rows.length > limit;
   if (more) rows = rows.slice(1);
+  // A Seva wall brick's public picture page, for sending it from the caller's own WhatsApp when the
+  // temple's number was refused (the old way: a link, since a wa.me message cannot carry a picture).
+  const base = (process.env.PUBLIC_APP_URL ?? '').replace(/\/+$/, '') || `${String(req.get('x-forwarded-proto') ?? req.protocol).split(',')[0]}://${req.get('host')}`;
+  rows = rows.map(({ wall_share_token, ...m }: Record<string, unknown>) => ({ ...m, wall_share_url: wall_share_token ? `${base}/b/${String(wall_share_token).trim()}` : null }));
   void reconcilePending(c.id).catch(() => undefined);
   res.json({ messages: rows, more, conversation: shape(c), server_time: new Date().toISOString() });
 });
@@ -255,7 +259,7 @@ router.post('/conversations/:id/media', (req, res) =>
     return {
       kind: 'media', bytes: Buffer.from(b64, 'base64'), mime: String(req.body?.mime ?? ''),
       filename: String(req.body?.filename ?? 'file').slice(0, 200), caption: typeof req.body?.caption === 'string' ? req.body.caption : '',
-      clientRef: req.body?.client_ref,
+      clientRef: req.body?.client_ref, wallRef: req.body?.wall_ref ? String(req.body.wall_ref) : undefined,
     };
   }).catch((e) => { console.error('waChat.media error:', e); res.status(500).json({ error: 'Could not send. Try again.' }); })
 );
@@ -268,6 +272,7 @@ router.post('/conversations/:id/template', (req, res) =>
     return {
       kind: 'template', name: String(req.body.name), language: String(req.body.language ?? 'en'),
       params: Array.isArray(req.body.params) ? req.body.params.map(String) : [], clientRef: req.body?.client_ref,
+      wallRef: req.body?.wall_ref ? String(req.body.wall_ref) : undefined,
       file: b64 ? { bytes: Buffer.from(b64, 'base64'), mime: String(req.body?.mime ?? ''), filename: String(req.body?.filename ?? 'file').slice(0, 200) } : undefined,
     };
   }).catch((e) => { console.error('waChat.template error:', e); res.status(500).json({ error: 'Could not send. Try again.' }); })

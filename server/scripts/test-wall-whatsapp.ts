@@ -10,6 +10,7 @@ import pool from '../src/db/pool';
 import { runMigrations } from '../src/db/migrate';
 import { generateToken } from '../src/middleware/auth';
 import sevaWallRoutes from '../src/routes/sevaWall';
+import { ingestWebhook } from '../src/services/whatsappChat';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
 if (!/_test$/.test(dbName)) {
@@ -86,8 +87,27 @@ async function main() {
   check('sent as a picture with the message as its caption', r.status === 200 && r.json.ok === true && c?.url.endsWith('/sendmessagewithattachment') && c.form?.phone === '919876543210' && c.form?.message === MSG && String(c.form?.attachment).startsWith('[file image/png'), { r, c });
   const wm = (await pool.query(`SELECT msg_type, body, status FROM wa_messages ORDER BY created_at DESC LIMIT 1`)).rows[0];
   check('kept in the WhatsApp chat so the donor reply lands there', wm.msg_type === 'image' && wm.body === MSG && wm.status === 'sent', wm);
-  const it = (await pool.query(`SELECT whatsapp_sent_at, status FROM seva_wall_items WHERE id = $1`, [a])).rows[0];
-  check('the brick is marked "WhatsApp sent", and finished (it had been called)', !!it.whatsapp_sent_at && it.status === 'sent', it);
+  let it = (await pool.query(`SELECT whatsapp_sent_at, status FROM seva_wall_items WHERE id = $1`, [a])).rows[0];
+  check('handed to WhatsApp is not yet "sent": WhatsApp can still refuse it', !it.whatsapp_sent_at && it.status === 'in_review', it);
+  const tick = (wamid: string, status: string, errors?: unknown[]) => ingestWebhook({ entry: [{ changes: [{ value: { statuses: [{ id: wamid, status, recipient_id: '919876543210', timestamp: String(Math.floor(Date.now() / 1000)), ...(errors ? { errors } : {}) }] } }] }] });
+  const sentMsg = (await pool.query(`SELECT id FROM wa_messages ORDER BY created_at DESC LIMIT 1`)).rows[0].id;
+  await pool.query(`UPDATE wa_messages SET wamid = 'wamid.WALL1' WHERE id = $1`, [sentMsg]);
+  await tick('wamid.WALL1', 'delivered');
+  it = (await pool.query(`SELECT whatsapp_sent_at, status FROM seva_wall_items WHERE id = $1`, [a])).rows[0];
+  check('delivered: now the brick is "WhatsApp sent", and finished (it had been called)', !!it.whatsapp_sent_at && it.status === 'sent', it);
+  const ev = (await pool.query(`SELECT COUNT(*)::int n FROM seva_wall_events WHERE item_id = $1 AND action = 'whatsapp_sent'`, [a])).rows[0].n;
+  await tick('wamid.WALL1', 'read');
+  check('a later "read" does not mark it twice', (await pool.query(`SELECT COUNT(*)::int n FROM seva_wall_events WHERE item_id = $1 AND action = 'whatsapp_sent'`, [a])).rows[0].n === ev && ev === 1, ev);
+
+  console.log('\n--- WhatsApp refuses it (131047): the brick stays not sent ---');
+  const refused = await item('Refused Donor', '9876500009', PNG);
+  await pool.query(`INSERT INTO wa_conversations (phone, last_inbound_at, last_message_at) VALUES ('9876500009', NOW(), NOW())`);
+  r = await post(refused, { message: MSG });
+  const rm = (await pool.query(`SELECT id FROM wa_messages ORDER BY created_at DESC LIMIT 1`)).rows[0].id;
+  await pool.query(`UPDATE wa_messages SET wamid = 'wamid.WALL2' WHERE id = $1`, [rm]);
+  await ingestWebhook({ entry: [{ changes: [{ value: { statuses: [{ id: 'wamid.WALL2', status: 'failed', recipient_id: '919876500009', timestamp: String(Math.floor(Date.now() / 1000)), errors: [{ title: 'Re-engagement message', code: 131047 }] }] } }] }] });
+  const ri = (await pool.query(`SELECT whatsapp_sent_at, status FROM seva_wall_items WHERE id = $1`, [refused])).rows[0];
+  check('refused by WhatsApp: the brick is NOT marked sent', r.status === 200 && !ri.whatsapp_sent_at && ri.status === 'in_review', { r, ri });
 
   console.log('\n--- the checks ---');
   check('an accountant cannot send', (await post(a, { message: MSG }, 'accountant', ACCT)).status === 403);

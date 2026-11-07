@@ -440,8 +440,33 @@ export async function applyStatus(where: { wamid?: string; id?: string }, status
       WHERE id = $1`,
     [row.id, status, at]
   );
+  if (status === 'delivered' || status === 'read') await markWallDelivered(row.id);
   publishConv(row.id, 'status');
   return 'changed';
+}
+
+/** A Seva wall brick's message reached the donor: tick the brick "WhatsApp sent", as the button would. */
+async function markWallDelivered(messageId: string): Promise<void> {
+  try {
+    const r = await pool.query(
+      `UPDATE seva_wall_items i
+          SET whatsapp_sent_at = COALESCE(i.whatsapp_sent_at, NOW()),
+              whatsapp_sent_by = COALESCE(i.whatsapp_sent_by, m.sent_by),
+              status  = CASE WHEN i.called_at IS NOT NULL AND i.follow_up_on IS NULL THEN 'sent' ELSE i.status END,
+              sent_at = CASE WHEN i.called_at IS NOT NULL AND i.follow_up_on IS NULL THEN COALESCE(i.whatsapp_sent_at, NOW()) ELSE i.sent_at END,
+              sent_by = CASE WHEN i.called_at IS NOT NULL AND i.follow_up_on IS NULL THEN COALESCE(i.whatsapp_sent_by, m.sent_by) ELSE i.sent_by END,
+              updated_at = NOW()
+         FROM wa_messages m
+        WHERE m.id = $1 AND i.id = m.wall_item_id AND i.status = 'in_review' AND i.whatsapp_sent_at IS NULL
+        RETURNING i.id, m.sent_by`,
+      [messageId]
+    );
+    if (r.rows[0]) {
+      await pool.query(`INSERT INTO seva_wall_events (item_id, action, note, by_user) VALUES ($1, 'whatsapp_sent', 'delivered on WhatsApp', $2)`, [r.rows[0].id, r.rows[0].sent_by]);
+    }
+  } catch (e) {
+    console.error('wa: marking the brick sent failed (non-fatal):', (e as Error).message);
+  }
 }
 
 /** Tell watching screens that a message in some conversation changed. */
@@ -637,9 +662,9 @@ export function sendAllowed(userId: string, now = Date.now()): boolean {
 }
 
 export type OutboundInput =
-  | { kind: 'text'; text: string; clientRef?: string }
-  | { kind: 'media'; bytes: Buffer; mime: string; filename: string; caption?: string; clientRef?: string }
-  | { kind: 'template'; name: string; language: string; params: string[]; file?: { bytes: Buffer; mime: string; filename: string }; clientRef?: string };
+  | { kind: 'text'; text: string; clientRef?: string; wallRef?: string }
+  | { kind: 'media'; bytes: Buffer; mime: string; filename: string; caption?: string; clientRef?: string; wallRef?: string }
+  | { kind: 'template'; name: string; language: string; params: string[]; file?: { bytes: Buffer; mime: string; filename: string }; clientRef?: string; wallRef?: string };
 
 const MESSAGE_COLS = `id, conversation_id, direction, msg_type, body, media_key, media_mime, media_name, media_size,
   template_name, status, error, sent_by, created_at, delivered_at, read_at`;
@@ -726,9 +751,10 @@ export async function sendOutbound(conv: Conversation, userId: string, input: Ou
   let msgId: string;
   try {
     const ins = await pool.query(
-      `INSERT INTO wa_messages (conversation_id, direction, msg_type, body, media_key, media_mime, media_name, media_size, template_name, status, sent_by, client_ref)
-       VALUES ($1, 'outbound', $2, $3, $4, $5, $6, $7, $8, 'queued', $9, $10) RETURNING id`,
-      [conv.id, msgType, body, mediaKey, mediaMime, mediaName, mediaSize, templateName, userId, clientRef]
+      `INSERT INTO wa_messages (conversation_id, direction, msg_type, body, media_key, media_mime, media_name, media_size, template_name, status, sent_by, client_ref, wall_item_id)
+       VALUES ($1, 'outbound', $2, $3, $4, $5, $6, $7, $8, 'queued', $9, $10,
+               (SELECT id FROM seva_wall_items WHERE (id::text = $11 OR donation_id::text = $11) LIMIT 1)) RETURNING id`,
+      [conv.id, msgType, body, mediaKey, mediaMime, mediaName, mediaSize, templateName, userId, clientRef, input.wallRef && /^[0-9a-f-]{36}$/i.test(input.wallRef) ? input.wallRef : null]
     );
     msgId = ins.rows[0].id;
   } catch (e) {

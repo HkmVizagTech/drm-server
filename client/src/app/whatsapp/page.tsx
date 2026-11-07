@@ -51,6 +51,7 @@ interface Msg {
   created_at: string;
   has_media: boolean;
   sent_by_name: string | null;
+  wall_share_url?: string | null;
 }
 interface Tpl { name: string; language: string; body: string; paramCount: number; header: "IMAGE" | "VIDEO" | "DOCUMENT" | null }
 interface Team { id: string; name: string; role: string }
@@ -89,6 +90,16 @@ const asDataUrl = (b: Blob) =>
     r.onerror = () => no(new Error("read"));
     r.readAsDataURL(b);
   });
+/** The old way, for when WhatsApp refused the temple's number: the caller's own WhatsApp with the text (and the brick picture's link, since a wa.me message cannot carry a picture). */
+function ownWhatsAppLink(phone: string, m: Msg): string {
+  const intro = "Here is a picture of your brick with your name printed.";
+  let text = m.body ?? "";
+  if (m.wall_share_url) {
+    text = text.includes(intro) ? text.replace(intro, `Here is a picture of your brick with your name printed:\n${m.wall_share_url}`) : `${text}\n\n${m.wall_share_url}`;
+  }
+  const to = phone.length === 10 ? `91${phone}` : phone;
+  return `https://wa.me/${to}?text=${encodeURIComponent(text)}`;
+}
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function leftLabel(ms: number): string {
@@ -526,19 +537,6 @@ function ChatInner() {
     }
   }
 
-  /** After the brick went out from here, tick it off on the Seva wall too. */
-  async function markWallSent(status: string) {
-    if (!wallRef || status === "failed") return;
-    const ref = wallRef;
-    setWallRef(null);
-    try {
-      await apiClient.post(`/api/seva-wall/${ref}/mark-sent`, {});
-      toast("Marked \"WhatsApp sent\" on the Seva wall");
-    } catch {
-      /* already marked, or not waiting: nothing to do */
-    }
-  }
-
   /* ---- deep link: /whatsapp?phone=... or ?person=... ---- */
   const startedFor = useRef<string | null>(null);
   useEffect(() => {
@@ -599,9 +597,11 @@ function ChatInner() {
     try {
       const r = await apiClient.post<{ message: Msg; conversation: Conv }>(`/api/wa-chat/conversations/${current.id}/media`, {
         filename: file.name, mime: file.mime, base64: file.base64, caption: draft.trim(), client_ref: uid(),
+        ...(wallRef ? { wall_ref: wallRef } : {}),
       });
       applySent(r);
-      void markWallSent(r.message.status);
+      if (wallRef && r.message.status !== "failed") toast("The brick will be marked \"WhatsApp sent\" on the Seva wall once WhatsApp delivers it.");
+      setWallRef(null);
       setFile(null);
       setDraft("");
     } catch (e) {
@@ -644,9 +644,11 @@ function ChatInner() {
       const sent = await apiClient.post<{ message: Msg; conversation: Conv }>(`/api/wa-chat/conversations/${current.id}/template`, {
           name: tpl.name, language: tpl.language, params: tplParams.slice(0, tpl.paramCount), client_ref: uid(),
           ...(tpl.header && file ? { filename: file.name, mime: file.mime, base64: file.base64 } : {}),
+          ...(wallRef ? { wall_ref: wallRef } : {}),
       });
       applySent(sent);
-      void markWallSent(sent.message.status);
+      if (wallRef && sent.message.status !== "failed") toast("The brick will be marked \"WhatsApp sent\" on the Seva wall once WhatsApp delivers it.");
+      setWallRef(null);
       setTplName("");
       setTplParams([]);
       setFile(null);
@@ -820,7 +822,11 @@ function ChatInner() {
                           <p className="mt-1 border-t border-red-200 pt-1 text-xs text-danger">
                             {m.error || "Not delivered."}{" "}
                             {/24 hours|re-engagement|131047/i.test(m.error ?? "") ? (
-                              <button className="font-semibold underline" onClick={() => setShowTpl(true)}>Send as a template</button>
+                              <span className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                                <span className="text-ink-muted">This person has not written in 24 hours.</span>
+                                <a className="font-semibold text-[#1da851] underline" href={ownWhatsAppLink(current.phone, m)} target="_blank" rel="noreferrer">Send from my WhatsApp</a>
+                                <button className="font-semibold underline" onClick={() => setShowTpl(true)}>Send as a template</button>
+                              </span>
                             ) : (
                               m.msg_type === "text" && m.body && canType && <button className="font-semibold underline" onClick={() => void sendText(m.body!)}>Send again</button>
                             )}
@@ -842,7 +848,7 @@ function ChatInner() {
             <footer className="border-t border-line-soft bg-surface px-3 py-3 sm:px-4">
               {wallRef && !current.opted_out && (
                 <p className="mb-2 rounded-lg bg-brand-50 px-3 py-2 text-xs text-brand-800">
-                  <b>Seva wall:</b> the brick picture and thank-you are ready below. Check them and press Send - the brick is then marked &quot;WhatsApp sent&quot;.
+                  <b>Seva wall:</b> the brick picture and thank-you are ready below. Check them and press Send - the brick is marked &quot;WhatsApp sent&quot; once WhatsApp delivers it.
 
                 </p>
               )}
