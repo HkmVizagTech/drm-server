@@ -1,8 +1,10 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
+import { apiClient } from "@/lib/api";
 import { useCallingAlerts } from "./calling-alerts";
 import { Icon, type IconName } from "./icons";
 import { useInApp } from "@/lib/phone-app";
@@ -39,6 +41,8 @@ export const navGroups: NavGroup[] = [
       { href: "/dashboard", label: "Dashboard", icon: "home", roles: ["admin", "accountant", "volunteer_coordinator"] },
       // What each caller did today: calls, answered, talk time, breaks, targets. Admin only.
       { href: "/team-activity", label: "Team activity", icon: "chart", roles: ["admin"] },
+      // Chat with donors on WhatsApp: replies, pictures, files. Admin and callers.
+      { href: "/whatsapp", label: "WhatsApp chats", icon: "message", roles: CALLING_AND_UP },
     ],
   },
   {
@@ -201,6 +205,20 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   // permanent number beside Reminders that means nothing and gets ignored
   // within a week - which is worse than no badge at all.
   const { dueCount, sankalpam, patrons } = useCallingAlerts();
+  // Chats waiting for an answer: asked every 30 seconds, only for the people who can open them.
+  const [waUnread, setWaUnread] = useState(0);
+  const canChat = user?.role === "admin" || user?.role === "caller";
+  useEffect(() => {
+    if (!canChat) return;
+    let dead = false;
+    const ask = () => {
+      if (document.visibilityState !== "visible") return;
+      apiClient.get<{ chats: number }>("/api/wa-chat/unread-count").then((r) => !dead && setWaUnread(r.chats)).catch(() => undefined);
+    };
+    ask();
+    const t = setInterval(ask, 30000);
+    return () => { dead = true; clearInterval(t); };
+  }, [canChat]);
   // Videos due today plus any missed: the day's job, not tomorrow's.
   const sankalpDue = sankalpam ? sankalpam.today + sankalpam.missed : 0;
 
@@ -289,6 +307,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
                       className={active ? "text-brand-700" : "text-ink-muted group-hover:text-ink-soft"}
                     />
                     <span className="truncate">{item.label}</span>
+                    {item.href === "/whatsapp" && waUnread > 0 && (
+                      <span className="ml-auto grid h-5 min-w-5 flex-none place-items-center rounded-full bg-[#25D366] px-1.5 text-2xs font-semibold tabular-nums text-white shadow-flat">
+                        {waUnread > 99 ? "99+" : waUnread}
+                      </span>
+                    )}
                     {item.href === "/sankalpam" && sankalpDue > 0 && (
                       <span className="ml-auto grid h-5 min-w-5 flex-none place-items-center rounded-full bg-amber-500 px-1.5 text-2xs font-semibold tabular-nums text-white shadow-flat">
                         {sankalpDue > 99 ? "99+" : sankalpDue}

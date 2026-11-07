@@ -3120,3 +3120,88 @@ CREATE TABLE IF NOT EXISTS devotee_otps (
 -- Null if it was not sent (no template set, or WhatsApp refused it).
 ALTER TABLE seva_wall_items ADD COLUMN IF NOT EXISTS devotee_notified_at TIMESTAMPTZ;
 
+
+/* WhatsApp chat: callers and admins talk to donors from DRM.
+   One conversation per number. `phone` is the 10 digits for an Indian number (the same rule as people.phone)
+   and the full international digits otherwise. last_inbound_at is the donor's latest message: WhatsApp only
+   allows free-form replies for 24 hours after it, after which only an approved template may be sent. */
+CREATE TABLE IF NOT EXISTS wa_conversations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  phone VARCHAR(20) NOT NULL UNIQUE,
+  person_id UUID REFERENCES people(id) ON DELETE SET NULL,
+  display_name VARCHAR(200),
+  provider VARCHAR(20) NOT NULL DEFAULT 'flaxxa',
+  assigned_to UUID REFERENCES users(id) ON DELETE SET NULL,
+  last_message_at TIMESTAMPTZ,
+  last_message_text TEXT,
+  last_message_dir VARCHAR(8),
+  last_inbound_at TIMESTAMPTZ,
+  unread_count INTEGER NOT NULL DEFAULT 0,
+  opted_out BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_wa_conv_last ON wa_conversations (last_message_at DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_wa_conv_person ON wa_conversations (person_id);
+
+CREATE TABLE IF NOT EXISTS wa_messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID NOT NULL REFERENCES wa_conversations(id) ON DELETE CASCADE,
+  direction VARCHAR(8) NOT NULL,                 -- inbound | outbound
+  msg_type VARCHAR(20) NOT NULL DEFAULT 'text',  -- text image video audio document sticker location contacts reaction template other
+  body TEXT,
+  media_key TEXT,                                -- storage key, or 'db:<uuid>' when no object storage is set up
+  media_src_url TEXT,                            -- the provider's temporary link, kept to retry a failed download
+  media_mime VARCHAR(100),
+  media_name VARCHAR(255),
+  media_size INTEGER,
+  template_name VARCHAR(120),
+  wamid VARCHAR(200),
+  provider_msg_id VARCHAR(60),
+  status VARCHAR(12) NOT NULL DEFAULT 'queued',  -- queued sent delivered read failed received
+  error TEXT,
+  sent_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  client_ref VARCHAR(64),                        -- stops a double-click or retry from sending twice
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  delivered_at TIMESTAMPTZ,
+  read_at TIMESTAMPTZ,
+  status_at TIMESTAMPTZ NOT NULL DEFAULT NOW()   -- when the status last changed: the live refresh asks for what changed since
+);
+ALTER TABLE wa_messages ADD COLUMN IF NOT EXISTS status_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+CREATE UNIQUE INDEX IF NOT EXISTS uq_wa_msg_wamid ON wa_messages (wamid) WHERE wamid IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_wa_msg_client_ref ON wa_messages (conversation_id, client_ref) WHERE client_ref IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_wa_msg_conv ON wa_messages (conversation_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wa_msg_provider ON wa_messages (provider_msg_id) WHERE provider_msg_id IS NOT NULL;
+
+/* Media bytes, only when object storage is not configured. */
+CREATE TABLE IF NOT EXISTS wa_media (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mime VARCHAR(100) NOT NULL,
+  bytes BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+/* Every contact in the temple's WhatsApp account (Flaxxa), copied here so a caller can search them all
+   and start a chat. phone is the same key as wa_conversations.phone. Filled by the contact sync
+   (services/whatsappContacts.ts), which can be re-run safely. */
+CREATE TABLE IF NOT EXISTS wa_contacts (
+  phone VARCHAR(20) PRIMARY KEY,
+  name VARCHAR(200),
+  flaxxa_id BIGINT,
+  synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_wa_contacts_name ON wa_contacts (lower(name));
+
+/* The state of the last contact sync: one row. */
+CREATE TABLE IF NOT EXISTS wa_contact_sync (
+  id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  status VARCHAR(12) NOT NULL DEFAULT 'idle',   -- idle running done failed
+  page INTEGER NOT NULL DEFAULT 0,
+  pages INTEGER NOT NULL DEFAULT 0,
+  total INTEGER NOT NULL DEFAULT 0,
+  imported INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  started_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ
+);
+INSERT INTO wa_contact_sync (id) VALUES (1) ON CONFLICT (id) DO NOTHING;

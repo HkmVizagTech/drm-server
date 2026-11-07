@@ -207,7 +207,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             </div>
           )}
 
-          <div className="mx-auto max-w-[1400px] px-4 pb-8 pt-5 sm:px-6 sm:pt-6">
+          {/* The chat is a workspace, not a page: it takes the whole width and height under the top bar. */}
+          <div className={pathname.startsWith("/whatsapp") ? "px-0 pb-0 pt-0 sm:px-3 sm:pb-3 sm:pt-3" : "mx-auto max-w-[1400px] px-4 pb-8 pt-5 sm:px-6 sm:pt-6"}>
             {/* Inside the Android app only: links the phone, rings tel: links
                 from the SIM, and asks for permissions. Renders nothing in a browser. */}
             <PhoneAppBridge />

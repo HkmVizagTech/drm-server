@@ -49,8 +49,10 @@ types.setTypeParser(DATE_OID, (value: string) => value);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  options: `-c timezone=${TIMEZONE}`,
+  ssl: process.env.NODE_ENV === 'production' || process.env.DB_SSL === '1' ? { rejectUnauthorized: false } : false,
+  // DB_READ_ONLY=1 makes Postgres itself refuse every write on this connection: for looking at a real
+  // database from a laptop. Never set on the live server.
+  options: `-c timezone=${TIMEZONE}${process.env.DB_READ_ONLY === '1' ? ' -c default_transaction_read_only=on' : ''}`,
 });
 
 // A pooled client that's sitting idle can hit a background error (Railway's

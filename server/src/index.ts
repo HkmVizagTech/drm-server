@@ -56,6 +56,7 @@ import { confineRole, denyRole, readOnlyFor } from './middleware/auth';
 import { scheduleBirthdayAnniversaryCheck, scheduleNotifications, schedulePhoneCallLinks, scheduleSubscriptionRefresh, scheduleWhatsAppThanks } from './utils/cron';
 import notificationsRoutes from './routes/notifications';
 import waThanksRoutes from './routes/waThanks';
+import waChatRoutes, { webhookRouter as waChatWebhook } from './routes/waChat';
 import phoneAppRoutes from './routes/phoneApp';
 import unmatchedCallsRoutes from './routes/unmatchedCalls';
 import phoneDialerRoutes from './routes/phoneDialer';
@@ -284,6 +285,9 @@ app.use('/api/sankalpam', sankalpamRoutes);
 // The bell: nearly gave and Sankalpam, as they happen.
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/wa-thanks', waThanksRoutes);
+// Callers and admins chat with donors on WhatsApp. The webhook is public (shared secret); the rest is signed in.
+app.use('/api/wa-chat-webhook', waChatWebhook);
+app.use('/api/wa-chat', waChatRoutes);
 // The Android app: calls and recordings from callers' phones.
 app.use('/api/app', phoneAppRoutes);
 app.use('/api/unmatched-calls', unmatchedCallsRoutes);

@@ -13,6 +13,9 @@ const API_URL =
   process.env.NEXT_PUBLIC_API_URL ??
   (process.env.NODE_ENV === 'development' ? 'http://localhost:4000' : '');
 
+/** The full address of an API path, for the few callers that need fetch themselves (a live stream). */
+export const apiUrl = (path: string) => `${API_URL}${path}`;
+
 /** Keep a renewed login when the server sends one - it does when the stored one is half used. */
 function keepRenewedToken(res: Response) {
   const fresh = res.headers.get('x-new-token');
