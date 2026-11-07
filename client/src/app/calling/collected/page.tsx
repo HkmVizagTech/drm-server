@@ -28,6 +28,7 @@
 // raising the receipt is a separate, deliberate act with its own warning.
 
 import { useCallback, useEffect, useState } from "react";
+import { useSessionState } from "@/lib/session-state";
 import Link from "next/link";
 import { api, apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -122,12 +123,12 @@ export default function CollectedByHandPage() {
   const canVerify = user?.role === "admin" || user?.role === "accountant";
   const canChooseCaller = !!user && user.role !== "caller";
 
-  const [verified, setVerified] = useState("");
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [userId, setUserId] = useState("");
+  const [verified, setVerified] = useSessionState("collected:verified", "");
+  const [fromDate, setFromDate] = useSessionState("collected:fromDate", "");
+  const [toDate, setToDate] = useSessionState("collected:toDate", "");
+  const [search, setSearch] = useSessionState("collected:search", "");
+  const [debouncedSearch, setDebouncedSearch] = useSessionState("collected:debouncedSearch", "");
+  const [userId, setUserId] = useSessionState("collected:userId", "");
 
   const [data, setData] = useState<CollectionsResponse | null>(null);
   const [callers, setCallers] = useState<TeamMember[]>([]);

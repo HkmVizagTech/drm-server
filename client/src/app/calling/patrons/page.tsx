@@ -15,6 +15,7 @@
 // "needs a call now" count.
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useSessionState } from "@/lib/session-state";
 import { useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -78,9 +79,9 @@ export default function PatronsPage() {
   const { user } = useAuth();
   const elevated = user?.role === "admin";
 
-  const [view, setViewRaw] = useState<"open" | "set_aside">("open");
-  const [mine, setMineRaw] = useState(false);
-  const [search, setSearchRaw] = useState("");
+  const [view, setViewRaw] = useSessionState<"open" | "set_aside">("patrons:view", "open");
+  const [mine, setMineRaw] = useSessionState("patrons:mine", false);
+  const [search, setSearchRaw] = useSessionState("patrons:search", "");
   const setView = setViewRaw;
   const setMine = setMineRaw;
   const setSearch = setSearchRaw;

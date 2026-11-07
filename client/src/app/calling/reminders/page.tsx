@@ -14,6 +14,7 @@
 // stays first: a promise the temple broke is worse than one it hasn't kept yet.
 
 import { useCallback, useEffect, useState } from "react";
+import { useSessionState } from "@/lib/session-state";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
@@ -109,7 +110,7 @@ function whenText(iso: string): string {
 export default function RemindersPage() {
   const [board, setBoard] = useState<Board | null>(null);
   const [loading, setLoading] = useState(true);
-  const [mine, setMine] = useState(false);
+  const [mine, setMine] = useSessionState("reminders:mine", false);
   const [showDone, setShowDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

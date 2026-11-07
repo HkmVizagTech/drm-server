@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { clearSavedFilters } from "./session-state";
 import { useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
 import { restoreAppSession } from "@/lib/app-session";
@@ -66,6 +67,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = () => {
     const wasDevotee = user?.role === "devotee";
     localStorage.removeItem("token");
+    // The next person to sign in on this tab starts with no one else's filters.
+    clearSavedFilters();
     setUser(null);
     // In the app, signing out also signs the phone out - or the app would sign
     // straight back in with the phone's key on the next screen.

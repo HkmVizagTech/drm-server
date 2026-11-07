@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, FormEvent } from "react";
+import { useSessionState } from "@/lib/session-state";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -52,7 +53,7 @@ const TABS = statusTabs.map((s) => ({
 export default function SubscriptionsPage() {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [total, setTotal] = useState(0);
-  const [tab, setTab] = useState<(typeof statusTabs)[number]>("active");
+  const [tab, setTab] = useSessionState<(typeof statusTabs)[number]>("subscriptions:tab", "active");
   const [showModal, setShowModal] = useState(false);
   const { user } = useAuth();
   const [refreshing, setRefreshing] = useState(false);

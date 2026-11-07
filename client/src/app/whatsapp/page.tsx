@@ -11,6 +11,7 @@
 // donor's last message, an approved template after that, and nothing at all to a donor who wrote STOP.
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSessionState } from "@/lib/session-state";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { apiClient, apiUrl } from "@/lib/api";
@@ -19,6 +20,7 @@ import { clockTime, dateTime, istDateKey, istToday } from "@/lib/format";
 import { Alert, Avatar, Badge, Button, EmptyState, Input, SearchInput, Skeleton, Textarea } from "@/components/ui";
 import { Icon } from "@/components/icons";
 import { toast } from "@/components/toast";
+import { WA_PREFILL_KEY } from "@/components/seva-wall/wall-table";
 
 interface Conv {
   id: string;
@@ -70,6 +72,23 @@ const shownPhone = (p: string) => (p.length === 10 ? `+91 ${p.slice(0, 5)} ${p.s
 const phoneOf = (d: string) => (d.length >= 12 && d.startsWith("91") ? d.slice(2) : d.length === 11 && d.startsWith("0") ? d.slice(1) : d);
 const uid = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
 const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
+/** A picture WhatsApp will carry: JPEG or PNG as is, anything else (WebP) redrawn as a JPEG. */
+async function whatsappPicture(blob: Blob): Promise<Blob> {
+  if (blob.type === "image/jpeg" || blob.type === "image/png") return blob;
+  const bmp = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bmp.width;
+  canvas.height = bmp.height;
+  canvas.getContext("2d")!.drawImage(bmp, 0, 0);
+  return new Promise((ok, no) => canvas.toBlob((b) => (b ? ok(b) : no(new Error("convert"))), "image/jpeg", 0.92));
+}
+const asDataUrl = (b: Blob) =>
+  new Promise<string>((ok, no) => {
+    const r = new FileReader();
+    r.onload = () => ok(String(r.result));
+    r.onerror = () => no(new Error("read"));
+    r.readAsDataURL(b);
+  });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function leftLabel(ms: number): string {
@@ -295,8 +314,8 @@ function ChatInner() {
   const sp = useSearchParams();
   const [convs, setConvs] = useState<Conv[]>([]);
   const [loadingList, setLoadingList] = useState(true);
-  const [filter, setFilter] = useState<"all" | "unread" | "mine" | "unassigned">("all");
-  const [q, setQ] = useState("");
+  const [filter, setFilter] = useSessionState<"all" | "unread" | "mine" | "unassigned">("whatsapp:filter", "all");
+  const [q, setQ] = useSessionState("whatsapp:q", "");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [more, setMore] = useState(false);
@@ -306,6 +325,7 @@ function ChatInner() {
   const [sending, setSending] = useState(false);
   const [templates, setTemplates] = useState<Tpl[] | null>(null);
   const [tplName, setTplName] = useState("");
+  const [showTpl, setShowTpl] = useState(false); // the template panel, opened by the 📋 button or after a 24-hour refusal
   const [tplParams, setTplParams] = useState<string[]>([]);
   const [newOpen, setNewOpen] = useState(false);
   const [team, setTeam] = useState<Team[]>([]);
@@ -316,6 +336,7 @@ function ChatInner() {
   const [away, setAway] = useState(0); // new messages while scrolled up
   const [now, setNow] = useState(() => Date.now());
   const [extra, setExtra] = useState<Conv | null>(null); // a chat just started, not in the list yet
+  const [wallRef, setWallRef] = useState<string | null>(null); // a Seva wall brick being sent from here
   const cursor = useRef<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -436,6 +457,8 @@ function ChatInner() {
     setDraft("");
     setFile(null);
     setTplName("");
+    setShowTpl(false);
+    setWallRef(null);
     setAway(0);
     setLoadingThread(true);
     cursor.current = null;
@@ -482,6 +505,40 @@ function ChatInner() {
     }
   }
 
+  /** The Seva wall's WhatsApp icon left a brick for this donor: put its picture and message in the box. */
+  async function loadWallPrefill(phone: string) {
+    let p: { ref: string; phone: string; message: string } | null = null;
+    try {
+      p = JSON.parse(sessionStorage.getItem(WA_PREFILL_KEY) || "null");
+      sessionStorage.removeItem(WA_PREFILL_KEY);
+    } catch {
+      p = null;
+    }
+    if (!p || p.phone !== phone) return;
+    setDraft(p.message);
+    setWallRef(p.ref);
+    try {
+      const pic = await whatsappPicture(await apiClient.getBlob(`/api/seva-wall/${p.ref}/image`));
+      const dataUrl = await asDataUrl(pic);
+      setFile({ name: pic.type === "image/png" ? "brick.png" : "brick.jpg", mime: pic.type, size: pic.size, base64: dataUrl.split(",")[1] ?? "", preview: dataUrl });
+    } catch {
+      toast("The brick picture could not be loaded - attach it by hand.", { tone: "warn" });
+    }
+  }
+
+  /** After the brick went out from here, tick it off on the Seva wall too. */
+  async function markWallSent(status: string) {
+    if (!wallRef || status === "failed") return;
+    const ref = wallRef;
+    setWallRef(null);
+    try {
+      await apiClient.post(`/api/seva-wall/${ref}/mark-sent`, {});
+      toast("Marked \"WhatsApp sent\" on the Seva wall");
+    } catch {
+      /* already marked, or not waiting: nothing to do */
+    }
+  }
+
   /* ---- deep link: /whatsapp?phone=... or ?person=... ---- */
   const startedFor = useRef<string | null>(null);
   useEffect(() => {
@@ -492,11 +549,13 @@ function ChatInner() {
     startedFor.current = key;
     apiClient
       .post<{ conversation: Conv }>("/api/wa-chat/conversations", person ? { person_id: person } : { phone })
-      .then((r) => {
+      .then(async (r) => {
         setExtra(r.conversation);
-        void openConv(r.conversation);
+        await openConv(r.conversation);
+        await loadWallPrefill(r.conversation.phone);
       })
       .catch((e) => toast((e as Error).message, { tone: "danger" }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadWallPrefill only uses setters and the API
   }, [sp, openConv]);
 
   async function startChat(phone: string, personId: string | null) {
@@ -538,11 +597,11 @@ function ChatInner() {
     if (!current || !file || sending) return;
     setSending(true);
     try {
-      applySent(
-        await apiClient.post(`/api/wa-chat/conversations/${current.id}/media`, {
-          filename: file.name, mime: file.mime, base64: file.base64, caption: draft.trim(), client_ref: uid(),
-        })
-      );
+      const r = await apiClient.post<{ message: Msg; conversation: Conv }>(`/api/wa-chat/conversations/${current.id}/media`, {
+        filename: file.name, mime: file.mime, base64: file.base64, caption: draft.trim(), client_ref: uid(),
+      });
+      applySent(r);
+      void markWallSent(r.message.status);
       setFile(null);
       setDraft("");
     } catch (e) {
@@ -565,7 +624,7 @@ function ChatInner() {
   }
 
   useEffect(() => {
-    if (current && !current.window_open && !current.opted_out && templates === null) {
+    if (showTpl && current && !current.opted_out && templates === null) {
       apiClient
         .get<{ templates: Tpl[] }>("/api/wa-chat/templates")
         .then((r) => setTemplates(r.templates))
@@ -574,7 +633,7 @@ function ChatInner() {
           toast((e as Error).message, { tone: "danger" });
         });
     }
-  }, [current, templates]);
+  }, [showTpl, current, templates]);
   const tpl = templates?.find((t) => t.name === tplName) ?? null;
   const tplPreview = tpl ? tpl.body.replace(/\{\{(\d+)\}\}/g, (_m, n) => tplParams[Number(n) - 1] || `{{${n}}}`) : "";
 
@@ -582,15 +641,16 @@ function ChatInner() {
     if (!current || !tpl || sending) return;
     setSending(true);
     try {
-      applySent(
-        await apiClient.post(`/api/wa-chat/conversations/${current.id}/template`, {
+      const sent = await apiClient.post<{ message: Msg; conversation: Conv }>(`/api/wa-chat/conversations/${current.id}/template`, {
           name: tpl.name, language: tpl.language, params: tplParams.slice(0, tpl.paramCount), client_ref: uid(),
           ...(tpl.header && file ? { filename: file.name, mime: file.mime, base64: file.base64 } : {}),
-        })
-      );
+      });
+      applySent(sent);
+      void markWallSent(sent.message.status);
       setTplName("");
       setTplParams([]);
       setFile(null);
+      setShowTpl(false);
     } catch (e) {
       toast((e as Error).message, { tone: "danger" });
     } finally {
@@ -612,7 +672,10 @@ function ChatInner() {
   const isAdmin = user?.role === "admin";
   const list = convs.some((c) => c.id === extra?.id) || !extra ? convs : [extra, ...convs];
   const windowMs = current?.window_ends_at ? new Date(current.window_ends_at).getTime() - now : 0;
-  const canType = !!current && current.window_open && windowMs > 0 && !current.opted_out;
+  // Like WhatsApp itself: the box, the paperclip and Send are always there. Whether a message may go is
+  // WhatsApp's call (DRM only knows replies it has seen); a refusal comes back on the bubble with the reason.
+  const canType = !!current && !current.opted_out;
+  const replied = !!current && current.window_open && windowMs > 0;
   const totalUnread = convs.reduce((n, c) => n + (c.unread_count > 0 ? 1 : 0), 0);
 
   return (
@@ -667,10 +730,10 @@ function ChatInner() {
                       <span className={`truncate text-[13px] ${unread ? "text-ink" : "text-ink-muted"}`}>{c.last_message_dir === "outbound" ? "You: " : ""}{c.last_message_text || "No messages yet"}</span>
                       {unread && <span className="grid h-5 min-w-5 flex-none place-items-center rounded-full bg-[#25D366] px-1.5 text-2xs font-semibold text-white">{c.unread_count > 99 ? "99+" : c.unread_count}</span>}
                     </span>
-                    {(c.opted_out || c.assigned_name || !c.window_open) && (
+                    {(c.opted_out || c.assigned_name) && (
                       <span className="mt-1 flex flex-wrap gap-1.5 text-2xs">
                         {c.opted_out && <span className="rounded bg-danger-wash px-1.5 py-0.5 font-medium text-danger">Said STOP</span>}
-                        {!c.window_open && !c.opted_out && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">Template only</span>}
+                        
                         {c.assigned_name && <span className="rounded bg-sunken px-1.5 py-0.5 text-ink-muted">{c.assigned_name}</span>}
                       </span>
                     )}
@@ -712,7 +775,7 @@ function ChatInner() {
                 </p>
               </div>
               <div className="hidden items-center gap-2 sm:flex">
-                {current.opted_out ? <Badge tone="danger">Said STOP</Badge> : canType ? <Badge tone="good" dot>Reply window · {leftLabel(windowMs)} left</Badge> : <Badge tone="warn" dot>Template only</Badge>}
+                {current.opted_out ? <Badge tone="danger">Said STOP</Badge> : replied ? <Badge tone="good" dot>Replied · {leftLabel(windowMs)} left to chat freely</Badge> : null}
               </div>
               {isAdmin ? (
                 <select aria-label="Assigned to" className="h-8 max-w-36 rounded-control border border-line-strong bg-surface px-2 text-xs" value={current.assigned_to ?? ""} onChange={(e) => void assign(e.target.value || null)}>
@@ -756,7 +819,11 @@ function ChatInner() {
                         {m.status === "failed" && (
                           <p className="mt-1 border-t border-red-200 pt-1 text-xs text-danger">
                             {m.error || "Not delivered."}{" "}
-                            {m.msg_type === "text" && m.body && canType && <button className="font-semibold underline" onClick={() => void sendText(m.body!)}>Send again</button>}
+                            {/24 hours|re-engagement|131047/i.test(m.error ?? "") ? (
+                              <button className="font-semibold underline" onClick={() => setShowTpl(true)}>Send as a template</button>
+                            ) : (
+                              m.msg_type === "text" && m.body && canType && <button className="font-semibold underline" onClick={() => void sendText(m.body!)}>Send again</button>
+                            )}
                           </p>
                         )}
                       </div>
@@ -773,10 +840,21 @@ function ChatInner() {
 
             {/* ------------------------------------------------ composer */}
             <footer className="border-t border-line-soft bg-surface px-3 py-3 sm:px-4">
+              {wallRef && !current.opted_out && (
+                <p className="mb-2 rounded-lg bg-brand-50 px-3 py-2 text-xs text-brand-800">
+                  <b>Seva wall:</b> the brick picture and thank-you are ready below. Check them and press Send - the brick is then marked &quot;WhatsApp sent&quot;.
+
+                </p>
+              )}
               {current.opted_out ? (
                 <Alert tone="warn">This donor wrote STOP. DRM will not message them until they write START.</Alert>
-              ) : canType ? (
+              ) : !showTpl ? (
                 <div className="space-y-2">
+                  {!replied && (
+                    <p className="text-xs text-amber-700">
+                      No reply from this person in the last 24 hours. WhatsApp may refuse a normal message - if it does, the message shows why and you can send a template (📋).
+                    </p>
+                  )}
                   {file && (
                     <div className="flex items-center gap-3 rounded-xl border border-line-soft bg-sunken p-2.5">
                       {file.preview ? /* eslint-disable-next-line @next/next/no-img-element */ <img src={file.preview} alt="" className="h-16 w-16 rounded-lg object-cover" /> : <span className="grid h-16 w-16 place-items-center rounded-lg bg-white text-brand-700"><Icon name="file" size={26} /></span>}
@@ -794,9 +872,10 @@ function ChatInner() {
                   <div className="flex items-end gap-2">
                     <input ref={fileInput} type="file" accept={ACCEPT} className="hidden" onChange={(e) => { pickFile(e.target.files?.[0]); e.target.value = ""; }} />
                     <button type="button" onClick={() => fileInput.current?.click()} aria-label="Attach a picture or file" title="Attach a picture or file" className="grid h-10 w-10 flex-none place-items-center rounded-full text-ink-muted hover:bg-sunken hover:text-ink"><Paperclip /></button>
+                    <button type="button" onClick={() => setShowTpl(true)} aria-label="Send a template" title="Send an approved template" className="grid h-10 w-10 flex-none place-items-center rounded-full text-ink-muted hover:bg-sunken hover:text-ink"><Icon name="fileText" size={18} /></button>
                     <button type="button" onClick={() => setQuickOpen((v) => !v)} aria-label="Quick replies" title="Quick replies" className={`grid h-10 w-10 flex-none place-items-center rounded-full hover:bg-sunken ${quickOpen ? "bg-brand-50 text-brand-700" : "text-ink-muted hover:text-ink"}`}><Icon name="sparkle" size={18} /></button>
                     <Textarea
-                      rows={1}
+                      rows={Math.min(8, Math.max(1, draft.split("\n").length))}
                       value={draft}
                       maxLength={file ? 1024 : 4096}
                       onChange={(e) => setDraft(e.target.value)}
@@ -810,7 +889,7 @@ function ChatInner() {
                       }}
                       placeholder={file ? "Add a caption" : "Type a message"}
                       title="Enter to send · Shift+Enter for a new line · paste or drop a picture to attach it"
-                      className="max-h-32 min-h-10 flex-1 resize-none !rounded-2xl !px-4 !py-2.5"
+                      className="max-h-56 min-h-10 flex-1 resize-none !rounded-2xl !px-4 !py-2.5"
                     />
                     <button type="button" aria-label="Send" disabled={sending || (!file && !draft.trim())} onClick={() => void (file ? sendFile() : sendText(draft))}
                       className="grid h-10 w-10 flex-none place-items-center rounded-full bg-[#25D366] text-white shadow transition hover:bg-[#1da851] disabled:opacity-40">
@@ -820,16 +899,15 @@ function ChatInner() {
                 </div>
               ) : (
                 <div className="space-y-2">
-                  <Alert tone="info">
-                    {current.last_message_at && current.window_ends_at
-                      ? "WhatsApp only lets us start a chat with an approved template (it can carry a picture). Pick one below. Once they reply you can type freely and send any picture or file."
-                      : "This person has not written to us yet, and WhatsApp only lets us start with an approved template (it can carry a picture). Pick one below. Once they reply you can type freely and send any picture or file."}
-                  </Alert>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium text-ink">Send an approved template <span className="font-normal text-ink-muted">- reaches anyone, any time; a 📷 one carries a picture</span></p>
+                    <Button size="xs" variant="ghost" icon="arrowLeft" onClick={() => setShowTpl(false)}>Back to message</Button>
+                  </div>
                   {templates === null ? <Skeleton className="h-9 w-full" /> : templates.length === 0 ? (
                     <p className="text-sm text-ink-muted">No approved text templates are available.</p>
                   ) : (
                     <div className="space-y-2">
-                      <select className="h-10 w-full rounded-control border border-line-strong bg-surface px-3 text-sm" value={tplName} onChange={(e) => { setTplName(e.target.value); setTplParams([]); setFile(null); }}>
+                      <select className="h-10 w-full rounded-control border border-line-strong bg-surface px-3 text-sm" value={tplName} onChange={(e) => { setTplName(e.target.value); setTplParams([]); if (!wallRef) setFile(null); }}>
                         <option value="">Choose a template…</option>
                         {templates.map((t) => <option key={t.name} value={t.name}>{t.header === "IMAGE" ? "📷 " : t.header ? "📎 " : ""}{t.name}</option>)}
                       </select>

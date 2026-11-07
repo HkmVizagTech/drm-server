@@ -12,6 +12,7 @@
 // arrived, because marking the wrong one is invisible until the donor rings up.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSessionState } from "@/lib/session-state";
 import { apiClient } from "@/lib/api";
 import { currency, number, relativeDate, shortDate, titleCase } from "@/lib/format";
 import { siteLabel } from "@/components/source";
@@ -164,16 +165,16 @@ export default function PrasadamPage() {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<{ tone: "good" | "bad"; text: string } | null>(null);
 
-  const [tab, setTab] = useState<Tab>("pending");
-  const [search, setSearch] = useState("");
-  const [debounced, setDebounced] = useState("");
-  const [site, setSite] = useState("");
-  const [group, setGroup] = useState("");
-  const [includePurpose, setIncludePurpose] = useState("");
-  const [excludePurpose, setExcludePurpose] = useState("");
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
-  const [page, setPage] = useState(1);
+  const [tab, setTab] = useSessionState<Tab>("prasadam:tab", "pending");
+  const [search, setSearch] = useSessionState("prasadam:search", "");
+  const [debounced, setDebounced] = useSessionState("prasadam:debounced", "");
+  const [site, setSite] = useSessionState("prasadam:site", "");
+  const [group, setGroup] = useSessionState("prasadam:group", "");
+  const [includePurpose, setIncludePurpose] = useSessionState("prasadam:includePurpose", "");
+  const [excludePurpose, setExcludePurpose] = useSessionState("prasadam:excludePurpose", "");
+  const [fromDate, setFromDate] = useSessionState("prasadam:fromDate", "");
+  const [toDate, setToDate] = useSessionState("prasadam:toDate", "");
+  const [page, setPage] = useSessionState("prasadam:page", 1);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [courier, setCourier] = useState("");

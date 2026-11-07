@@ -211,9 +211,14 @@ async function main() {
   await pool.query(`UPDATE wa_conversations SET last_inbound_at = NOW() - INTERVAL '30 hours' WHERE id = $1`, [convId]);
   calls.length = 0;
   s = await call('POST', `/api/wa-chat/conversations/${convId}/messages`, { text: 'Are you there?' });
-  check('free text is refused with the reason, nothing sent', s.status === 409 && s.json.code === 'window_closed' && calls.length === 0, s.json);
+  check('free text is not blocked by DRM: WhatsApp decides (DRM may not have seen every reply)', s.status === 201 && calls.length === 1, s.json);
   s = await call('POST', `/api/wa-chat/conversations/${convId}/media`, { filename: 'a.png', mime: 'image/png', base64: PNG.toString('base64') });
-  check('so is a picture', s.status === 409 && s.json.code === 'window_closed', s.json);
+  check('nor is a picture', s.status === 201 && calls.length === 2, s.json);
+  // WhatsApp refuses it after accepting: the tick says so and the screen offers a template.
+  await pool.query(`UPDATE wa_messages SET wamid = 'wamid.W24' WHERE id = $1`, [s.json.message.id]);
+  await hook(metaStatus('wamid.W24', 'failed', '919876543210', [{ title: 'Message failed to send because more than 24 hours have passed since the customer last replied to this number', code: 131047 }]));
+  const w24 = (await pool.query(`SELECT status, error FROM wa_messages WHERE id = $1`, [s.json.message.id])).rows[0];
+  check('WhatsApp refusing it marks it failed with the 24-hour reason', w24.status === 'failed' && /24 hours/.test(w24.error), w24);
   responder = (c) => c.url.includes('/getTemplates')
     ? { status: 'success', templates: [
         { name: 'follow_up', language: 'en', status: 'APPROVED', components: JSON.stringify([{ type: 'BODY', text: 'Hare Krishna {{1}}, thank you for your {{2}}.' }]) },

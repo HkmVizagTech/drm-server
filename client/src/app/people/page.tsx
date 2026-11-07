@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, FormEvent } from "react";
+import { useSessionState } from "@/lib/session-state";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -70,18 +71,18 @@ export default function PeoplePage() {
   const [data, setData] = useState<PeopleResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [roleFilter, setRoleFilter] = useState("");
+  const [search, setSearch] = useSessionState("people:search", "");
+  const [debouncedSearch, setDebouncedSearch] = useSessionState("people:debouncedSearch", "");
+  const [roleFilter, setRoleFilter] = useSessionState("people:roleFilter", "");
   // Which donation site the person has given through, and which family of
   // pages. Both are server-side filters so the counts and paging stay right.
-  const [siteFilter, setSiteFilter] = useState("");
-  const [groupFilter, setGroupFilter] = useState("");
+  const [siteFilter, setSiteFilter] = useSessionState("people:siteFilter", "");
+  const [groupFilter, setGroupFilter] = useSessionState("people:groupFilter", "");
   // Who to leave out: the list is mostly website donors, and finding a
   // volunteer or a seva donor meant paging past thousands of them.
-  const [hideFilter, setHideFilter] = useState("");
-  const [sort, setSort] = useState("recent");
-  const [page, setPage] = useState(1);
+  const [hideFilter, setHideFilter] = useSessionState("people:hideFilter", "");
+  const [sort, setSort] = useSessionState("people:sort", "recent");
+  const [page, setPage] = useSessionState("people:page", 1);
   const [showModal, setShowModal] = useState(false);
   // One button per configured donation site, rather than a single "import
   // everything" - the sites are separate systems and staff usually want to

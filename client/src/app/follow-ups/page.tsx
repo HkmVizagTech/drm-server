@@ -13,6 +13,7 @@
 // stops being worked after the first twenty.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSessionState } from "@/lib/session-state";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api";
@@ -120,17 +121,17 @@ function batchName(b: Batch): string {
 export default function FollowUpsPage() {
   const [data, setData] = useState<Record<string, Lead[]>>({});
   const [loading, setLoading] = useState(true);
-  const [mineOnly, setMineOnly] = useState(false);
+  const [mineOnly, setMineOnly] = useSessionState("followups:mineOnly", false);
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
   const [adding, setAdding] = useState(false);
 
   // The narrowing. Empty string means "everything", so one Select can offer an
   // "all" row without a separate flag per filter.
-  const [batch, setBatch] = useState("");
-  const [preacher, setPreacher] = useState("");
-  const [who, setWho] = useState("");
-  const [search, setSearch] = useState("");
+  const [batch, setBatch] = useSessionState("followups:batch", "");
+  const [preacher, setPreacher] = useSessionState("followups:preacher", "");
+  const [who, setWho] = useSessionState("followups:who", "");
+  const [search, setSearch] = useSessionState("followups:search", "");
 
   // Who is signed in, so "just mine" can filter without asking. Comes from the
   // auth context rather than localStorage: the context is the one place that

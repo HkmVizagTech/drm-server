@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useRef, useState, FormEvent } from "react";
+import { useSessionState } from "@/lib/session-state";
 import Link from "next/link";
 import { apiClient, isAbort } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -129,12 +130,12 @@ export default function DonationsPage() {
   const [data, setData] = useState<DonationsResponse | null>(null);
   const [purposeOptions, setPurposeOptions] = useState<{ purpose: string; count: number }[]>([]);
   const [sources, setSources] = useState<SourceOptions>({ sites: [], pages: [] });
-  const [siteFilter, setSiteFilter] = useState("");
-  const [pageFilter, setPageFilter] = useState("");
+  const [siteFilter, setSiteFilter] = useSessionState("donations:siteFilter", "");
+  const [pageFilter, setPageFilter] = useSessionState("donations:pageFilter", "");
   // A whole bucket rather than one page: "donations" covers /donations and
   // everything nested under it, "donate" the seva campaign pages. Classified
   // server-side so this screen and the dashboard always agree.
-  const [groupFilter, setGroupFilter] = useState("");
+  const [groupFilter, setGroupFilter] = useSessionState("donations:groupFilter", "");
   const [expanded, setExpanded] = useState<string | null>(null);
 
   // Deep links from the dashboard ("show me just /janmashtami") arrive with
@@ -157,16 +158,16 @@ export default function DonationsPage() {
   }, []);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [purpose, setPurpose] = useState("");
-  const [receipt, setReceipt] = useState("");
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
+  const [search, setSearch] = useSessionState("donations:search", "");
+  const [debouncedSearch, setDebouncedSearch] = useSessionState("donations:debouncedSearch", "");
+  const [purpose, setPurpose] = useSessionState("donations:purpose", "");
+  const [receipt, setReceipt] = useSessionState("donations:receipt", "");
+  const [fromDate, setFromDate] = useSessionState("donations:fromDate", "");
+  const [toDate, setToDate] = useSessionState("donations:toDate", "");
   // Empty means no preset, which the server reads as an open window - the same
   // list this screen has always opened on.
-  const [period, setPeriod] = useState("");
-  const [page, setPage] = useState(1);
+  const [period, setPeriod] = useSessionState("donations:period", "");
+  const [page, setPage] = useSessionState("donations:page", 1);
   const [showModal, setShowModal] = useState(false);
   const [showOffline, setShowOffline] = useState(false);
   // "Raise a receipt" asks how they paid first; the offline form is one answer.

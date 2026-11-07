@@ -17,6 +17,7 @@
 // so a button that would be refused is simply not drawn.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { seedSessionState, useSessionState } from "@/lib/session-state";
 import { useRouter } from "next/navigation";
 import { apiClient, isAbort } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -254,116 +255,12 @@ export function digitsOf(phone: string | null | undefined): string {
 }
 
 
-/** Turn a WebP into a JPEG in the browser: WhatsApp does not carry WebP pictures. */
-async function webpToJpegBase64(blob: Blob): Promise<string> {
-  const bmp = await createImageBitmap(blob);
-  const canvas = document.createElement("canvas");
-  canvas.width = bmp.width;
-  canvas.height = bmp.height;
-  canvas.getContext("2d")!.drawImage(bmp, 0, 0);
-  return canvas.toDataURL("image/jpeg", 0.92).split(",")[1] ?? "";
-}
-
-/**
- * What the WhatsApp icon opens: the brick's picture with the thank-you under it, as the donor will see it.
- * "Send" has DRM send it from the temple's WhatsApp, and the donor's reply lands in WhatsApp chats. When
- * WhatsApp will not allow that (the donor has not written in 24 hours and there is no picture template),
- * the answer says so and the caller's own WhatsApp - the old link - is one tap away.
- */
-function SendThanksModal({ row, to, onClose, onSent }: { row: Row; to: string; onClose: () => void; onSent: () => void }) {
-  const [message, setMessage] = useState(() => thanksMessage(row, true));
-  const [picture, setPicture] = useState<Blob | null>(null);
-  const [pictureUrl, setPictureUrl] = useState<string | null>(null);
-  const [pictureFailed, setPictureFailed] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
-  // One send, however many times the button is pressed: the same reference goes with every attempt.
-  const [sendRef] = useState(() => `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-
-  useEffect(() => {
-    let live = true;
-    let made: string | null = null;
-    apiClient
-      .getBlob(`/api/seva-wall/${row.ref}/image`)
-      .then((b) => {
-        if (!live) return;
-        made = URL.createObjectURL(b);
-        setPicture(b);
-        setPictureUrl(made);
-      })
-      .catch(() => live && setPictureFailed(true));
-    return () => {
-      live = false;
-      if (made) URL.revokeObjectURL(made);
-    };
-  }, [row.ref]);
-
-  async function send() {
-    setBusy(true);
-    setProblem(null);
-    try {
-      const jpeg = picture && picture.type === "image/webp" ? await webpToJpegBase64(picture) : undefined;
-      await apiClient.post(`/api/seva-wall/${row.ref}/send-whatsapp`, { message, seva_label: KIND_LABEL[row.kind], jpeg_base64: jpeg, client_ref: sendRef });
-      toast.success(`Sent to ${row.donor_name ?? "the donor"} on WhatsApp`);
-      onSent();
-      onClose();
-    } catch (e) {
-      setProblem((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const fallback = `https://wa.me/${to}?text=${encodeURIComponent(thanksMessage(row))}`;
-  return (
-    <Modal
-      title={`Send to ${row.donor_name ?? "donor"} on WhatsApp`}
-      onClose={onClose}
-      footer={
-        <>
-          <a href={fallback} target="_blank" rel="noreferrer" className="mr-auto text-sm font-medium text-brand-700 hover:underline">
-            Open in my WhatsApp instead
-          </a>
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button variant="whatsapp" loading={busy} disabled={!picture || !message.trim() || message.length > 1024} onClick={() => void send()}>
-            Send picture and message
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-3">
-        {problem && (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-            {problem} <span className="block pt-1 text-amber-800">You can still send it from your own WhatsApp with the link at the bottom left.</span>
-          </div>
-        )}
-        <div className="rounded-xl bg-[#f2eee6] p-3">
-          <div className="max-w-sm rounded-2xl rounded-tr-md bg-[#d9fdd3] p-2 shadow-sm">
-            {pictureUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={pictureUrl} alt="The brick" className="max-h-64 w-full rounded-lg object-cover" />
-            ) : pictureFailed ? (
-              <p className="p-3 text-sm text-danger">This brick has no picture to send yet.</p>
-            ) : (
-              <div className="h-40 animate-pulse rounded-lg bg-black/5" />
-            )}
-            <p className="mt-2 whitespace-pre-wrap break-words px-1 text-[13px] leading-snug text-ink">{message}</p>
-          </div>
-        </div>
-        <Field label={`Message (${message.length}/1024) - you can edit it`}>
-          <Textarea rows={7} value={message} maxLength={1024} onChange={(e) => setMessage(e.target.value)} />
-        </Field>
-        <p className="text-xs text-ink-muted">
-          Sent from the temple&apos;s WhatsApp number. If {row.donor_name ?? "the donor"} replies, it shows in WhatsApp chats.
-        </p>
-      </div>
-    </Modal>
-  );
-}
+/** Where the Seva wall hands the WhatsApp chat a brick to send (read once by app/whatsapp). */
+export const WA_PREFILL_KEY = "drm.waPrefill";
 
 /** The phone and WhatsApp icons: round, one tap each. */
-function ContactIcons({ row, onSent }: { row: Row; onSent: () => void }) {
-  const [sending, setSending] = useState(false);
+function ContactIcons({ row }: { row: Row }) {
+  const router = useRouter();
   const to = digitsOf(row.phone);
   if (to.length < 10) return <span className="text-ink-faint">-</span>;
   const name = row.donor_name ?? "donor";
@@ -386,16 +283,24 @@ function ContactIcons({ row, onSent }: { row: Row; onSent: () => void }) {
       </a>
       <button
         type="button"
-        onClick={() => setSending(true)}
-        title={`Send ${name} the picture and message on WhatsApp`}
-        aria-label={`Send ${name} the picture and message on WhatsApp`}
+        // Opens DRM's own WhatsApp chat with this donor, the brick picture and the thank-you already in
+        // the message box: the caller checks it and presses Send, from the temple's number.
+        onClick={() => {
+          try {
+            sessionStorage.setItem(WA_PREFILL_KEY, JSON.stringify({ ref: row.ref, phone: to.slice(-10), message: thanksMessage(row, true) }));
+          } catch {
+            /* the chat still opens; the caller attaches the picture by hand */
+          }
+          router.push(`/whatsapp?phone=${to.slice(-10)}`);
+        }}
+        title={`WhatsApp ${name} the brick picture and message`}
+        aria-label={`WhatsApp ${name} the brick picture and message`}
         className={`${base} text-[#25D366] hover:bg-[#25D366]/10`}
       >
         <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
           <path d={WHATSAPP_PATH} />
         </svg>
       </button>
-      {sending && <SendThanksModal row={row} to={to} onClose={() => setSending(false)} onSent={onSent} />}
     </div>
   );
 }
@@ -622,18 +527,28 @@ export default function WallTable({ view }: { view: WallView }) {
   const canContact = role === "admin" || role === "caller";
   const canUpload = role === "admin" || role === "brick_printer";
 
-  const [stage, setStage] = useState("");
-  const [kind, setKind] = useState("");
-  const [priority, setPriority] = useState("");
+  // Kept for the browser tab, per table (see lib/session-state.ts).
+  const [stage, setStage] = useSessionState(`wall:${view}:stage`, "");
+  const [kind, setKind] = useSessionState(`wall:${view}:kind`, "");
+  const [priority, setPriority] = useSessionState(`wall:${view}:priority`, "");
   // "": every brick; "any": only bricks a devotee added; otherwise one devotee's id.
-  const [devotee, setDevotee] = useState("");
+  const [devotee, setDevotee] = useSessionState(`wall:${view}:devotee`, "");
   // A notification opens this page as /seva-wall?search=<phone>, so the brick it is
   // about is already there. Read once; nothing renders until the person is known,
   // so the server's empty first render cannot disagree with this.
   const fromLink = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("search") ?? "";
-  const [search, setSearch] = useState(fromLink);
-  const [query, setQuery] = useState(fromLink.trim());
-  const [page, setPage] = useState(1);
+  // A link's search wins over a saved one, once.
+  useState(() => {
+    if (fromLink) {
+      seedSessionState(`wall:${view}:search`, fromLink);
+      seedSessionState(`wall:${view}:query`, fromLink.trim());
+      seedSessionState(`wall:${view}:page`, 1);
+    }
+    return 0;
+  });
+  const [search, setSearch] = useSessionState(`wall:${view}:search`, "");
+  const [query, setQuery] = useSessionState(`wall:${view}:query`, "");
+  const [page, setPage] = useSessionState(`wall:${view}:page`, 1);
   const [data, setData] = useState<Response | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -1093,7 +1008,7 @@ export default function WallTable({ view }: { view: WallView }) {
 
                   {view === "contact" && canContact && (
                     <Td>
-                      <ContactIcons row={r} onSent={() => void load()} />
+                      <ContactIcons row={r} />
                     </Td>
                   )}
                   {view === "contact" && canContact && (

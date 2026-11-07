@@ -9,6 +9,7 @@
 // receipt raised against it last year still points at something.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSessionState } from "@/lib/session-state";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { number } from "@/lib/format";
@@ -56,10 +57,10 @@ export default function SevaCategoriesPage() {
   const isAdmin = user?.role === "admin";
   const [all, setAll] = useState<Seva[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [category, setCategory] = useState("");
-  const [state, setState] = useState("");
-  const [page, setPage] = useState(1);
+  const [search, setSearch] = useSessionState("sevacats:search", "");
+  const [category, setCategory] = useSessionState("sevacats:category", "");
+  const [state, setState] = useSessionState("sevacats:state", "");
+  const [page, setPage] = useSessionState("sevacats:page", 1);
   const [editing, setEditing] = useState<Seva | "new" | null>(null);
   const [importing, setImporting] = useState(false);
 

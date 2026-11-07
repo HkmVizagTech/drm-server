@@ -661,12 +661,9 @@ export async function sendOutbound(conv: Conversation, userId: string, input: Ou
     if (dup.rows[0]) return { ok: true, message: dup.rows[0], duplicate: true };
   }
 
-  const open = windowOpen(conv);
-  if (input.kind !== 'template' && !open) {
-    return fail(409, 'window_closed', conv.last_inbound_at
-      ? 'It has been more than 24 hours since this donor last wrote, so WhatsApp only allows an approved template message now.'
-      : 'This donor has not written to us yet, so WhatsApp only allows an approved template message to start the chat.');
-  }
+  // DRM does not refuse a message outside the 24-hour window: it only knows replies it has seen (not
+  // those before the link was on, or handled elsewhere). WhatsApp decides, and a refusal comes back as a
+  // failed message with its reason - the screen then offers a template.
 
   let msgType = 'text';
   let body: string | null = null;
