@@ -19,7 +19,7 @@ export interface OutcomeOption {
 
 /** The bundles a caller actually reaches for. Slugs missing from Settings are dropped. */
 const BUNDLES: { label: string; slugs: string[] }[] = [
-  { label: "Not answered", slugs: ["no_answer", "busy", "switched_off"] },
+  { label: "Not answered", slugs: ["no_answer", "busy", "switched_off", "temporarily_unavailable"] },
   { label: "Will give", slugs: ["promised", "interested", "will_donate", "will_pay_qr"] },
   { label: "Gave", slugs: ["donated"] },
 ];

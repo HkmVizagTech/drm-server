@@ -52,6 +52,7 @@ import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { isConfigured, putObject, getObject, deleteObject, publicUrl } from '../services/storage';
 import { sendBrickToDevotee } from '../services/whatsappBrick';
+import { ensureConversation, sendOutbound, sniffMime, windowOpen, chatTemplates } from '../services/whatsappChat';
 import { notify } from '../services/notifications';
 import { upsertLead, logCallForLead } from './crm';
 import type { UserRole } from '../types';
@@ -1190,6 +1191,95 @@ router.post('/:ref/mark-sent', allow(...REVIEW), async (req, res) => {
   } catch (err) {
     console.error('seva-wall mark-sent error:', (err as Error).message);
     res.status(500).json({ error: 'Could not mark it sent.' });
+  }
+});
+
+
+// SEND THE THANK-YOU ON WHATSAPP FROM DRM: the brick's picture with the message under it, sent from the
+// temple's own number and kept in the WhatsApp chat so the donor's reply lands there.
+//
+// WhatsApp lets a business send a picture and a message freely only within 24 hours of the donor's last
+// message to the temple. After that it must be an approved TEMPLATE with a picture in its header - used
+// when FLAXXA_SEVA_THANKS_TEMPLATE names one (body {{1}} donor name, {{2}} the seva). With neither, the
+// answer says so and the screen offers the caller's own WhatsApp (the wa.me link) instead.
+//
+// On success the brick is marked "WhatsApp sent", as the caller's own tap on that button would.
+router.post('/:ref/send-whatsapp', allow(...REVIEW), async (req, res) => {
+  try {
+    const ref = String(req.params.ref);
+    const item = await itemFor(ref);
+    if (!item) return notFound(res);
+    const row = (
+      await pool.query(`SELECT w.phone, w.donor_name FROM ${wallSql(false)} WHERE w.ref = $1 OR w.item_id = $1`, [ref])
+    ).rows[0] as { phone: string | null; donor_name: string | null } | undefined;
+    const phone = String(row?.phone ?? '').replace(/\D/g, '');
+    if (phone.length < 10) return res.status(400).json({ error: 'This donor has no phone number.', code: 'no_phone' });
+
+    const message = String(req.body?.message ?? '').replace(/\r\n/g, '\n').trim();
+    if (!message) return res.status(400).json({ error: 'Write the message first.', code: 'empty' });
+    if (message.length > 1024) return res.status(400).json({ error: 'A message with a picture can be up to 1,024 characters. Shorten it.', code: 'too_long' });
+
+    // The picture: the brick's latest one - or, when it is a WebP (which WhatsApp will not carry), the
+    // JPEG the screen converted it to.
+    let bytes: Buffer | null = null;
+    let mime = '';
+    const pic = (
+      await pool.query(
+        `SELECT sp.mime, sp.data, sp.r2_key FROM seva_wall_pictures sp JOIN seva_wall_items i ON i.id = sp.item_id
+          WHERE i.id = $1 ORDER BY (sp.state = 'current') DESC, sp.uploaded_at DESC LIMIT 1`,
+        [item.id]
+      )
+    ).rows[0];
+    if (!pic) return res.status(409).json({ error: 'This brick has no picture yet.', code: 'no_picture' });
+    bytes = pic.r2_key ? await getObject(pic.r2_key) : pic.data;
+    mime = String(pic.mime || '');
+    if (bytes && (sniffMime(bytes) === 'image/webp' || mime === 'image/webp') && req.body?.jpeg_base64) {
+      bytes = Buffer.from(String(req.body.jpeg_base64), 'base64');
+      mime = 'image/jpeg';
+    }
+    if (!bytes) return res.status(404).json({ error: 'The picture could not be read. Try again.', code: 'no_picture' });
+    if (sniffMime(bytes) === 'image/webp') return res.status(422).json({ error: 'This picture is a WebP, which WhatsApp does not accept.', code: 'webp' });
+
+    const conv = await ensureConversation(phone, row?.donor_name ?? null);
+    if (!conv) return res.status(400).json({ error: 'This is not a WhatsApp number.', code: 'bad_number' });
+
+    const file = { bytes, mime, filename: 'brick.jpg' };
+    let out;
+    if (windowOpen(conv)) {
+      out = await sendOutbound(conv, req.user!.userId, { kind: 'media', bytes, mime, filename: 'brick.jpg', caption: message, clientRef: req.body?.client_ref });
+    } else {
+      const name = process.env.FLAXXA_SEVA_THANKS_TEMPLATE;
+      const tpl = name ? (await chatTemplates().catch(() => [])).find((t) => t.name === name) : null;
+      if (!tpl || tpl.header !== 'IMAGE') {
+        return res.status(409).json({
+          error: name
+            ? 'The thank-you template is not available in WhatsApp right now.'
+            : "This donor has not written to the temple in the last 24 hours, and WhatsApp only allows an approved template after that.",
+          code: 'window_closed',
+        });
+      }
+      const params = [String(row?.donor_name ?? 'Devotee').trim() || 'Devotee', String(req.body?.seva_label ?? 'seva').trim().slice(0, 60) || 'seva'].slice(0, tpl.paramCount);
+      out = await sendOutbound(conv, req.user!.userId, { kind: 'template', name: tpl.name, language: tpl.language, params, file, clientRef: req.body?.client_ref });
+    }
+    if (!out.ok) return res.status(out.httpStatus).json({ error: out.error, code: out.code });
+    if (out.message.status === 'failed') return res.status(502).json({ error: out.message.error || 'WhatsApp did not accept the message.', code: 'failed' });
+
+    await pool.query(
+      `UPDATE seva_wall_items
+          SET whatsapp_sent_at = COALESCE(whatsapp_sent_at, NOW()),
+              whatsapp_sent_by = COALESCE(whatsapp_sent_by, $2),
+              status  = CASE WHEN called_at IS NOT NULL AND follow_up_on IS NULL THEN 'sent' ELSE status END,
+              sent_at = CASE WHEN called_at IS NOT NULL AND follow_up_on IS NULL THEN COALESCE(whatsapp_sent_at, NOW()) ELSE sent_at END,
+              sent_by = CASE WHEN called_at IS NOT NULL AND follow_up_on IS NULL THEN COALESCE(whatsapp_sent_by, $2) ELSE sent_by END,
+              updated_at = NOW()
+        WHERE id = $1 AND status = 'in_review'`,
+      [item.id, req.user?.userId ?? null]
+    );
+    await logEvent(pool, item.id, 'whatsapp_sent', req.user?.userId, 'sent from DRM');
+    res.json({ ok: true, conversation_id: conv.id, via: windowOpen(conv) ? 'chat' : 'template' });
+  } catch (err) {
+    console.error('seva-wall send-whatsapp error:', (err as Error).message);
+    res.status(500).json({ error: 'Could not send. Try again.' });
   }
 });
 

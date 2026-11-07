@@ -113,7 +113,7 @@ async function main() {
   const in3 = await istDay(3);
 
   console.log('\n--- an unanswered call comes back two days on, at 10:00 ---');
-  for (const [slug, phone] of [['no_answer', '9810000001'], ['busy', '9810000002'], ['switched_off', '9810000003']]) {
+  for (const [slug, phone] of [['no_answer', '9810000001'], ['busy', '9810000002'], ['switched_off', '9810000003'], ['temporarily_unavailable', '9810000004']]) {
     const id = await add(phone);
     const r = await post(`/api/crm/leads/${id}/call`, { disposition: slug });
     check(`${slug}: back in two days at 10:00`, r.status === 201 && (await when(id)) === in2, { status: r.status, err: r.error, at: await when(id) });

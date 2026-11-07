@@ -114,6 +114,12 @@ const KIND_LABEL: Record<Kind, string> = {
   square: "Square foot seva",
   mandir: "Mandir nirmana seva",
 };
+// Where a donor is invited to give again: the campaign page for the seva they gave to. Mandir nirmana has
+// no page of its own yet, so its message carries no link.
+const KIND_LINK: Partial<Record<Kind, string>> = {
+  brick: "https://www.harekrishnavizag.org/brick-seva-campaign",
+  square: "https://www.harekrishnavizag.org/sqft-seva-campaign",
+};
 const PRIORITY_TONE: Record<Priority, "danger" | "warn" | "neutral"> = { high: "danger", medium: "warn", low: "neutral" };
 const MAX_BYTES = 5 * 1024 * 1024;
 
@@ -215,7 +221,7 @@ export const WHATSAPP_PATH =
  * nirmana seva) filled in from what this donor gave. The link is the donor's brick
  * picture's own link, so WhatsApp shows the picture, right after the thank-you.
  */
-export function thanksMessage(r: Pick<Row, "donor_name" | "kind" | "image_url" | "share_url">): string {
+export function thanksMessage(r: Pick<Row, "donor_name" | "kind" | "image_url" | "share_url">, attached = false): string {
   const lines = [
     "Hare Krishna,",
     "",
@@ -225,10 +231,13 @@ export function thanksMessage(r: Pick<Row, "donor_name" | "kind" | "image_url" |
   ];
   // The image's own link, so the message shows the picture and no DRM address.
   const link = r.image_url ?? r.share_url;
-  if (link) lines.push("", "Here is a picture of your brick with your name printed:", link);
+  // When DRM sends the picture itself it is right above this text, so there is no link to give.
+  if (attached) lines.push("", "Here is a picture of your brick with your name printed.");
+  else if (link) lines.push("", "Here is a picture of your brick with your name printed:", link);
   lines.push(
     "",
     "Should it be convenient, we humbly invite you to offer a further contribution towards the Temple Construction Seva. Every offering, however small, becomes part of a sacred place of worship for generations to come.",
+    ...(KIND_LINK[r.kind] ? ["", `🙏 Contribute here: ${KIND_LINK[r.kind]}`] : []),
     "",
     "Thank you once again for your kind support.",
     "",
@@ -244,8 +253,117 @@ export function digitsOf(phone: string | null | undefined): string {
   return d.length === 10 ? `91${d}` : d;
 }
 
+
+/** Turn a WebP into a JPEG in the browser: WhatsApp does not carry WebP pictures. */
+async function webpToJpegBase64(blob: Blob): Promise<string> {
+  const bmp = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bmp.width;
+  canvas.height = bmp.height;
+  canvas.getContext("2d")!.drawImage(bmp, 0, 0);
+  return canvas.toDataURL("image/jpeg", 0.92).split(",")[1] ?? "";
+}
+
+/**
+ * What the WhatsApp icon opens: the brick's picture with the thank-you under it, as the donor will see it.
+ * "Send" has DRM send it from the temple's WhatsApp, and the donor's reply lands in WhatsApp chats. When
+ * WhatsApp will not allow that (the donor has not written in 24 hours and there is no picture template),
+ * the answer says so and the caller's own WhatsApp - the old link - is one tap away.
+ */
+function SendThanksModal({ row, to, onClose, onSent }: { row: Row; to: string; onClose: () => void; onSent: () => void }) {
+  const [message, setMessage] = useState(() => thanksMessage(row, true));
+  const [picture, setPicture] = useState<Blob | null>(null);
+  const [pictureUrl, setPictureUrl] = useState<string | null>(null);
+  const [pictureFailed, setPictureFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  // One send, however many times the button is pressed: the same reference goes with every attempt.
+  const [sendRef] = useState(() => `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
+  useEffect(() => {
+    let live = true;
+    let made: string | null = null;
+    apiClient
+      .getBlob(`/api/seva-wall/${row.ref}/image`)
+      .then((b) => {
+        if (!live) return;
+        made = URL.createObjectURL(b);
+        setPicture(b);
+        setPictureUrl(made);
+      })
+      .catch(() => live && setPictureFailed(true));
+    return () => {
+      live = false;
+      if (made) URL.revokeObjectURL(made);
+    };
+  }, [row.ref]);
+
+  async function send() {
+    setBusy(true);
+    setProblem(null);
+    try {
+      const jpeg = picture && picture.type === "image/webp" ? await webpToJpegBase64(picture) : undefined;
+      await apiClient.post(`/api/seva-wall/${row.ref}/send-whatsapp`, { message, seva_label: KIND_LABEL[row.kind], jpeg_base64: jpeg, client_ref: sendRef });
+      toast.success(`Sent to ${row.donor_name ?? "the donor"} on WhatsApp`);
+      onSent();
+      onClose();
+    } catch (e) {
+      setProblem((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const fallback = `https://wa.me/${to}?text=${encodeURIComponent(thanksMessage(row))}`;
+  return (
+    <Modal
+      title={`Send to ${row.donor_name ?? "donor"} on WhatsApp`}
+      onClose={onClose}
+      footer={
+        <>
+          <a href={fallback} target="_blank" rel="noreferrer" className="mr-auto text-sm font-medium text-brand-700 hover:underline">
+            Open in my WhatsApp instead
+          </a>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button variant="whatsapp" loading={busy} disabled={!picture || !message.trim() || message.length > 1024} onClick={() => void send()}>
+            Send picture and message
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        {problem && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            {problem} <span className="block pt-1 text-amber-800">You can still send it from your own WhatsApp with the link at the bottom left.</span>
+          </div>
+        )}
+        <div className="rounded-xl bg-[#f2eee6] p-3">
+          <div className="max-w-sm rounded-2xl rounded-tr-md bg-[#d9fdd3] p-2 shadow-sm">
+            {pictureUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={pictureUrl} alt="The brick" className="max-h-64 w-full rounded-lg object-cover" />
+            ) : pictureFailed ? (
+              <p className="p-3 text-sm text-danger">This brick has no picture to send yet.</p>
+            ) : (
+              <div className="h-40 animate-pulse rounded-lg bg-black/5" />
+            )}
+            <p className="mt-2 whitespace-pre-wrap break-words px-1 text-[13px] leading-snug text-ink">{message}</p>
+          </div>
+        </div>
+        <Field label={`Message (${message.length}/1024) - you can edit it`}>
+          <Textarea rows={7} value={message} maxLength={1024} onChange={(e) => setMessage(e.target.value)} />
+        </Field>
+        <p className="text-xs text-ink-muted">
+          Sent from the temple&apos;s WhatsApp number. If {row.donor_name ?? "the donor"} replies, it shows in WhatsApp chats.
+        </p>
+      </div>
+    </Modal>
+  );
+}
+
 /** The phone and WhatsApp icons: round, one tap each. */
-function ContactIcons({ row }: { row: Row }) {
+function ContactIcons({ row, onSent }: { row: Row; onSent: () => void }) {
+  const [sending, setSending] = useState(false);
   const to = digitsOf(row.phone);
   if (to.length < 10) return <span className="text-ink-faint">-</span>;
   const name = row.donor_name ?? "donor";
@@ -266,18 +384,18 @@ function ContactIcons({ row }: { row: Row }) {
       >
         <Icon name="phone" size={16} />
       </a>
-      <a
-        href={`https://wa.me/${to}?text=${encodeURIComponent(thanksMessage(row))}`}
-        target="_blank"
-        rel="noreferrer"
-        title={`Message ${name} on WhatsApp`}
-        aria-label={`Message ${name} on WhatsApp`}
+      <button
+        type="button"
+        onClick={() => setSending(true)}
+        title={`Send ${name} the picture and message on WhatsApp`}
+        aria-label={`Send ${name} the picture and message on WhatsApp`}
         className={`${base} text-[#25D366] hover:bg-[#25D366]/10`}
       >
         <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
           <path d={WHATSAPP_PATH} />
         </svg>
-      </a>
+      </button>
+      {sending && <SendThanksModal row={row} to={to} onClose={() => setSending(false)} onSent={onSent} />}
     </div>
   );
 }
@@ -975,7 +1093,7 @@ export default function WallTable({ view }: { view: WallView }) {
 
                   {view === "contact" && canContact && (
                     <Td>
-                      <ContactIcons row={r} />
+                      <ContactIcons row={r} onSent={() => void load()} />
                     </Td>
                   )}
                   {view === "contact" && canContact && (

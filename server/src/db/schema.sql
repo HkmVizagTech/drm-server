@@ -3205,3 +3205,11 @@ CREATE TABLE IF NOT EXISTS wa_contact_sync (
   finished_at TIMESTAMPTZ
 );
 INSERT INTO wa_contact_sync (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+/* "The service is temporarily unavailable" - the operator's message a caller hears when a number cannot be
+   reached right now. Treated exactly like No answer / Busy / Switched off: the call is not a conversation,
+   the lead comes back in two days, and it counts toward the five unanswered calls. Added as data, so it
+   shows as a button on the calling screen and in every outcome list without further change. */
+INSERT INTO crm_dispositions (slug, label, counts_connected, suggests_status, wants_follow_up, sort_order) VALUES
+  ('temporarily_unavailable', 'Temporarily unavailable', FALSE, 'attempting', TRUE, 85)
+ON CONFLICT (slug) DO NOTHING;
