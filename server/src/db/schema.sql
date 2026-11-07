@@ -3218,3 +3218,27 @@ ON CONFLICT (slug) DO NOTHING;
    reports the message DELIVERED (or read) - not when it was handed over, since WhatsApp can still refuse it
    (e.g. 131047, more than 24 hours since the donor last wrote). */
 ALTER TABLE wa_messages ADD COLUMN IF NOT EXISTS wall_item_id UUID REFERENCES seva_wall_items(id) ON DELETE SET NULL;
+
+/* When a lead comes back, per outcome.
+   retry_after_days: days after the call before the lead is back on Follow-ups (at 10:00), instead of the
+     general retry_after_days setting. For an outcome that did not connect it applies once the day's
+     morning AND evening calls were both tried; a single call that day keeps the general gap so the lead
+     still gets its morning-and-evening try.
+   evening_retry_all: a morning call with this outcome comes back the same evening for EVERY lead, not
+     only the "nearly gave" ones (evening_retry_scope). */
+ALTER TABLE crm_dispositions ADD COLUMN IF NOT EXISTS retry_after_days INTEGER;
+ALTER TABLE crm_dispositions ADD COLUMN IF NOT EXISTS evening_retry_all BOOLEAN NOT NULL DEFAULT FALSE;
+
+INSERT INTO crm_dispositions (slug, label, counts_connected, suggests_status, wants_follow_up, sort_order) VALUES
+  ('out_of_coverage', 'Out of coverage', FALSE, 'attempting', TRUE, 86)
+ON CONFLICT (slug) DO NOTHING;
+
+-- Temporarily unavailable: morning and evening, then back in 30 days.
+UPDATE crm_dispositions SET evening_retry_all = TRUE, retry_after_days = 30
+ WHERE slug = 'temporarily_unavailable' AND retry_after_days IS NULL;
+-- Out of coverage: morning and evening, then back in 2 days.
+UPDATE crm_dispositions SET evening_retry_all = TRUE, retry_after_days = 2
+ WHERE slug = 'out_of_coverage' AND retry_after_days IS NULL;
+-- Call back later: back tomorrow (a day the caller picks still wins).
+UPDATE crm_dispositions SET retry_after_days = 1
+ WHERE slug = 'call_back' AND retry_after_days IS NULL;

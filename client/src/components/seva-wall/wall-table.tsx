@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { seedSessionState, useSessionState } from "@/lib/session-state";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { apiClient, isAbort } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { currency, dateTime, number, shortDate } from "@/lib/format";
@@ -354,6 +355,16 @@ function ContactIcons({ row }: { row: Row }) {
           <path d={WHATSAPP_PATH} />
         </svg>
       </button>
+      {/* Every call to this donor and its recording - the same list a lead's calls are in. Seva wall donors
+          are kept out of Leads, so this is where their calls are found. */}
+      <Link
+        href={`/calling/recordings?period=all&search=${to.slice(-10)}`}
+        title={`Calls and recordings with ${name}`}
+        aria-label={`Calls and recordings with ${name}`}
+        className={`${base} text-ink-muted hover:bg-sunken hover:text-ink`}
+      >
+        <Icon name="mic" size={16} />
+      </Link>
       {blocked && <CannotSendDialog row={row} to={to} onClose={() => setBlocked(false)} onOpenChat={openChat} />}
     </div>
   );

@@ -83,12 +83,16 @@ function range(q: Record<string, unknown>): { from: string; to: string; label: s
   const preset = String(q.preset ?? '');
   const today = istDate();
 
-  if (q.start_date || q.end_date) {
-    return {
-      from: String(q.start_date ?? '1970-01-01'),
-      to: String(q.end_date ?? today),
-      label: 'Custom',
-    };
+  // A custom From-To. Only real calendar dates are taken (anything else is ignored, never sent to SQL),
+  // and a From after the To is turned round rather than returning an empty window.
+  const day = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) ? v : null);
+  const start = day(q.start_date);
+  const end = day(q.end_date);
+  if (start || end) {
+    let from = start ?? '1970-01-01';
+    let to = end ?? today;
+    if (from > to) [from, to] = [to, from];
+    return { from, to, label: 'Custom' };
   }
 
   // Day arithmetic done on the IST calendar date rather than by subtracting

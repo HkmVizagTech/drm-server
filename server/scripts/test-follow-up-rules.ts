@@ -189,7 +189,7 @@ async function main() {
 
   console.log('\n--- the fifth unanswered call closes the lead ---');
   const five = await lead({ nearlyGave: true });
-  const outcomes = ['no_answer', 'busy', 'temporarily_unavailable', 'no_answer'];
+  const outcomes = ['no_answer', 'busy', 'switched_off', 'no_answer'];
   for (const o of outcomes) {
     const r = await ring(five, o);
     check(`${o}: still open, due again`, r.http === 201 && (await row(five)).status === 'attempting' && !!(await row(five)).next_follow_up_at && r.lead.auto_closed === false, { r: r.lead });

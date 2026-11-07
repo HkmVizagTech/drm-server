@@ -490,6 +490,10 @@ function buildLeadFilters(q: Record<string, unknown>, startIdx = 1): Filters {
   if (q.status) {
     conditions.push(`l.status = ANY($${i++})`);
     values.push(arr(q.status));
+  } else {
+    // Seva wall donors are made leads only so the phone keeps their calls and recordings; they are worked
+    // from the Seva wall, not here. Left out unless somebody asks for that status by name.
+    conditions.push(`l.status <> 'seva_wall'`);
   }
   if (q.source) {
     conditions.push(`l.source = ANY($${i++})`);
@@ -2535,7 +2539,7 @@ export async function logCallForLead(
     }
 
     const d = await client.query(
-      `SELECT slug, counts_connected, suggests_status, wants_follow_up FROM crm_dispositions WHERE slug = $1`,
+      `SELECT slug, counts_connected, suggests_status, wants_follow_up, retry_after_days, evening_retry_all FROM crm_dispositions WHERE slug = $1`,
       [disposition]
     );
     if (!d.rows.length) {
@@ -2675,6 +2679,8 @@ export async function logCallForLead(
       const scope = String(hrs.rows.find((r) => r.key === 'evening_retry_scope')?.value ?? 'nearly_gave');
       const inScope =
         scope === 'all' ||
+        // Outcomes that get a same-day evening try for every lead (Temporarily unavailable, Out of coverage).
+        d.rows[0].evening_retry_all === true ||
         (await client.query(`SELECT ('abandoned' = ANY(tags) OR 'patron' = ANY(tags)) AS ng FROM leads WHERE id = $1`, [leadId])).rows[0]?.ng === true;
       const hour = (key: string, dflt: number) => {
         const v = Number(hrs.rows.find((r) => r.key === key)?.value);
@@ -2757,11 +2763,31 @@ export async function logCallForLead(
     // recorded the next morning still counts from the day it was made. Never
     // earlier than tomorrow morning, so a call recorded days late is not
     // booked into the past.
+    // The outcome's own gap (crm_dispositions.retry_after_days), when it has one: Call back later is back
+    // tomorrow; Temporarily unavailable in 30 days and Out of coverage in 2 - but those two only once the
+    // day's morning AND evening calls were both tried. A single unanswered call that day keeps the general
+    // gap, so the lead still gets its morning-and-evening try before going away for a month.
+    let gapDays = retryAfterDays;
+    const ownGap = Number(d.rows[0].retry_after_days);
+    if (Number.isFinite(ownGap) && ownGap > 0) {
+      if (!unanswered) gapDays = ownGap;
+      else if (!eveningAt) {
+        const today = await client.query(
+          `SELECT COUNT(*)::int AS n
+             FROM lead_activities a JOIN crm_dispositions cd ON cd.slug = a.disposition
+            WHERE a.lead_id = $1 AND a.kind = 'call' AND COALESCE(a.direction, 'outbound') = 'outbound'
+              AND COALESCE(a.connected, FALSE) = FALSE AND cd.wants_follow_up = TRUE
+              AND a.occurred_at >= date_trunc('day', COALESCE($2::timestamptz, NOW()))`,
+          [leadId, asDate(b.occurred_at)]
+        );
+        if (today.rows[0].n >= 2) gapDays = Math.min(90, ownGap);
+      }
+    }
     const when = await client.query(
       `SELECT GREATEST(
                 date_trunc('day', COALESCE($1::timestamptz, NOW())) + ($2::int || ' days')::interval + INTERVAL '10 hours',
                 date_trunc('day', NOW()) + INTERVAL '1 day' + INTERVAL '10 hours') AS at`,
-      [asDate(b.occurred_at), retryAfterDays]
+      [asDate(b.occurred_at), gapDays]
     );
     const retryAt: Date = when.rows[0].at;
     // The date this call books when nobody picked one.

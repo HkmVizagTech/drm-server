@@ -20,7 +20,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { currency, number } from "@/lib/format";
+import { currency, istDayPlus, istToday, number } from "@/lib/format";
 import { talk } from "@/lib/phone-calls";
 import {
   Alert,
@@ -176,7 +176,9 @@ const PRESETS = [
   { key: "quarter", label: "90 days" },
   { key: "year", label: "This year" },
   { key: "all", label: "All time" },
+  { key: "custom", label: "Custom" },
 ];
+const isDay = (v: string | null): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
 
 // What each kind of credit actually is, in the words a caller would use.
 // "You raised ₹40,000" is not actionable; "₹31,000 through your QR, ₹9,000 you
@@ -240,7 +242,30 @@ function CallingDashboard() {
   const sp = useSearchParams();
   const router = useRouter();
   const preset = PRESETS.some((p) => p.key === sp.get("period")) ? (sp.get("period") as string) : "month";
-  const setPreset = (v: string) => router.replace(v === "month" ? "/calling" : `/calling?period=${v}`, { scroll: false });
+  // A custom range lives in the URL too (?period=custom&from=…&to=…), so a refresh or Back keeps it.
+  const customFrom = isDay(sp.get("from")) ? (sp.get("from") as string) : "";
+  const customTo = isDay(sp.get("to")) ? (sp.get("to") as string) : "";
+  const [fromInput, setFromInput] = useState(customFrom);
+  const [toInput, setToInput] = useState(customTo);
+  const today = istToday();
+  const rangeProblem =
+    !fromInput || !toInput ? "Pick both dates." : fromInput > toInput ? "The From date is after the To date." : toInput > today ? "The To date is in the future." : null;
+  const setPreset = (v: string) => {
+    if (v === "custom") {
+      // Start from the last 30 days, so the two boxes are never empty.
+      const f = customFrom || istDayPlus(-29);
+      const t = customTo || today;
+      setFromInput(f);
+      setToInput(t);
+      router.replace(`/calling?period=custom&from=${f}&to=${t}`, { scroll: false });
+      return;
+    }
+    router.replace(v === "month" ? "/calling" : `/calling?period=${v}`, { scroll: false });
+  };
+  const applyCustom = () => {
+    if (rangeProblem) return;
+    router.replace(`/calling?period=custom&from=${fromInput}&to=${toInput}`, { scroll: false });
+  };
   const [outside, setOutside] = useState(false);
   const [data, setData] = useState<Dashboard | null>(null);
   const [loading, setLoading] = useState(true);
@@ -249,14 +274,15 @@ function CallingDashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setData(await apiClient.get<Dashboard>(`/api/crm/dashboard?preset=${preset}`));
+      const q = preset === "custom" && customFrom && customTo ? `start_date=${customFrom}&end_date=${customTo}` : `preset=${preset === "custom" ? "month" : preset}`;
+      setData(await apiClient.get<Dashboard>(`/api/crm/dashboard?${q}`));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load. Try again.");
     } finally {
       setLoading(false);
     }
-  }, [preset]);
+  }, [preset, customFrom, customTo]);
 
   useEffect(() => {
     void load();
@@ -370,6 +396,18 @@ function CallingDashboard() {
             onChange={setPreset}
           />
         </Field>
+        {preset === "custom" && (
+          <form className="flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); applyCustom(); }}>
+            <Field label="From">
+              <Input type="date" value={fromInput} max={toInput || today} onChange={(e) => setFromInput(e.target.value)} />
+            </Field>
+            <Field label="To">
+              <Input type="date" value={toInput} min={fromInput || undefined} max={today} onChange={(e) => setToInput(e.target.value)} />
+            </Field>
+            <Button type="submit" disabled={!!rangeProblem || (fromInput === customFrom && toInput === customTo)}>Apply</Button>
+            {rangeProblem && <span className="pb-2 text-xs text-danger">{rangeProblem}</span>}
+          </form>
+        )}
       </Toolbar>
 
       {error && <Alert tone="danger">{error}</Alert>}

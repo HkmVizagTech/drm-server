@@ -120,13 +120,18 @@ async function main() {
   }
 
   console.log('\n--- a call that connected and needs another comes back the same way ---');
-  for (const [slug, phone] of [['call_back', '9810000021'], ['interested', '9810000022'], ['will_donate', '9810000023'], ['will_pay_qr', '9810000024']]) {
+  for (const [slug, phone] of [['interested', '9810000022'], ['will_donate', '9810000023'], ['will_pay_qr', '9810000024']]) {
     const id = await add(phone);
     // The bare outcome, as an older screen would send it (the current one asks
     // for a day or a note on "will donate").
     const r = await post(`/api/crm/leads/${id}/call`, { disposition: slug });
     check(`${slug}: back in two days at 10:00`, r.status === 201 && (await when(id)) === in2, { status: r.status, at: await when(id) });
   }
+
+  // Call back later has its own gap: tomorrow (crm_dispositions.retry_after_days = 1).
+  const cb = await add('9810000021');
+  const cbr = await post(`/api/crm/leads/${cb}/call`, { disposition: 'call_back' });
+  check('call_back: back TOMORROW at 10:00', cbr.status === 201 && (await when(cb)) === `${await istDay(1)} 10:00`, { at: await when(cb) });
 
   console.log('\n--- counted in DAYS: the hour of the call makes no difference ---');
   const evening = await add('9810000031');

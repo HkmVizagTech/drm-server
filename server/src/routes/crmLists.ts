@@ -165,7 +165,10 @@ export const FOLLOW_UP_LISTED = `(
       'abandoned' = ANY(l.tags)
       OR NOT EXISTS (
         SELECT 1 FROM crm_dispositions fd
-         WHERE fd.slug = l.last_outcome AND fd.wants_follow_up AND NOT fd.counts_connected)
+         WHERE fd.slug = l.last_outcome AND fd.wants_follow_up AND NOT fd.counts_connected
+           -- Temporarily unavailable / Out of coverage are listed: their evening try and their
+           -- return (30 / 2 days on) are follow-ups a caller is asked to make.
+           AND NOT fd.evening_retry_all)
     )
   )
 )`;
