@@ -57,6 +57,16 @@ function buildFilters(q: Record<string, unknown>, startIdx = 1): Filters {
     idx++;
   }
 
+  // The courier's own status (DTDC "RTO in transit" etc.); "none" = nothing reported by a courier.
+  if (typeof q.courier_status === 'string' && q.courier_status) {
+    if (q.courier_status === 'none') conditions.push(`d.courier_status IS NULL`);
+    else {
+      conditions.push(`d.courier_status = $${idx}`);
+      values.push(q.courier_status.slice(0, 40));
+      idx++;
+    }
+  }
+
   if (q.person_id) {
     conditions.push(`d.person_id = $${idx}`);
     values.push(q.person_id);
@@ -153,7 +163,7 @@ function buildFilters(q: Record<string, unknown>, startIdx = 1): Filters {
 const SELECT_COLUMNS = `
   d.id, d.person_id, d.donation_id, d.address, d.status, d.courier_name,
   d.tracking_number, d.dispatched_at, d.delivered_at, d.notes, d.created_at,
-  d.source_site, d.marked_at, d.marked_via,
+  d.source_site, d.marked_at, d.marked_via, d.courier_status, d.courier_status_at,
   -- Whether the source site has caught up with what was marked here. Shown as a
   -- small badge so staff can see at a glance that a row is out of step, rather
   -- than discovering it when a box gets couriered twice.
@@ -222,7 +232,7 @@ router.get('/', async (req, res) => {
 // GET /filters - the values actually present, so the filter dropdowns offer
 // real options rather than a hardcoded list that matches nothing.
 router.get('/filters', async (_req, res) => {
-  const [purposes, pages, sites] = await Promise.all([
+  const [purposes, pages, sites, courierStatuses] = await Promise.all([
     pool.query(`
       SELECT lower(${displayPurposeSql('dn.purpose', 'dn.source_page')}) AS purpose, COUNT(*) AS count
       FROM prasadam_deliveries d JOIN donations dn ON d.donation_id = dn.id
@@ -239,11 +249,16 @@ router.get('/filters', async (_req, res) => {
       SELECT source_site AS site, COUNT(*) AS count
       FROM prasadam_deliveries GROUP BY source_site ORDER BY count DESC
     `),
+    pool.query(`
+      SELECT courier_status AS status, COUNT(*) AS count
+      FROM prasadam_deliveries WHERE courier_status IS NOT NULL GROUP BY courier_status ORDER BY count DESC
+    `),
   ]);
   res.json({
     purposes: purposes.rows.map((r) => ({ purpose: r.purpose, count: Number(r.count) })),
     pages: pages.rows.map((r) => ({ page: r.page, count: Number(r.count) })),
     sites: sites.rows.map((r) => ({ site: r.site, count: Number(r.count) })),
+    courier_statuses: courierStatuses.rows.map((r) => ({ status: r.status, count: Number(r.count) })),
   });
 });
 

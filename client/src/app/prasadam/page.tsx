@@ -57,6 +57,8 @@ interface Delivery {
   donation_id: string | null;
   address: string;
   status: string;
+  courier_status?: string | null;
+  courier_status_at?: string | null;
   courier_name: string | null;
   tracking_number: string | null;
   dispatched_at: string | null;
@@ -89,6 +91,7 @@ interface FilterOptions {
   purposes: { purpose: string; count: number }[];
   pages: { page: string; count: number }[];
   sites: { site: string; count: number }[];
+  courier_statuses?: { status: string; count: number }[];
 }
 
 interface ImportRow {
@@ -174,6 +177,7 @@ export default function PrasadamPage() {
   const [excludePurpose, setExcludePurpose] = useSessionState("prasadam:excludePurpose", "");
   const [fromDate, setFromDate] = useSessionState("prasadam:fromDate", "");
   const [toDate, setToDate] = useSessionState("prasadam:toDate", "");
+  const [courierStatus, setCourierStatus] = useSessionState("prasadam:courierStatus", "");
   const [page, setPage] = useSessionState("prasadam:page", 1);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -190,7 +194,7 @@ export default function PrasadamPage() {
     return () => clearTimeout(t);
   }, [search]);
 
-  useEffect(() => setPage(1), [tab, debounced, site, group, includePurpose, excludePurpose, fromDate, toDate]);
+  useEffect(() => setPage(1), [tab, debounced, site, group, includePurpose, excludePurpose, fromDate, toDate, courierStatus]);
 
   // One place that turns the filter state into query params, used by the list
   // AND the export - so the file you download is exactly the rows on screen.
@@ -204,8 +208,9 @@ export default function PrasadamPage() {
     if (excludePurpose) p.set("exclude_purpose", excludePurpose);
     if (fromDate) p.set("from_date", fromDate);
     if (toDate) p.set("to_date", toDate);
+    if (courierStatus) p.set("courier_status", courierStatus);
     return p;
-  }, [tab, debounced, site, group, includePurpose, excludePurpose, fromDate, toDate]);
+  }, [tab, debounced, site, group, includePurpose, excludePurpose, fromDate, toDate, courierStatus]);
 
   const fetchData = useCallback(() => {
     setLoading(true);
@@ -366,6 +371,18 @@ export default function PrasadamPage() {
                 {siteLabel(s.site)} ({s.count})
               </option>
             ))}
+          </Select>
+        </Field>
+        {/* What the courier last reported (DTDC "RTO in transit", "Delivered"...), from the courier's file. */}
+        <Field label="Courier status" className="flex-1 min-w-[9rem]">
+          <Select value={courierStatus} onChange={(v) => setCourierStatus(v)} ariaLabel="Courier status">
+            <option value="">Any courier status</option>
+            {(options.courier_statuses ?? []).map((c) => (
+              <option key={c.status} value={c.status}>
+                {c.status} ({c.count})
+              </option>
+            ))}
+            <option value="none">No courier report</option>
           </Select>
         </Field>
         <Field label="Page" className="flex-1 min-w-[9rem]">
@@ -564,6 +581,11 @@ export default function PrasadamPage() {
                 </Td>
                 <Td>
                   <StatusBadge status={d.status} />
+                  {d.courier_status && (
+                    <span className="mt-1 block text-2xs font-medium text-ink-muted" title={d.courier_status_at ? `Reported ${relativeDate(d.courier_status_at)}` : undefined}>
+                      {d.courier_name ?? "Courier"}: {d.courier_status}
+                    </span>
+                  )}
                   {d.delivered_at && (
                     <span className="mt-1 block text-2xs text-ink-faint">
                       {relativeDate(d.delivered_at)}

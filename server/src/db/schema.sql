@@ -3242,3 +3242,10 @@ UPDATE crm_dispositions SET evening_retry_all = TRUE, retry_after_days = 2
 -- Call back later: back tomorrow (a day the caller picks still wins).
 UPDATE crm_dispositions SET retry_after_days = 1
  WHERE slug = 'call_back' AND retry_after_days IS NULL;
+
+/* The courier's own status for a delivery (e.g. DTDC "RTO in transit"), word for word, and when it was
+   read. DRM's status says where the prasadam stands (shipped / delivered / returned); this says what the
+   courier last reported, so the office can filter on it. Set when a courier report is applied. */
+ALTER TABLE prasadam_deliveries ADD COLUMN IF NOT EXISTS courier_status VARCHAR(40);
+ALTER TABLE prasadam_deliveries ADD COLUMN IF NOT EXISTS courier_status_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_prasadam_courier_status ON prasadam_deliveries (courier_status) WHERE courier_status IS NOT NULL;
