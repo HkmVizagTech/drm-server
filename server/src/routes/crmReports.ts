@@ -151,14 +151,21 @@ router.get('/dashboard', async (req, res) => {
   const { from, to, label } = range(req.query as Record<string, unknown>);
   // NULL means "no narrowing" - every predicate below is written to pass
   // everything when it is NULL, so one parameter serves both audiences.
-  const me = scopeOf(req);
+  // An admin may look at one caller (?caller=<user id>): every figure is then that caller's, exactly as the
+  // caller sees them. A caller is always narrowed to themselves, whatever they send.
+  const askedCaller = String(req.query.caller ?? '');
+  const adminViewsCaller =
+    req.user?.role === 'admin' && /^[0-9a-f-]{36}$/i.test(askedCaller)
+      ? (await pool.query(`SELECT id, name FROM users WHERE id = $1`, [askedCaller])).rows[0] ?? null
+      : null;
+  const me = adminViewsCaller ? (adminViewsCaller.id as string) : scopeOf(req);
 
   try {
     // Link any donations that have landed since a lead was created, so the
     // conversion figures below are current rather than a day behind.
     await reconcileConversions();
 
-    const [leads, conv, credits, calls, pipeline, followUps, byStatus, bySource, callers, qr, byQr, ngCalls, ngMoney, byCallerCalls, byCallerMoney, phoneCalls] = await Promise.all([
+    const [leads, conv, credits, calls, pipeline, followUps, byStatus, bySource, callers, qr, byQr, ngCalls, ngMoney, byCallerCalls, byCallerMoney, phoneCalls, callKinds, teamList] = await Promise.all([
       pool.query(
         // WHAT COUNTS AS A CONVERSION, AND WHY THIS CHANGED
         //
@@ -417,7 +424,54 @@ router.get('/dashboard', async (req, res) => {
             AND ($3::uuid IS NULL OR user_id = $3::uuid)`,
         [from, to, me]
       ),
+      // CALLS BY TYPE, per caller: what kind of work each call was. One kind per call, in this order:
+      //   sankalpam   - a Sankalpam call
+      //   incoming    - the donor rang in;  missed - a ring nobody picked up
+      //   seva_wall   - a Seva wall donor (its outcome, or the lead the wall made)
+      //   nearly_gave - a donor who nearly gave (services/nearlyGaveCalls.ts, as the rest of this screen)
+      //   patron      - a patron request
+      //   other       - every other lead call
+      pool.query(
+        `SELECT k.user_id, k.kind, COUNT(*)::int AS made, COUNT(*) FILTER (WHERE k.connected)::int AS connected
+           FROM (SELECT a.user_id, a.connected,
+                        CASE
+                          WHEN a.via = 'sankalpam' THEN 'sankalpam'
+                          WHEN a.direction = 'inbound' THEN 'incoming'
+                          WHEN a.direction = 'missed' THEN 'missed'
+                          WHEN a.disposition LIKE 'seva_wall%'
+                            OR (a.lead_id IS NOT NULL AND EXISTS (SELECT 1 FROM leads kl WHERE kl.id = a.lead_id AND ('seva_wall' = ANY(kl.tags) OR kl.status = 'seva_wall')))
+                            THEN 'seva_wall'
+                          WHEN a.lead_id IS NOT NULL AND ${NEARLY_GAVE_CALL('a')} THEN 'nearly_gave'
+                          WHEN a.lead_id IS NOT NULL AND EXISTS (SELECT 1 FROM leads kl WHERE kl.id = a.lead_id AND 'patron' = ANY(kl.tags))
+                            THEN 'patron'
+                          ELSE 'other'
+                        END AS kind
+                   FROM ${CALL_EVENTS} a
+                  WHERE a.user_id IS NOT NULL AND ${WINDOW('a.occurred_at', 1, 2)}
+                    AND ($3::uuid IS NULL OR a.user_id = $3::uuid)) k
+          GROUP BY k.user_id, k.kind`,
+        [from, to, me]
+      ),
+      // The people an admin can pick from (the Caller filter).
+      req.user?.role === 'admin'
+        ? pool.query(`SELECT id, name, role FROM users WHERE role IN ('caller', 'admin') AND COALESCE(is_active, TRUE) ORDER BY role DESC, name`)
+        : Promise.resolve({ rows: [] }),
     ]);
+
+    // Calls by type: the totals for this view, and (team view) per caller.
+    const KINDS = ['nearly_gave', 'sankalpam', 'seva_wall', 'patron', 'other', 'incoming', 'missed'] as const;
+    const blank = () => Object.fromEntries(KINDS.map((k) => [k, { made: 0, connected: 0 }])) as Record<string, { made: number; connected: number }>;
+    const kindTotals = blank();
+    const kindByUser = new Map<string, Record<string, { made: number; connected: number }>>();
+    for (const r of callKinds.rows as { user_id: string; kind: string; made: number; connected: number }[]) {
+      const t = kindTotals[r.kind];
+      if (!t) continue;
+      t.made += r.made;
+      t.connected += r.connected;
+      if (!kindByUser.has(r.user_id)) kindByUser.set(r.user_id, blank());
+      kindByUser.get(r.user_id)![r.kind] = { made: r.made, connected: r.connected };
+    }
+    const names = new Map<string, string>((teamList.rows as { id: string; name: string }[]).map((u) => [u.id, u.name]));
 
     const c = calls.rows[0];
     const l = leads.rows[0];
@@ -488,10 +542,23 @@ router.get('/dashboard', async (req, res) => {
       split,
       by_caller: byCaller,
       phone_calls: phoneCalls.rows[0],
+      call_kinds: {
+        totals: kindTotals,
+        // Per caller on the team view only (an admin not looking at one caller), busiest first.
+        by_caller: me
+          ? []
+          : [...kindByUser.entries()]
+              .map(([id, kinds]) => ({ id, name: names.get(id) ?? 'Unknown', kinds, made: Object.values(kinds).reduce((n, k) => n + k.made, 0) }))
+              .sort((a, b) => b.made - a.made),
+      },
+      // For an admin: who can be picked, and who is being looked at (null = the whole team).
+      team: teamList.rows,
+      viewing: adminViewsCaller ? { id: adminViewsCaller.id, name: adminViewsCaller.name } : null,
       // The screen says whose figures these are rather than leaving the reader
       // to assume. A caller reading temple-wide totals as their own, or the
       // reverse, is the failure this one field prevents.
-      scope: me ? 'mine' : 'team',
+      // 'caller' = an admin looking at one caller's figures (see `viewing`).
+      scope: adminViewsCaller ? 'caller' : me ? 'mine' : 'team',
       // THE MONEY, as its own block rather than a field on `leads`.
       //
       // It sits apart because it is no longer a fact about leads: a caller's

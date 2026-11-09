@@ -45,6 +45,18 @@ import {
 
 type CreditKind = "qr" | "link" | "lead" | "offline" | "manual";
 
+type CallKind = "nearly_gave" | "sankalpam" | "seva_wall" | "patron" | "other" | "incoming" | "missed";
+// The order and words the screen uses for each kind of call.
+const CALL_KINDS: { key: CallKind; label: string; hint: string }[] = [
+  { key: "nearly_gave", label: "Nearly gave", hint: "Donors who started to give and stopped" },
+  { key: "sankalpam", label: "Sankalpam", hint: "Sankalpam calls" },
+  { key: "seva_wall", label: "Seva wall", hint: "Brick and square foot donors" },
+  { key: "patron", label: "Patron requests", hint: "Patron enquiries" },
+  { key: "other", label: "Other leads", hint: "Every other lead" },
+  { key: "incoming", label: "Incoming", hint: "Donors who rang in" },
+  { key: "missed", label: "Missed", hint: "Rings nobody picked up" },
+];
+
 interface Dashboard {
   range: { from: string; to: string; label: string };
   /**
@@ -54,7 +66,15 @@ interface Dashboard {
    * role, so the heading can never claim one thing while the numbers are the
    * other.
    */
-  scope: "mine" | "team";
+  scope: "mine" | "team" | "caller";
+  /** Calls by type for this view; per caller only on the team view. */
+  call_kinds?: {
+    totals: Record<CallKind, { made: number; connected: number }>;
+    by_caller: { id: string; name: string; made: number; kinds: Record<CallKind, { made: number; connected: number }> }[];
+  };
+  /** Admin only: the people the Caller filter offers, and who is being looked at (null = the team). */
+  team?: { id: string; name: string; role: string }[];
+  viewing?: { id: string; name: string } | null;
   /**
    * EVERY RUPEE ON THIS SCREEN COMES FROM HERE, and nothing else may be summed
    * into a money figure.
@@ -243,6 +263,16 @@ function CallingDashboard() {
   const router = useRouter();
   const preset = PRESETS.some((p) => p.key === sp.get("period")) ? (sp.get("period") as string) : "month";
   // A custom range lives in the URL too (?period=custom&from=…&to=…), so a refresh or Back keeps it.
+  // An admin looking at one caller (?caller=<id>); kept when the period changes.
+  const caller = /^[0-9a-f-]{36}$/i.test(sp.get("caller") ?? "") ? (sp.get("caller") as string) : "";
+  const withCaller = (url: string) => (caller ? `${url}${url.includes("?") ? "&" : "?"}caller=${caller}` : url);
+  const setCaller = (id: string) => {
+    const p = new URLSearchParams(sp.toString());
+    if (id) p.set("caller", id);
+    else p.delete("caller");
+    const qs = p.toString();
+    router.replace(qs ? `/calling?${qs}` : "/calling", { scroll: false });
+  };
   const customFrom = isDay(sp.get("from")) ? (sp.get("from") as string) : "";
   const customTo = isDay(sp.get("to")) ? (sp.get("to") as string) : "";
   const [fromInput, setFromInput] = useState(customFrom);
@@ -257,14 +287,14 @@ function CallingDashboard() {
       const t = customTo || today;
       setFromInput(f);
       setToInput(t);
-      router.replace(`/calling?period=custom&from=${f}&to=${t}`, { scroll: false });
+      router.replace(withCaller(`/calling?period=custom&from=${f}&to=${t}`), { scroll: false });
       return;
     }
-    router.replace(v === "month" ? "/calling" : `/calling?period=${v}`, { scroll: false });
+    router.replace(withCaller(v === "month" ? "/calling" : `/calling?period=${v}`), { scroll: false });
   };
   const applyCustom = () => {
     if (rangeProblem) return;
-    router.replace(`/calling?period=custom&from=${fromInput}&to=${toInput}`, { scroll: false });
+    router.replace(withCaller(`/calling?period=custom&from=${fromInput}&to=${toInput}`), { scroll: false });
   };
   const [outside, setOutside] = useState(false);
   const [data, setData] = useState<Dashboard | null>(null);
@@ -275,14 +305,14 @@ function CallingDashboard() {
     setLoading(true);
     try {
       const q = preset === "custom" && customFrom && customTo ? `start_date=${customFrom}&end_date=${customTo}` : `preset=${preset === "custom" ? "month" : preset}`;
-      setData(await apiClient.get<Dashboard>(`/api/crm/dashboard?${q}`));
+      setData(await apiClient.get<Dashboard>(`/api/crm/dashboard?${q}${caller ? `&caller=${caller}` : ""}`));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load. Try again.");
     } finally {
       setLoading(false);
     }
-  }, [preset, customFrom, customTo]);
+  }, [preset, customFrom, customTo, caller]);
 
   useEffect(() => {
     void load();
@@ -408,7 +438,32 @@ function CallingDashboard() {
             {rangeProblem && <span className="pb-2 text-xs text-danger">{rangeProblem}</span>}
           </form>
         )}
+        {(data?.team?.length ?? 0) > 0 && (
+          <Field label="Caller">
+            <select
+              className="h-9.5 rounded-control border border-line-strong bg-surface px-3 text-sm"
+              value={caller}
+              onChange={(e) => setCaller(e.target.value)}
+              aria-label="Caller"
+            >
+              <option value="">Whole team</option>
+              {data!.team!.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.name}
+                  {u.role === "admin" ? " (admin)" : ""}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
       </Toolbar>
+
+      {data?.viewing && (
+        <Alert tone="info" title={`Showing ${data.viewing.name}'s figures`}>
+          Every number on this page is {data.viewing.name}&apos;s for {data.range.label.toLowerCase()}.{" "}
+          <button className="font-medium underline" onClick={() => setCaller("")}>Back to the whole team</button>
+        </Alert>
+      )}
 
       {error && <Alert tone="danger">{error}</Alert>}
 
@@ -689,6 +744,71 @@ function CallingDashboard() {
                       <td className="border-l border-line-soft px-5 py-2.5 text-right font-semibold tabular-nums text-brand-700">
                         {currency(p.raised)}
                       </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* CALLS BY TYPE: what kind of work the calls were - Nearly gave, Sankalpam, Seva wall... - for this
+          period (and caller). Per caller below it on the team view. */}
+      {data?.call_kinds && (
+        <Card className="mb-6">
+          <CardHeader
+            title="Calls by type"
+            icon="phone"
+            subtitle={mine ? "Your calls in this period" : data.viewing ? `${data.viewing.name}'s calls in this period` : "The team's calls in this period"}
+          />
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
+            {CALL_KINDS.map((k) => {
+              const v = data.call_kinds!.totals[k.key] ?? { made: 0, connected: 0 };
+              return (
+                <div key={k.key} className="rounded-lg border border-line-soft bg-surface p-3" title={k.hint}>
+                  <p className="text-xs font-medium text-ink-muted">{k.label}</p>
+                  <p className="mt-1 text-2xl font-semibold tabular-nums text-ink">{number(v.made)}</p>
+                  {k.key !== "missed" && (
+                    <p className="text-xs text-ink-muted">
+                      {number(v.connected)} {k.key === "incoming" ? "picked up" : "answered"}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {(data.call_kinds.by_caller.length ?? 0) > 0 && (
+            <div className="-mx-5 mt-5 overflow-x-auto border-t border-line-soft">
+              <table className="w-full text-sm">
+                <thead className="bg-sunken text-2xs font-semibold uppercase tracking-[0.06em] text-ink-muted">
+                  <tr>
+                    <th className="px-5 py-2 text-left">Caller</th>
+                    {CALL_KINDS.map((k) => (
+                      <th key={k.key} className="border-l border-line-soft px-3 py-2 text-right">{k.label}</th>
+                    ))}
+                    <th className="border-l border-line-soft px-5 py-2 text-right">All calls</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line-soft">
+                  {data.call_kinds.by_caller.map((p) => (
+                    <tr key={p.id}>
+                      <td className="px-5 py-2.5 font-medium text-ink">
+                        <button className="hover:text-brand-700 hover:underline" onClick={() => setCaller(p.id)} title={`See ${p.name}'s figures`}>
+                          {p.name}
+                        </button>
+                      </td>
+                      {CALL_KINDS.map((k) => {
+                        const v = p.kinds[k.key] ?? { made: 0, connected: 0 };
+                        return (
+                          <td key={k.key} className="border-l border-line-soft px-3 py-2.5 text-right tabular-nums">
+                            <span className="font-medium text-ink">{number(v.made)}</span>
+                            {k.key !== "missed" && v.made > 0 && <span className="block text-2xs text-ink-faint">{number(v.connected)} ans.</span>}
+                          </td>
+                        );
+                      })}
+                      <td className="border-l border-line-soft px-5 py-2.5 text-right font-semibold tabular-nums text-brand-700">{number(p.made)}</td>
                     </tr>
                   ))}
                 </tbody>
