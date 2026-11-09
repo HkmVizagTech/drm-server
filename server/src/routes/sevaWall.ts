@@ -256,45 +256,53 @@ router.get('/', allow(...LOOK), async (req, res) => {
   if (stage === 'to_call' || uploadedTab) where.push(`w.status = 'in_review' AND w.called_at IS NULL`);
   if (stage === 'called') where.push(`w.status = 'in_review' AND w.called_at IS NOT NULL`);
   if (stage === 'sent') where.push(`w.status = 'sent'`);
-  if (kind) {
-    values.push(kind);
-    where.push(`w.kind = $${values.length}`);
-  }
-  if (priority) {
-    values.push(priority);
-    where.push(`w.priority = $${values.length}`);
-  }
-  // Only the bricks devotees added: all of them ("any"), or one devotee's. For the people who review them.
+  // The filters on screen other than the tab (seva, priority, devotee, picture uploaded, search). Used for
+  // the list AND the tab counts, so a count is what that tab shows with these filters ("Uploaded yesterday"
+  // -> Uploaded 64); with no filter the counts are the whole wall.
   const devoteeAsked = String(req.query.devotee ?? '');
-  if (devoteeAsked && role !== 'brick_printer') {
-    if (UUID_RE.test(devoteeAsked)) {
-      values.push(devoteeAsked);
-      where.push(`w.created_by = $${values.length}::uuid`);
-    } else {
-      where.push(`w.created_by IN (SELECT id FROM users WHERE role = 'devotee')`);
-    }
-  }
-  // When the brick's picture was uploaded (its current one), as IST calendar days: "what did the printer
-  // upload yesterday". Only real dates are taken; one end alone is fine.
   const isDay = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
   const upFrom = isDay(req.query.uploaded_from);
   const upTo = isDay(req.query.uploaded_to);
-  if (upFrom || upTo) {
-    values.push(upFrom ?? '1970-01-01', upTo ?? '9999-12-31');
-    where.push(`EXISTS (SELECT 1 FROM seva_wall_pictures upl
-                         WHERE upl.item_id = w.item_id AND upl.state = 'current'
-                           AND (upl.uploaded_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $${values.length - 1}::date AND $${values.length}::date)`);
-  }
-  if (search && role !== 'brick_printer') {
-    values.push(`%${search}%`);
-    const n = values.length;
-    where.push(`(w.donor_name ILIKE $${n} OR w.honoree_name ILIKE $${n} OR w.phone ILIKE $${n} OR w.receipt_number ILIKE $${n})`);
-  } else if (search) {
-    // A printer searches by name only: the phone and receipt are not theirs to see.
-    values.push(`%${search}%`);
-    const n = values.length;
-    where.push(`(w.donor_name ILIKE $${n} OR w.honoree_name ILIKE $${n})`);
-  }
+  const screenFilters = (vals: unknown[]): string[] => {
+    const w2: string[] = [];
+    if (kind) {
+      vals.push(kind);
+      w2.push(`w.kind = $${vals.length}`);
+    }
+    if (priority) {
+      vals.push(priority);
+      w2.push(`w.priority = $${vals.length}`);
+    }
+    // Only the bricks devotees added: all of them ("any"), or one devotee's. For the people who review them.
+    if (devoteeAsked && role !== 'brick_printer') {
+      if (UUID_RE.test(devoteeAsked)) {
+        vals.push(devoteeAsked);
+        w2.push(`w.created_by = $${vals.length}::uuid`);
+      } else {
+        w2.push(`w.created_by IN (SELECT id FROM users WHERE role = 'devotee')`);
+      }
+    }
+    // When the brick's picture was uploaded (its current one), as IST calendar days: "what did the printer
+    // upload yesterday". Only real dates are taken; one end alone is fine.
+    if (upFrom || upTo) {
+      vals.push(upFrom ?? '1970-01-01', upTo ?? '9999-12-31');
+      w2.push(`EXISTS (SELECT 1 FROM seva_wall_pictures upl
+                           WHERE upl.item_id = w.item_id AND upl.state = 'current'
+                             AND (upl.uploaded_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $${vals.length - 1}::date AND $${vals.length}::date)`);
+    }
+    if (search && role !== 'brick_printer') {
+      vals.push(`%${search}%`);
+      const n = vals.length;
+      w2.push(`(w.donor_name ILIKE $${n} OR w.honoree_name ILIKE $${n} OR w.phone ILIKE $${n} OR w.receipt_number ILIKE $${n})`);
+    } else if (search) {
+      // A printer searches by name only: the phone and receipt are not theirs to see.
+      vals.push(`%${search}%`);
+      const n = vals.length;
+      w2.push(`(w.donor_name ILIKE $${n} OR w.honoree_name ILIKE $${n})`);
+    }
+    return w2;
+  };
+  where.push(...screenFilters(values));
   const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
   // The print list is the printer's work queue. A brick a reviewer sent back comes
@@ -342,14 +350,18 @@ router.get('/', allow(...LOOK), async (req, res) => {
         values
       ),
       pool.query(`SELECT COUNT(*)::int AS n FROM ${wallSql()} ${clause}`, values),
-      // Counts ignore the view's own filters on purpose: they say how much work
-      // is in each stage, not how big the current list is.
-      pool.query(
-        `SELECT w.status, (w.called_at IS NOT NULL) AS called, COUNT(*)::int AS n,
-                COUNT(*) FILTER (WHERE w.awaiting_reply_at IS NOT NULL)::int AS asked,
-                COUNT(*) FILTER (WHERE w.follow_up_on <= CURRENT_DATE)::int AS due
-           FROM ${wallSql()} GROUP BY 1, 2`
-      ),
+      // Counts per tab: every filter on screen except the tab itself, so each number is what that tab shows.
+      (() => {
+        const tv: unknown[] = [];
+        const tw = screenFilters(tv);
+        return pool.query(
+          `SELECT w.status, (w.called_at IS NOT NULL) AS called, COUNT(*)::int AS n,
+                  COUNT(*) FILTER (WHERE w.awaiting_reply_at IS NOT NULL)::int AS asked,
+                  COUNT(*) FILTER (WHERE w.follow_up_on <= CURRENT_DATE)::int AS due
+             FROM ${wallSql()} ${tw.length ? `WHERE ${tw.join(' AND ')}` : ''} GROUP BY 1, 2`,
+          tv
+        );
+      })(),
     ]);
 
     const baseUrl = publicBase(req);

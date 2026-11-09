@@ -214,7 +214,8 @@ function buildDonationFilters(q: Record<string, unknown>): DonationFilters {
     values.push(`%${search}%`);
     idx++;
   }
-  if (source_site) { conditions.push(`d.source_site = $${idx}`); values.push(source_site); idx++; }
+  // The site a donation is shown under: the caller's link site when it came from one, else where it is recorded.
+  if (source_site) { conditions.push(`COALESCE(d.link_site, d.source_site) = $${idx}`); values.push(source_site); idx++; }
   // Compared in the same canonical shape the dashboard groups by (lower-case,
   // one leading slash, no trailing slash) - the sites spell the same page as
   // "donations", "/donations" and "/Donations/", so a raw equality check here

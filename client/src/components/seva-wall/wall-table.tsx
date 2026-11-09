@@ -407,12 +407,12 @@ function Picture({ row, previous = false }: { row: Row; previous?: boolean }) {
   }, [row.ref, row.uploaded_at, previous]);
 
   if (failed) return <span className="text-xs text-ink-muted">Could not load</span>;
-  if (!url) return <span className="inline-block h-14 w-14 animate-pulse rounded-control bg-sunken" />;
+  if (!url) return <span className="inline-block h-14 w-14 shrink-0 animate-pulse rounded-control bg-sunken" />;
   return (
     <>
-      <button type="button" onClick={() => setOpen(true)} title={previous ? "The picture that was sent back" : "View picture"} className="block rounded-control">
+      <button type="button" onClick={() => setOpen(true)} title={previous ? "The picture that was sent back" : "View picture"} className="block shrink-0 rounded-control">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={url} alt="Printed brick" className="h-14 w-14 rounded-control object-cover ring-1 ring-line-soft" />
+        <img src={url} alt="Printed brick" className="h-14 w-14 min-w-14 max-w-none rounded-control object-cover ring-1 ring-line-soft" />
       </button>
       {open && (
         <Modal title={`${row.donor_name ?? "Brick"} - ${KIND_LABEL[row.kind]}${previous ? " (sent back)" : ""}`} onClose={() => setOpen(false)} wide>

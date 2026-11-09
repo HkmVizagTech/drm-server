@@ -3249,3 +3249,33 @@ UPDATE crm_dispositions SET retry_after_days = 1
 ALTER TABLE prasadam_deliveries ADD COLUMN IF NOT EXISTS courier_status VARCHAR(40);
 ALTER TABLE prasadam_deliveries ADD COLUMN IF NOT EXISTS courier_status_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_prasadam_courier_status ON prasadam_deliveries (courier_status) WHERE courier_status IS NOT NULL;
+
+/* The site of the link a caller sent, for a donation credited to that link: an HKM page link means HKMV,
+   an annadan.harekrishnavizag.org link means the Annadan site - whichever admin the receipt was entered in
+   (a donor who pays by PhonePe from an HKM page is sometimes entered in the Annadan admin). Shown as the
+   donation's site; source_site still says which site holds the record, for syncing. Filled when the link
+   credit is made (services/linkCredits.ts); this fills it for the ones already credited. */
+ALTER TABLE donations ADD COLUMN IF NOT EXISTS link_site VARCHAR(20);
+UPDATE donations d SET link_site = x.site
+  FROM (
+    SELECT DISTINCT ON (d2.id) d2.id,
+           CASE WHEN u.url ~* '^https?://annadan\.' THEN 'annadan'
+                WHEN u.url ~* '^https?://(www\.)?harekrishnavizag\.org' THEN 'hkmv' END AS site
+      FROM donations d2
+      JOIN caller_credits cc ON cc.donation_id = d2.id AND cc.kind = 'link' AND cc.status = 'active'
+      JOIN people p ON p.id = d2.person_id
+      JOIN leads ld ON ld.person_id = d2.person_id
+                    OR ld.phone = right(regexp_replace(COALESCE(p.phone, ''), '\D', '', 'g'), 10)
+      JOIN LATERAL (
+        SELECT a.to_value AS url, a.occurred_at AS at FROM lead_activities a
+         WHERE a.lead_id = ld.id AND a.kind = 'whatsapp' AND a.user_id = cc.user_id AND a.to_value LIKE 'http%'
+           AND a.occurred_at <= d2.created_at AND a.occurred_at > d2.created_at - INTERVAL '7 days'
+        UNION ALL
+        SELECT s.url, s.created_at FROM link_sends s
+         WHERE s.lead_id = ld.id AND s.user_id = cc.user_id
+           AND s.created_at <= d2.created_at AND s.created_at > d2.created_at - INTERVAL '7 days'
+      ) u ON TRUE
+     WHERE d2.link_site IS NULL
+     ORDER BY d2.id, u.at DESC
+  ) x
+ WHERE d.id = x.id AND x.site IS NOT NULL;

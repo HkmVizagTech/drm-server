@@ -92,6 +92,7 @@ export async function creditLinkSend(
     },
     client
   );
+  await fillLinkSites(client);
   return true;
 }
 
@@ -138,6 +139,7 @@ export async function creditRecentLinkSends(db: { query: PoolClient['query'] } =
     });
     if (done) n++;
   }
+  if (n) await fillLinkSites(db);
   return n;
 }
 
@@ -343,4 +345,37 @@ export async function tidyLinkCredits(db: Db = pool): Promise<number> {
         AND NOT EXISTS (SELECT 1 FROM caller_credits x WHERE x.donation_id = d.id AND x.status = 'active')`
   );
   return (undone.rowCount ?? 0) + (tied.rowCount ?? 0);
+}
+
+
+/**
+ * A donation credited to a caller's link takes the site of that link (HKM page -> hkmv, annadan site ->
+ * annadan), whichever admin its receipt was entered in. Only fills what is not set; never throws.
+ */
+export async function fillLinkSites(db: { query: PoolClient['query'] } = pool): Promise<void> {
+  await db
+    .query(`UPDATE donations d SET link_site = x.site
+  FROM (
+    SELECT DISTINCT ON (d2.id) d2.id,
+           CASE WHEN u.url ~* '^https?://annadan\\.' THEN 'annadan'
+                WHEN u.url ~* '^https?://(www\\.)?harekrishnavizag\\.org' THEN 'hkmv' END AS site
+      FROM donations d2
+      JOIN caller_credits cc ON cc.donation_id = d2.id AND cc.kind = 'link' AND cc.status = 'active'
+      JOIN people p ON p.id = d2.person_id
+      JOIN leads ld ON ld.person_id = d2.person_id
+                    OR ld.phone = right(regexp_replace(COALESCE(p.phone, ''), '\\D', '', 'g'), 10)
+      JOIN LATERAL (
+        SELECT a.to_value AS url, a.occurred_at AS at FROM lead_activities a
+         WHERE a.lead_id = ld.id AND a.kind = 'whatsapp' AND a.user_id = cc.user_id AND a.to_value LIKE 'http%'
+           AND a.occurred_at <= d2.created_at AND a.occurred_at > d2.created_at - INTERVAL '7 days'
+        UNION ALL
+        SELECT s.url, s.created_at FROM link_sends s
+         WHERE s.lead_id = ld.id AND s.user_id = cc.user_id
+           AND s.created_at <= d2.created_at AND s.created_at > d2.created_at - INTERVAL '7 days'
+      ) u ON TRUE
+     WHERE d2.link_site IS NULL
+     ORDER BY d2.id, u.at DESC
+  ) x
+ WHERE d.id = x.id AND x.site IS NOT NULL`)
+    .catch((e: Error) => console.error('linkCredits.fillLinkSites failed (non-fatal):', e.message));
 }

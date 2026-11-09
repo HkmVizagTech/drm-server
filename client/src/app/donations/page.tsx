@@ -51,6 +51,8 @@ interface Donation {
   donor_name?: string;
   donor_phone?: string;
   source_site?: string | null;
+  /** The site of the caller's link that brought this donation, when there was one. Shown before source_site. */
+  link_site?: string | null;
   source_page?: string | null;
   // Server-computed readable label: the real seva, or the page it came from
   // when the stored purpose is a content-free placeholder like
@@ -591,7 +593,7 @@ export default function DonationsPage() {
                     )}
                   </Td>
                   <Td>
-                    <SourceCell site={d.source_site} page={d.source_page} campaign={d.campaign} />
+                    <SourceCell site={d.link_site ?? d.source_site} page={d.source_page} campaign={d.campaign} />
                   </Td>
                   <Td align="right" className="whitespace-nowrap text-xs text-ink-muted">
                     {shortDate(d.created_at)}
@@ -763,7 +765,14 @@ function DonationDetail({ donation, onChanged }: { donation: Donation; onChanged
           )}
         <DetailField label="Type" value={titleCase(donation.type)} />
 
-        <DetailField label="Came from" value={siteLabel(donation.source_site)} />
+        <DetailField
+          label="Came from"
+          value={
+            donation.link_site && donation.link_site !== donation.source_site
+              ? `${siteLabel(donation.link_site)} (caller's link; receipt entered on ${siteLabel(donation.source_site)})`
+              : siteLabel(donation.link_site ?? donation.source_site)
+          }
+        />
         <DetailField label="Page" value={donation.source_page} mono />
         <DetailField label="Campaign" value={donation.campaign} />
         <DetailField label="Payment mode" value={titleCase(donation.payment_mode)} />
