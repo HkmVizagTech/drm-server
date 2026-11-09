@@ -454,7 +454,7 @@ router.get('/dashboard', async (req, res) => {
       ),
       // The people an admin can pick from (the Caller filter).
       req.user?.role === 'admin'
-        ? pool.query(`SELECT id, name, role FROM users WHERE role IN ('caller', 'admin') AND COALESCE(is_active, TRUE) ORDER BY role DESC, name`)
+        ? pool.query(`SELECT id, name, role FROM users WHERE role IN ('caller', 'admin') AND active IS NOT FALSE ORDER BY role DESC, name`)
         : Promise.resolve({ rows: [] }),
     ]);
 
