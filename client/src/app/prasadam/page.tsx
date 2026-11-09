@@ -85,6 +85,8 @@ interface ListResponse {
   limit: number;
   totalPages: number;
   byStatus: Record<string, number>;
+  /** Courier statuses in the current view (every filter but the courier status itself). null = no courier report. */
+  courierCounts?: { status: string | null; count: number }[];
 }
 
 interface FilterOptions {
@@ -177,7 +179,9 @@ export default function PrasadamPage() {
   const [excludePurpose, setExcludePurpose] = useSessionState("prasadam:excludePurpose", "");
   const [fromDate, setFromDate] = useSessionState("prasadam:fromDate", "");
   const [toDate, setToDate] = useSessionState("prasadam:toDate", "");
-  const [courierStatus, setCourierStatus] = useSessionState("prasadam:courierStatus", "");
+  const [courierStatusSaved, setCourierStatus] = useSessionState("prasadam:courierStatus", "");
+  // Only on the All tab; on any other tab it is not applied (and not shown).
+  const courierStatus = tab === "all" ? courierStatusSaved : "";
   const [page, setPage] = useSessionState("prasadam:page", 1);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -373,18 +377,27 @@ export default function PrasadamPage() {
             ))}
           </Select>
         </Field>
-        {/* What the courier last reported (DTDC "RTO in transit", "Delivered"...), from the courier's file. */}
-        <Field label="Courier status" className="flex-1 min-w-[9rem]">
-          <Select value={courierStatus} onChange={(v) => setCourierStatus(v)} ariaLabel="Courier status">
-            <option value="">Any courier status</option>
-            {(options.courier_statuses ?? []).map((c) => (
-              <option key={c.status} value={c.status}>
-                {c.status} ({c.count})
+        {/* What the courier last reported (DTDC "RTO in transit", "Delivered"...), from the courier's file.
+            On the All tab only; its numbers follow every other filter on screen, so each is what it shows. */}
+        {tab === "all" && (
+          <Field label="Courier status" className="flex-1 min-w-[9rem]">
+            <Select value={courierStatus} onChange={(v) => setCourierStatus(v)} ariaLabel="Courier status">
+              <option value="">Any courier status</option>
+              {(data?.courierCounts ?? []).filter((c) => c.status).map((c) => (
+                <option key={c.status!} value={c.status!}>
+                  {c.status} ({c.count})
+                </option>
+              ))}
+              <option value="none">
+                No courier report ({data?.courierCounts?.find((c) => c.status === null)?.count ?? 0})
               </option>
-            ))}
-            <option value="none">No courier report</option>
-          </Select>
-        </Field>
+              {/* A choice kept from before that the current view no longer has, so the box never shows blank. */}
+              {courierStatus && courierStatus !== "none" && !data?.courierCounts?.some((c) => c.status === courierStatus) && (
+                <option value={courierStatus}>{courierStatus} (0)</option>
+              )}
+            </Select>
+          </Field>
+        )}
         <Field label="Page" className="flex-1 min-w-[9rem]">
           <Select value={group} onChange={(v) => setGroup(v)} ariaLabel="Page group">
             {PAGE_GROUPS.map((g) => (

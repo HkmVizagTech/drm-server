@@ -192,8 +192,11 @@ router.get('/', async (req, res) => {
     const offset = (page - 1) * limit;
 
     const f = buildFilters(req.query as Record<string, unknown>);
+    // The courier-status counts for the dropdown: every other filter on screen applies (tab, dates, site,
+    // seva, search), only the courier status itself does not - so each number is what picking it shows.
+    const fc = buildFilters({ ...(req.query as Record<string, unknown>), courier_status: undefined });
 
-    const [rows, totals] = await Promise.all([
+    const [rows, totals, courier] = await Promise.all([
       pool.query(
         `SELECT ${SELECT_COLUMNS} ${FROM_JOINS} ${f.where}
          ORDER BY d.created_at DESC
@@ -205,6 +208,10 @@ router.get('/', async (req, res) => {
       pool.query(
         `SELECT d.status, COUNT(*) AS count ${FROM_JOINS} ${f.where} GROUP BY d.status`,
         f.values
+      ),
+      pool.query(
+        `SELECT d.courier_status AS status, COUNT(*) AS count ${FROM_JOINS} ${fc.where} GROUP BY d.courier_status ORDER BY count DESC`,
+        fc.values
       ),
     ]);
 
@@ -222,6 +229,7 @@ router.get('/', async (req, res) => {
       limit,
       totalPages: Math.max(1, Math.ceil(total / limit)),
       byStatus,
+      courierCounts: courier.rows.map((r) => ({ status: r.status as string | null, count: Number(r.count) })),
     });
   } catch (err) {
     console.error('prasadam.list error:', err);
