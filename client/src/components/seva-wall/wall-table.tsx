@@ -22,7 +22,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { apiClient, isAbort } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { currency, dateTime, number, shortDate } from "@/lib/format";
+import { currency, dateTime, istDayPlus, istToday, number, shortDate } from "@/lib/format";
 import {
   Alert,
   Badge,
@@ -290,6 +290,16 @@ function CannotSendDialog({ row, to, onClose, onOpenChat }: { row: Row; to: stri
       </div>
     </Modal>
   );
+}
+
+/** The IST days a "picture uploaded" choice covers ("" for none). */
+function uploadedRange(choice: string, from: string, to: string): { from: string; to: string } {
+  const today = istToday();
+  if (choice === "today") return { from: today, to: today };
+  if (choice === "yesterday") return { from: istDayPlus(-1), to: istDayPlus(-1) };
+  if (choice === "7d") return { from: istDayPlus(-6), to: today };
+  if (choice === "custom") return { from, to };
+  return { from: "", to: "" };
 }
 
 /** Where the Seva wall hands the WhatsApp chat a brick to send (read once by app/whatsapp). */
@@ -596,6 +606,10 @@ export default function WallTable({ view }: { view: WallView }) {
   const [stage, setStage] = useSessionState(`wall:${view}:stage`, "");
   const [kind, setKind] = useSessionState(`wall:${view}:kind`, "");
   const [priority, setPriority] = useSessionState(`wall:${view}:priority`, "");
+  // When the picture was uploaded: "" any time, or a preset / custom range of IST days.
+  const [uploaded, setUploaded] = useSessionState(`wall:${view}:uploaded`, "");
+  const [upFrom, setUpFrom] = useSessionState(`wall:${view}:upFrom`, "");
+  const [upTo, setUpTo] = useSessionState(`wall:${view}:upTo`, "");
   // "": every brick; "any": only bricks a devotee added; otherwise one devotee's id.
   const [devotee, setDevotee] = useSessionState(`wall:${view}:devotee`, "");
   // A notification opens this page as /seva-wall?search=<phone>, so the brick it is
@@ -647,6 +661,9 @@ export default function WallTable({ view }: { view: WallView }) {
       if (priority) qs.set("priority", priority);
       if (devotee) qs.set("devotee", devotee);
       if (query) qs.set("search", query);
+      const range = uploadedRange(uploaded, upFrom, upTo);
+      if (range.from) qs.set("uploaded_from", range.from);
+      if (range.to) qs.set("uploaded_to", range.to);
       try {
         setData(await apiClient.get<Response>(`/api/seva-wall?${qs}`, { signal }));
         setError(null);
@@ -655,7 +672,7 @@ export default function WallTable({ view }: { view: WallView }) {
         setError((e as Error).message);
       }
     },
-    [role, allowed, view, stage, kind, priority, devotee, query, page]
+    [role, allowed, view, stage, kind, priority, devotee, query, page, uploaded, upFrom, upTo]
   );
 
   useEffect(() => {
@@ -891,6 +908,27 @@ export default function WallTable({ view }: { view: WallView }) {
               </option>
             ))}
           </Select>
+        )}
+        <Select
+          value={uploaded}
+          onChange={(v) => {
+            setUploaded(v);
+            setPage(1);
+          }}
+          ariaLabel="Picture uploaded"
+          className="w-48"
+        >
+          <option value="">Picture uploaded: any time</option>
+          <option value="today">Uploaded today</option>
+          <option value="yesterday">Uploaded yesterday</option>
+          <option value="7d">Uploaded in the last 7 days</option>
+          <option value="custom">Uploaded between…</option>
+        </Select>
+        {uploaded === "custom" && (
+          <>
+            <Input type="date" aria-label="Uploaded from" value={upFrom} max={upTo || undefined} onChange={(e) => { setUpFrom(e.target.value); setPage(1); }} className="w-40" />
+            <Input type="date" aria-label="Uploaded to" value={upTo} min={upFrom || undefined} onChange={(e) => { setUpTo(e.target.value); setPage(1); }} className="w-40" />
+          </>
         )}
         {view !== "contact" && (
           <Select

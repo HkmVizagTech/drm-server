@@ -274,6 +274,17 @@ router.get('/', allow(...LOOK), async (req, res) => {
       where.push(`w.created_by IN (SELECT id FROM users WHERE role = 'devotee')`);
     }
   }
+  // When the brick's picture was uploaded (its current one), as IST calendar days: "what did the printer
+  // upload yesterday". Only real dates are taken; one end alone is fine.
+  const isDay = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+  const upFrom = isDay(req.query.uploaded_from);
+  const upTo = isDay(req.query.uploaded_to);
+  if (upFrom || upTo) {
+    values.push(upFrom ?? '1970-01-01', upTo ?? '9999-12-31');
+    where.push(`EXISTS (SELECT 1 FROM seva_wall_pictures upl
+                         WHERE upl.item_id = w.item_id AND upl.state = 'current'
+                           AND (upl.uploaded_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $${values.length - 1}::date AND $${values.length}::date)`);
+  }
   if (search && role !== 'brick_printer') {
     values.push(`%${search}%`);
     const n = values.length;
