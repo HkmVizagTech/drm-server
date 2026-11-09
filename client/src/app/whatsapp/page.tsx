@@ -462,7 +462,9 @@ function ChatInner() {
   const openConv = useCallback(async (c: Conv) => {
     setActiveId(c.id);
     activeRef.current = c.id;
-    setExtra((e) => (e && e.id === c.id ? e : null));
+    // Keep the opened chat even when the list's filter drops it - on "Unread" it stops being unread the
+    // moment it is opened, and the next refresh would otherwise take it away mid-conversation.
+    setExtra({ ...c, unread_count: 0 });
     setMsgs([]);
     setMore(false);
     setDraft("");
