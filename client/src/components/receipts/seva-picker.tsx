@@ -28,6 +28,14 @@ export interface CatalogSeva {
   accountType?: string;
 }
 
+/**
+ * Which site raises the receipt for a seva: Annadanam sevas the Annadan site, every other seva the HKM
+ * site. The server decides the same way (receiptSiteOf in services/sevaCatalog.ts); this only shows it.
+ */
+export function receiptSiteOfSeva(s: Pick<CatalogSeva, "category" | "accountType">): "annadan" | "hkmv" {
+  return s.accountType !== "TSC" && /^annadanam/i.test(s.category) ? "annadan" : "hkmv";
+}
+
 // One fetch shared by every form on the page; a form opened a second time does not wait again.
 let cache: Promise<CatalogSeva[]> | null = null;
 // Whether the list loaded with something in it. Read by the form's validation, which

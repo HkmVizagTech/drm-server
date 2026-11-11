@@ -40,6 +40,16 @@ export function dccAccountTypeOf(s: Seva | null | undefined): number {
   return s?.accountType === 'TSC' ? 5 : 4;
 }
 
+/**
+ * Which site raises the receipt for a seva: an Annadanam seva comes from the Annadan site, every
+ * other seva (Brick Seva, Square Feet Seva, festivals, TSC...) from the HKM site. The seva decides,
+ * not the QR it was paid on - a Brick Seva paid on the Annadan QR still gets an HKM receipt.
+ * The client has the same rule (receiptSiteOfSeva in seva-picker.tsx) to show it before sending.
+ */
+export function receiptSiteOf(s: Seva): 'annadan' | 'hkmv' {
+  return s.accountType !== 'TSC' && /^annadanam/i.test(s.category) ? 'annadan' : 'hkmv';
+}
+
 export function dccSevaOf(s: Seva): DccSeva {
   return { category: s.categoryId, subCategory: s.subCategoryId, subCategoryCode: s.subCodeId ?? s.code };
 }

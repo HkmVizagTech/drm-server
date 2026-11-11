@@ -22,6 +22,7 @@ import {
   receiptProblems,
   type ReceiptValues,
 } from "./receipt-form";
+import { receiptSiteOfSeva, useSevaCatalog } from "./seva-picker";
 
 export interface Payment {
   id: string;
@@ -481,7 +482,13 @@ export function ReceiptDialog({
   }, [load]);
 
   const siteFixed = !!detail?.site_for_receipt;
-  const problem = receiptProblems(v, { needSite: !siteFixed, listForAnnadan: true });
+  // The seva decides which site raises the receipt (Annadanam -> Annadan, anything else -> HKM),
+  // whatever the QR is set to. The server applies the same rule; this shows it before Send.
+  const { sevas } = useSevaCatalog();
+  const pickedSeva = sevas.find((s) => s.id === v.sevaCatalogId);
+  const sevaSite = pickedSeva ? receiptSiteOfSeva(pickedSeva) : null;
+  const receiptSite = sevaSite ?? (siteFixed ? detail?.site_for_receipt : v.site) ?? null;
+  const problem = receiptProblems(v, { needSite: !siteFixed && !sevaSite, listForAnnadan: true });
 
   async function unlink() {
     setBusy(true);
@@ -517,7 +524,7 @@ export function ReceiptDialog({
         seva_catalog_id: v.sevaCatalogId || undefined,
         sevak_name: v.onNameOf.trim(),
         sevak_phone: "",
-        site: siteFixed ? detail?.site_for_receipt : v.site,
+        site: receiptSite || undefined,
         // The credit was decided when the payment was linked.
         credit_me: false,
         want_certificate: v.want80G,
@@ -628,7 +635,13 @@ export function ReceiptDialog({
           )}
           {error && <Alert tone="danger">{error}</Alert>}
           {shown && problem && !error && <Alert tone="warn">{problem}</Alert>}
-          <DonorFields v={v} set={set} showPrasadam showSite={!siteFixed} showMyDonor={false} showAccount={false} listForAnnadan />
+          <DonorFields v={v} set={set} showPrasadam showSite={!siteFixed && !sevaSite} showMyDonor={false} showAccount={false} listForAnnadan />
+          {receiptSite && (
+            <p className="text-sm text-ink">
+              Receipt from: <span className="font-medium">{siteName(receiptSite)}</span>
+              {sevaSite && <span className="text-ink-muted"> (follows the seva)</span>}
+            </p>
+          )}
           <p className="text-xs text-ink-muted">Check the name and number. The receipt is sent at once.</p>
         </div>
       )}

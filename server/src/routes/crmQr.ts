@@ -32,7 +32,7 @@ import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import * as storage from '../services/storage';
 import { createOfflineDonation, resendReceipt, type SiteKey } from '../services/hkmvClient';
-import { resolveSeva, dccSevaOf, dccAccountTypeOf } from '../services/sevaCatalog';
+import { resolveSeva, dccSevaOf, dccAccountTypeOf, receiptSiteOf } from '../services/sevaCatalog';
 import {
   describeFilters,
   sendExport,
@@ -1119,7 +1119,12 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
   // Which 80G series the number comes out of. Falls back to whatever was
   // chosen when the receipt was raised by hand, for a payment with no QR at
   // all behind it.
-  const site = (p.receipt_site || p.qr_receipt_site) as SiteKey | null;
+  // The seva picked from DRM's list, if one was. Allowed even if it has since been switched
+  // off - a retry must say what the first attempt said.
+  const chosenSeva = p.seva_catalog_id ? await resolveSeva(p.seva_catalog_id, pool, { allowInactive: true }) : null;
+  // The seva decides the site (Annadanam -> Annadan, anything else -> HKM). Only with no seva
+  // picked does it fall back to the site set on the QR, or the one chosen by hand.
+  const site = (chosenSeva ? receiptSiteOf(chosenSeva) : p.receipt_site || p.qr_receipt_site) as SiteKey | null;
   if (!site) {
     await pool.query(
       `UPDATE qr_payments SET receipt_status = 'skipped',
@@ -1150,10 +1155,7 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
     paymentRowId,
   ]);
 
-  // The seva picked from DRM's list, if one was: its name goes on the receipt and, for
-  // the main site, its Seva Code goes to DCC. Allowed even if it has since been
-  // switched off - a retry must say what the first attempt said.
-  const chosenSeva = p.seva_catalog_id ? await resolveSeva(p.seva_catalog_id, pool, { allowInactive: true }) : null;
+  // chosenSeva (above): its name goes on the receipt and, for the main site, its Seva Code goes to DCC.
 
   try {
     const result = await createOfflineDonation(site, {
@@ -1842,7 +1844,7 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
   const b = req.body ?? {};
   const donorName = str(b.donor_name, 160);
   const donorPhone = (str(b.donor_phone, 15) ?? '').replace(/\D/g, '').slice(-10) || null;
-  const site = str(b.site, 20);
+  const siteAsked = str(b.site, 20);
 
   if (!donorName) return res.status(400).json({ error: 'Enter the Donor Name.' });
   if (!donorPhone || donorPhone.length !== 10) {
@@ -1886,6 +1888,8 @@ router.post('/qr/payments/:id/receipt', authenticate, async (req, res) => {
     if (b.seva_catalog_id && !chosenSeva) {
       return res.status(400).json({ error: 'That seva is no longer on the list. Pick another.' });
     }
+    // The seva decides which site raises the receipt, whatever the QR is set to.
+    const site = chosenSeva ? receiptSiteOf(chosenSeva) : siteAsked;
 
     // Stored on the payment, not just passed through, so a reprint months
     // later says exactly what the original said.
