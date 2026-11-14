@@ -2612,8 +2612,18 @@ export async function logCallForLead(
        filled with people nobody needed to chase. */
     const promised = !!(b.reminder && typeof b.reminder === 'object' && (b.reminder as Record<string, unknown>).due_at);
     const laterNoteOnly = disposition === 'will_donate' && !followUp && !promised && !!str(b.note, 2000);
-    const nextStatus =
-      str(b.status, 30) ?? (laterNoteOnly ? 'later_no_date' : null) ?? d.rows[0].suggests_status ?? lead.rows[0].status;
+
+    /* NOT INTERESTED IS FINAL. A lead somebody marked Not interested (or Do not call, or Wrong
+       number) is never brought back by a later call that did not connect: it keeps its stage, gets
+       no follow-up date and does not go back in the queue. Only a call that connects, or a stage
+       chosen on purpose, reopens it. And a Not interested call never books a follow-up, even with
+       a day picked. */
+    const staysClosed =
+      ['not_interested', 'dnc', 'invalid'].includes(String(lead.rows[0].status)) && !str(b.status, 30) && connected !== true;
+    const noFollowUp = staysClosed || disposition === 'not_interested';
+    const nextStatus = staysClosed
+      ? lead.rows[0].status
+      : str(b.status, 30) ?? (laterNoteOnly ? 'later_no_date' : null) ?? d.rows[0].suggests_status ?? lead.rows[0].status;
 
     /* WHEN A LEAD COMES BACK, AND WHEN IT STOPS COMING BACK.
 
@@ -2668,7 +2678,7 @@ export async function logCallForLead(
        evening_retry_cutoff_hour (13), in IST, and evening_retry_scope
        (nearly_gave, or all). */
     let eveningAt: Date | null = null;
-    if (unanswered && !laterNoteOnly && !followUp && (str(b.direction, 10) ?? 'outbound') === 'outbound') {
+    if (unanswered && !noFollowUp && !laterNoteOnly && !followUp && (str(b.direction, 10) ?? 'outbound') === 'outbound') {
       const hrs = await client.query(
         `SELECT key, value FROM crm_settings WHERE key IN ('evening_retry_hour', 'evening_retry_cutoff_hour', 'evening_retry_scope')`
       );
@@ -2705,29 +2715,44 @@ export async function logCallForLead(
       if (inScope && e.morning && e.evening_ahead && e.unanswered_today === 1) eveningAt = e.at as Date;
     }
 
-    // THE MORNING CALL IS NOT AN ATTEMPT. It is logged and counted as a call - and as a call
-    // nobody answered - but it does not raise the lead's attempt count or the unanswered
-    // streak: the evening call that follows it does, so one day's morning and evening calls
-    // are ONE attempt, counted at the evening. (Undone below if the lead is closing anyway.)
-    if (eveningAt) {
-      await client.query(`UPDATE lead_activities SET counts_as_attempt = FALSE WHERE id = $1`, [activity.rows[0].id]);
+    // ONE ATTEMPT A DAY. A day's morning and evening calls are one attempt, and it is the FIRST
+    // unanswered call of the day that counts - so a day with only a morning call still counts.
+    // (It used to be the evening call that counted: when the evening try was skipped, that day was
+    // never counted and the lead kept coming back after its fifth day.) A second unanswered call
+    // the same day is logged as a call but does not raise the attempt count.
+    let sameDayRepeat = false;
+    if (unanswered) {
+      const earlier = await client.query(
+        `SELECT COUNT(*)::int AS n
+           FROM lead_activities a JOIN crm_dispositions cd ON cd.slug = a.disposition
+          WHERE a.lead_id = $1 AND a.kind = 'call' AND a.id <> $2
+            AND COALESCE(a.direction, 'outbound') = 'outbound'
+            AND COALESCE(a.connected, FALSE) = FALSE AND cd.wants_follow_up = TRUE
+            AND a.occurred_at >= date_trunc('day', COALESCE($3::timestamptz, NOW()))
+            AND a.occurred_at <  date_trunc('day', COALESCE($3::timestamptz, NOW())) + INTERVAL '1 day'`,
+        [leadId, activity.rows[0].id, asDate(b.occurred_at)]
+      );
+      sameDayRepeat = earlier.rows[0].n > 0;
+      if (sameDayRepeat) {
+        await client.query(`UPDATE lead_activities SET counts_as_attempt = FALSE WHERE id = $1`, [activity.rows[0].id]);
+      }
     }
 
     // Unanswered attempts in a row, this one included (it is already saved
-    // above). Counted from the call history rather than kept in a counter, so
+    // above), counted in DAYS: every day with an unanswered call is one attempt,
+    // however many times it was rung that day. Counted from the call history rather than kept in a counter, so
     // it is right for leads that were called long before this existed and
     // right again after an Undo removes a call.
     let streak = 0;
     if (unanswered) {
       const run = await client.query(
-        `SELECT COUNT(*)::int AS n
+        `SELECT COUNT(DISTINCT date_trunc('day', a.occurred_at))::int AS n
            FROM lead_activities a
            JOIN crm_dispositions cd ON cd.slug = a.disposition
           WHERE a.lead_id = $1 AND a.kind = 'call'
             AND COALESCE(a.direction, 'outbound') = 'outbound'
             AND COALESCE(a.connected, FALSE) = FALSE
             AND cd.wants_follow_up = TRUE
-            AND COALESCE(a.counts_as_attempt, TRUE)
             AND a.occurred_at > GREATEST(
                   COALESCE((SELECT MAX(c.occurred_at) FROM lead_activities c
                              WHERE c.lead_id = $1 AND c.kind = 'call' AND c.connected IS TRUE),
@@ -2751,12 +2776,12 @@ export async function logCallForLead(
 
     // The caller choosing a date or a stage is deciding for themselves; the
     // cap only closes a lead nobody has said anything about.
-    const autoClose = unanswered && !followUp && !str(b.status, 30) && streak >= unansweredLimit;
-    const schedules = d.rows[0].wants_follow_up === true && !laterNoteOnly && !autoClose;
+    // The fifth day closes it, even on its morning call: five days rung and nobody answered.
+    const autoClose = unanswered && !staysClosed && !followUp && !str(b.status, 30) && streak >= unansweredLimit;
+    const schedules = d.rows[0].wants_follow_up === true && !noFollowUp && !laterNoteOnly && !autoClose;
     if (eveningAt && autoClose) {
-      // The lead is closing as Not reachable: this call is its last, so it counts.
+      // The lead is closing as Not reachable: no evening try.
       eveningAt = null;
-      await client.query(`UPDATE lead_activities SET counts_as_attempt = TRUE WHERE id = $1`, [activity.rows[0].id]);
     }
 
     // The day of the CALL, not of this request: a call rung from the phone and
@@ -2800,7 +2825,8 @@ export async function logCallForLead(
          last_contacted_at = NOW(),
          last_outcome      = $2,
          -- A morning call that books an evening retry is not an attempt (see above).
-         call_attempts     = call_attempts + CASE WHEN $11::timestamptz IS NOT NULL THEN 0 ELSE 1 END,
+         -- One attempt a day: a second unanswered call the same day is not one (see above).
+         call_attempts     = call_attempts + CASE WHEN $13::boolean THEN 0 ELSE 1 END,
          remarks           = COALESCE($3, remarks),
          -- Three cases, in order:
          --   a date the caller chose wins outright;
@@ -2844,7 +2870,7 @@ export async function logCallForLead(
         autoClose ? 'unreachable' : nextStatus,
         disposition,
         str(b.note, 2000),
-        followUp,
+        noFollowUp ? null : followUp,
         schedules,
         str(b.follow_up_note, 500),
         disposition === 'do_not_call',
@@ -2853,6 +2879,7 @@ export async function logCallForLead(
         disposition === 'will_pay_qr',
         eveningAt,
         user?.role === 'caller' ? user.userId ?? null : null,
+        sameDayRepeat,
       ]
     );
 

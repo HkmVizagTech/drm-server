@@ -87,14 +87,18 @@ const row = async (id: string) =>
   (await pool.query(`SELECT status, next_follow_up_at, follow_up_auto, do_not_call FROM leads WHERE id = $1`, [id])).rows[0];
 const activities = async (id: string) =>
   (await pool.query(`SELECT COUNT(*)::int AS n FROM lead_activities WHERE lead_id = $1 AND kind = 'call'`, [id])).rows[0].n as number;
-const ring = (id: string, disposition: string, extra: Record<string, unknown> = {}) =>
-  post(`/api/crm/leads/${id}/call`, { disposition, ...extra });
+/** One call, on its own day: the lead's earlier calls are moved a day back first, because
+ *  unanswered attempts are counted in DAYS (a second call the same day is the same attempt). */
+const ring = async (id: string, disposition: string, extra: Record<string, unknown> = {}) => {
+  await pool.query(`UPDATE lead_activities SET occurred_at = occurred_at - INTERVAL '1 day' WHERE lead_id = $1`, [id]);
+  return post(`/api/crm/leads/${id}/call`, { disposition, ...extra });
+};
 
 /** The day a system-booked follow-up was waiting for arrives: its date is today.
  *  The flag is set back on afterwards because changing the date clears it - which
  *  is the point of the trigger, and not what a lead whose day has simply come is. */
 async function itsDay(id: string) {
-  await pool.query(`UPDATE leads SET next_follow_up_at = date_trunc('day', NOW()) + INTERVAL '10 hours' WHERE id = $1`, [id]);
+  await pool.query(`UPDATE leads SET next_follow_up_at = date_trunc('day', NOW()) + INTERVAL '10 hours', retry_hold_until = NULL WHERE id = $1`, [id]);
   await pool.query(`UPDATE leads SET follow_up_auto = TRUE WHERE id = $1`, [id]);
 }
 

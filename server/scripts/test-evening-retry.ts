@@ -15,7 +15,7 @@ import pool from '../src/db/pool';
 import { generateToken } from '../src/middleware/auth';
 import { runMigrations } from '../src/db/migrate';
 import crmRoutes from '../src/routes/crm';
-import { DUE_NOW } from '../src/routes/crmLists';
+import { DUE_NOW, FOLLOW_UP_LISTED } from '../src/routes/crmLists';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
 if (!/_test$/.test(dbName)) {
@@ -154,28 +154,26 @@ async function main() {
   await post(`/api/crm/leads/${f}/call`, { disposition: 'no_answer' });
   check('kept where it was', (await when(f)) === before, { before, after: await when(f) });
 
-  console.log('\n--- the morning call is not an attempt; the evening call is ---');
+  console.log('\n--- one attempt a day: the morning call is the attempt, the evening call is not ---');
   await setScope('all');
   await setHours(24, 24);
   const g1 = await add('9820000009');
   const attempts = async (id: string) => (await pool.query(`SELECT call_attempts, status FROM leads WHERE id = $1`, [id])).rows[0];
   const calls = async (id: string) => (await pool.query(`SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE connected IS NOT TRUE)::int unanswered FROM lead_activities WHERE lead_id = $1 AND kind = 'call'`, [id])).rows[0];
   await post(`/api/crm/leads/${g1}/call`, { disposition: 'no_answer' });
-  check('the morning call does not raise the attempt count', (await attempts(g1)).call_attempts === 0, await attempts(g1));
+  check('the morning call is the day\'s attempt', (await attempts(g1)).call_attempts === 1, await attempts(g1));
   check('but it is a call, and a call nobody answered', JSON.stringify(await calls(g1)) === JSON.stringify({ n: 1, unanswered: 1 }), await calls(g1));
   await pool.query(`UPDATE leads SET next_follow_up_at = NOW() - INTERVAL '1 minute', retry_hold_until = NOW() - INTERVAL '1 minute' WHERE id = $1`, [g1]);
   await post(`/api/crm/leads/${g1}/call`, { disposition: 'no_answer' });
-  check('the evening call raises it by one', (await attempts(g1)).call_attempts === 1, await attempts(g1));
+  check('the evening call the same day does not raise it again', (await attempts(g1)).call_attempts === 1, await attempts(g1));
   check('two calls, both unanswered', JSON.stringify(await calls(g1)) === JSON.stringify({ n: 2, unanswered: 2 }), await calls(g1));
 
   console.log('\n--- one day\'s pair is one attempt toward the unanswered limit ---');
   await pool.query(`INSERT INTO crm_settings (key, value) VALUES ('max_unanswered', '1'::jsonb) ON CONFLICT (key) DO UPDATE SET value = '1'::jsonb`);
   const g2 = await add('9820000010');
   await post(`/api/crm/leads/${g2}/call`, { disposition: 'no_answer' });
-  check('with a limit of 1, the morning call does not close the lead', (await attempts(g2)).status !== 'unreachable', await attempts(g2));
-  await pool.query(`UPDATE leads SET next_follow_up_at = NOW() - INTERVAL '1 minute', retry_hold_until = NOW() - INTERVAL '1 minute' WHERE id = $1`, [g2]);
-  await post(`/api/crm/leads/${g2}/call`, { disposition: 'no_answer' });
-  check('the evening call is the attempt, so it closes the lead', (await attempts(g2)).status === 'unreachable', await attempts(g2));
+  check('with a limit of 1, the first day closes the lead on its morning call', (await attempts(g2)).status === 'unreachable', await attempts(g2));
+  check('...with no evening try booked', (await when(g2)) === null && (await hold(g2)).held === false, await when(g2));
   await pool.query(`INSERT INTO crm_settings (key, value) VALUES ('max_unanswered', '5'::jsonb) ON CONFLICT (key) DO UPDATE SET value = '5'::jsonb`);
 
   console.log('\n--- by default only Nearly gave leads get it ---');
@@ -187,6 +185,37 @@ async function main() {
   await pool.query(`UPDATE leads SET tags = ARRAY['abandoned'] WHERE id = $1`, [h]);
   await post(`/api/crm/leads/${h}/call`, { disposition: 'no_answer' });
   check('a Nearly gave lead: this evening, held', (await when(h)) === `${await istDay(1)} 00:00` && (await hold(h)).held === true, await when(h));
+
+  console.log('\n--- counted in days: a day with only a morning call still counts ---');
+  await setScope('nearly_gave');
+  const k = await add('9820000011');
+  const callOn = (id: string, daysAgo: number, hour: number, disposition = 'no_answer') =>
+    post(`/api/crm/leads/${id}/call`, { disposition, occurred_at: new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10) + `T${String(hour).padStart(2, '0')}:00:00+05:30` });
+  // Four days, one with morning and evening, one with only a morning call: four attempts.
+  await callOn(k, 9, 11); await callOn(k, 9, 17);
+  await callOn(k, 7, 11);
+  await callOn(k, 5, 11); await callOn(k, 5, 17);
+  await callOn(k, 3, 11);
+  check('four days rung: still open', (await attempts(k)).status !== 'unreachable', await attempts(k));
+  check('...and four attempts, not six calls', (await attempts(k)).call_attempts === 4, await attempts(k));
+  await callOn(k, 1, 11);
+  check('the fifth day closes it as Not reachable', (await attempts(k)).status === 'unreachable', await attempts(k));
+  check('...with no follow-up date', (await when(k)) === null, await when(k));
+
+  console.log('\n--- Not interested is final ---');
+  const ni = await add('9820000012');
+  await post(`/api/crm/leads/${ni}/call`, { disposition: 'not_interested', next_follow_up_at: new Date(Date.now() + 3 * 86400000).toISOString() });
+  const niRow = async () => (await pool.query(`SELECT status, next_follow_up_at FROM leads WHERE id = $1`, [ni])).rows[0];
+  check('Not interested: no follow-up, even with a day picked', (await niRow()).status === 'not_interested' && (await niRow()).next_follow_up_at === null, await niRow());
+  for (const dsp of ['no_answer', 'busy', 'switched_off', 'out_of_coverage']) {
+    await post(`/api/crm/leads/${ni}/call`, { disposition: dsp });
+    check(`a later ${dsp} does not reopen it`, (await niRow()).status === 'not_interested' && (await niRow()).next_follow_up_at === null, await niRow());
+  }
+  await pool.query(`UPDATE leads SET next_follow_up_at = NOW() - INTERVAL '1 day', follow_up_auto = FALSE WHERE id = $1`, [ni]);
+  const listed = await pool.query(`SELECT 1 FROM leads l WHERE l.id = $1 AND ${FOLLOW_UP_LISTED}`, [ni]);
+  check('...and a Not interested lead is never on Follow-ups, even with an old date', listed.rows.length === 0);
+  await post(`/api/crm/leads/${ni}/call`, { disposition: 'interested' });
+  check('a call that connects and says Interested does reopen it', (await niRow()).status === 'interested', await niRow());
 
   await setHours(16, 13);
   server.close();

@@ -156,6 +156,9 @@ export const DUE_NOW = `
  * report, so the number on a tile is the number of rows behind it.
  */
 export const FOLLOW_UP_LISTED = `(
+  -- Somebody said Not interested (or Do not call, Wrong number): never a follow-up again.
+  l.status NOT IN ('not_interested', 'dnc', 'invalid')
+  AND (
   l.follow_up_auto = FALSE
   OR (
     (l.retry_hold_until IS NULL OR l.retry_hold_until <= NOW())
@@ -170,6 +173,7 @@ export const FOLLOW_UP_LISTED = `(
            -- return (30 / 2 days on) are follow-ups a caller is asked to make.
            AND NOT fd.evening_retry_all)
     )
+  )
   )
 )`;
 
