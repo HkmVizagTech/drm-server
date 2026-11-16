@@ -1122,8 +1122,8 @@ export async function issueReceiptForPayment(paymentRowId: string): Promise<void
   // The seva picked from DRM's list, if one was. Allowed even if it has since been switched
   // off - a retry must say what the first attempt said.
   const chosenSeva = p.seva_catalog_id ? await resolveSeva(p.seva_catalog_id, pool, { allowInactive: true }) : null;
-  // The seva decides the site (Annadanam -> Annadan, anything else -> HKM). Only with no seva
-  // picked does it fall back to the site set on the QR, or the one chosen by hand.
+  // A seva picked from the list is always raised on the HKM site, so DCC gets its code. Only with
+  // no seva picked does it fall back to the site set on the QR, or the one chosen by hand.
   const site = (chosenSeva ? receiptSiteOf(chosenSeva) : p.receipt_site || p.qr_receipt_site) as SiteKey | null;
   if (!site) {
     await pool.query(

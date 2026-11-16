@@ -41,13 +41,13 @@ export function dccAccountTypeOf(s: Seva | null | undefined): number {
 }
 
 /**
- * Which site raises the receipt for a seva: an Annadanam seva comes from the Annadan site, every
- * other seva (Brick Seva, Square Feet Seva, festivals, TSC...) from the HKM site. The seva decides,
- * not the QR it was paid on - a Brick Seva paid on the Annadan QR still gets an HKM receipt.
- * The client has the same rule (receiptSiteOfSeva in seva-picker.tsx) to show it before sending.
+ * Which site raises the receipt for a seva picked from DRM's list: always the HKM site, Annadanam
+ * sevas included, so DCC gets the picked seva's code. (The Annadan site sends DCC a fixed
+ * Annadanam code whatever was picked.) Only a receipt with no seva picked falls back to the site
+ * set on the QR. The client has the same rule (receiptSiteOfSeva in seva-picker.tsx).
  */
-export function receiptSiteOf(s: Seva): 'annadan' | 'hkmv' {
-  return s.accountType !== 'TSC' && /^annadanam/i.test(s.category) ? 'annadan' : 'hkmv';
+export function receiptSiteOf(_s: Seva): 'annadan' | 'hkmv' {
+  return 'hkmv';
 }
 
 export function dccSevaOf(s: Seva): DccSeva {

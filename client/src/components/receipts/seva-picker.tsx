@@ -29,11 +29,12 @@ export interface CatalogSeva {
 }
 
 /**
- * Which site raises the receipt for a seva: Annadanam sevas the Annadan site, every other seva the HKM
- * site. The server decides the same way (receiptSiteOf in services/sevaCatalog.ts); this only shows it.
+ * Which site raises the receipt for a seva picked from the list: always the HKM site, Annadanam sevas
+ * included, so DCC gets that seva's code. The server decides the same way (receiptSiteOf in
+ * services/sevaCatalog.ts); this only shows it.
  */
-export function receiptSiteOfSeva(s: Pick<CatalogSeva, "category" | "accountType">): "annadan" | "hkmv" {
-  return s.accountType !== "TSC" && /^annadanam/i.test(s.category) ? "annadan" : "hkmv";
+export function receiptSiteOfSeva(_s: Pick<CatalogSeva, "category" | "accountType">): "annadan" | "hkmv" {
+  return "hkmv";
 }
 
 // One fetch shared by every form on the page; a form opened a second time does not wait again.
