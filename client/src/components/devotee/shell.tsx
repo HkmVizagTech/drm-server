@@ -129,7 +129,7 @@ export function DevoteeShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!ready) return;
-    if (!user) router.replace("/devotee");
+    if (!user) router.replace("/login");
     else if (user.role !== "devotee") router.replace(homeFor(user.role));
   }, [ready, user, router]);
 

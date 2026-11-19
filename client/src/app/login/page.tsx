@@ -7,12 +7,17 @@
 // that introduced DRM looked like it belonged to a different application than
 // DRM. It now uses the same surfaces, type and controls as every screen behind
 // it.
+//
+// Two ways in. It opens on WhatsApp sign-in (devotees: a code sent to their WhatsApp); "or sign
+// in with e-mail" underneath switches to e-mail and password, and back the same way. One page,
+// no separate devotee address.
 
 import { useEffect, useState, FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { homeFor, useAuth } from "@/lib/auth-context";
 import { Alert, Button, Field, Input } from "@/components/ui";
 import { BrandMark } from "@/components/brand-mark";
+import { DevoteeSignIn } from "@/components/devotee/devotee-sign-in";
 
 export default function LoginPage() {
   const { login, user, ready } = useAuth();
@@ -27,6 +32,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState<"whatsapp" | "staff">("whatsapp");
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -74,6 +80,9 @@ export default function LoginPage() {
           <p className="mt-1 text-sm text-ink-muted">Donor manager</p>
         </div>
 
+        {mode === "whatsapp" ? (
+          <DevoteeSignIn />
+        ) : (
         <form
           onSubmit={handleSubmit}
           className="space-y-4 rounded-panel border border-line-soft bg-surface p-6 shadow-raised sm:p-7"
@@ -110,12 +119,20 @@ export default function LoginPage() {
             {loading ? "Signing in…" : "Sign in"}
           </Button>
         </form>
+        )}
 
         <p className="mt-5 text-center text-sm text-ink-muted">
-          Devotee?{" "}
-          <a href="/devotee" className="font-medium text-brand-700 hover:underline">
-            Sign in with WhatsApp
-          </a>
+          or{" "}
+          <button
+            type="button"
+            onClick={() => {
+              setError("");
+              setMode(mode === "whatsapp" ? "staff" : "whatsapp");
+            }}
+            className="font-medium text-brand-700 hover:underline"
+          >
+            {mode === "whatsapp" ? "sign in with e-mail" : "sign in with WhatsApp"}
+          </button>
         </p>
 
         <p className="mt-6 text-center text-xs text-ink-faint">

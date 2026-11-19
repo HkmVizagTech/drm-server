@@ -65,7 +65,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = () => {
-    const wasDevotee = user?.role === "devotee";
     localStorage.removeItem("token");
     // The next person to sign in on this tab starts with no one else's filters.
     clearSavedFilters();
@@ -73,7 +72,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // In the app, signing out also signs the phone out - or the app would sign
     // straight back in with the phone's key on the next screen.
     void signOutPhone();
-    router.push(wasDevotee ? "/devotee" : "/login");
+    router.push("/login");
   };
 
   return <AuthContext.Provider value={{ user, ready, login, logout }}>{children}</AuthContext.Provider>;
