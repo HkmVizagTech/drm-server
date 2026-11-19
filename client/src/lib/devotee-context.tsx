@@ -76,10 +76,15 @@ interface LocalNotificationsPlugin {
   }): Promise<unknown>;
   cancel(o: { notifications: { id: number }[] }): Promise<void>;
   getPending(): Promise<{ notifications: { id: number; extra?: { kind?: string } }[] }>;
+  /**
+   * NOT a promise inside the DRM app: the app's own plugin bridge answers with the handle itself
+   * ({ remove }), while the npm package's typings say Promise. Treated as either - calling .then on
+   * the plain object is what crashed the devotee portal on sign-in in app 1.0.6.
+   */
   addListener(
     event: "localNotificationActionPerformed",
     fn: (a: { notification: { extra?: { url?: string } } }) => void
-  ): Promise<{ remove: () => void }>;
+  ): { remove: () => void } | Promise<{ remove: () => void }>;
 }
 
 const nativeNotifications = () => appPlugin<LocalNotificationsPlugin>("LocalNotifications");
@@ -275,14 +280,32 @@ export function DevoteeProvider({ children }: { children: ReactNode }) {
     const plugin = nativeNotifications();
     if (!plugin) return;
     let handle: { remove: () => void } | null = null;
-    void plugin
-      .addListener("localNotificationActionPerformed", (a) => {
-        const url = a.notification.extra?.url;
-        if (url) window.location.assign(url);
-      })
-      .then((h) => (handle = h))
-      .catch(() => undefined);
-    return () => handle?.remove();
+    let live = true;
+    try {
+      // Plain object or promise (see the note on the type): Promise.resolve takes both. Wrapped so
+      // a plugin that behaves unexpectedly can cost the tap-to-open, never the page.
+      void Promise.resolve(
+        plugin.addListener("localNotificationActionPerformed", (a) => {
+          const url = a.notification.extra?.url;
+          if (url) window.location.assign(url);
+        })
+      )
+        .then((h) => {
+          if (live) handle = h;
+          else h?.remove?.();
+        })
+        .catch(() => undefined);
+    } catch {
+      // No listener: reminders still ring; tapping one opens the app at its last page.
+    }
+    return () => {
+      live = false;
+      try {
+        handle?.remove?.();
+      } catch {
+        // Already gone.
+      }
+    };
   }, []);
 
   const value = useMemo(
