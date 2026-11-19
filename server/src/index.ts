@@ -24,6 +24,8 @@ import dotenv from 'dotenv';
 import pool, { verifyTimezone } from './db/pool';
 import authRoutes from './routes/auth';
 import devoteeAuthRoutes from './routes/devoteeAuth';
+import devoteeLeadsRoutes from './routes/devoteeLeads';
+import receiptLinkRoutes from './routes/receiptLink';
 import peopleRoutes from './routes/people';
 import donationsRoutes from './routes/donations';
 import sevaRoutes from './routes/seva';
@@ -53,7 +55,7 @@ import crmQrRoutes, { webhookRouter as razorpayWebhook } from './routes/crmQr';
 import profilesRoutes from './routes/profiles';
 import filesRoutes from './routes/files';
 import { confineRole, denyRole, readOnlyFor } from './middleware/auth';
-import { scheduleBirthdayAnniversaryCheck, scheduleNotifications, schedulePhoneCallLinks, scheduleSubscriptionRefresh, scheduleWhatsAppThanks } from './utils/cron';
+import { scheduleBirthdayAnniversaryCheck, scheduleDevoteeReminders, scheduleNotifications, schedulePhoneCallLinks, scheduleSubscriptionRefresh, scheduleWhatsAppThanks } from './utils/cron';
 import notificationsRoutes from './routes/notifications';
 import waThanksRoutes from './routes/waThanks';
 import waChatRoutes, { webhookRouter as waChatWebhook } from './routes/waChat';
@@ -184,10 +186,15 @@ app.get('/health', (_req, res) => {
 // Routes
 // A brick printer reaches the Seva wall and nothing else. Must stay ahead of every router.
 app.use('/api', confineRole('brick_printer', ['/seva-wall', '/auth/me', '/auth/change-password']));
-// A devotee reaches Add record and nothing else. (Signing in is public: see devoteeAuth.)
-app.use('/api', confineRole('devotee', ['/seva-wall/devotee-record', '/seva-wall/mine', '/auth/me']));
+// A devotee reaches Add record and their own leads, and nothing else - plus linking their phone
+// in the app, so it can save calls with their leads. (Signing in is public: see devoteeAuth.)
+// The app's background requests carry the phone's key, not a login, and phoneApp.ts sends a
+// devotee's phone to their own private call log.
+app.use('/api', confineRole('devotee', ['/seva-wall/devotee-record', '/seva-wall/mine', '/devotee', '/app/devices', '/seva-catalog', '/auth/me']));
 app.use('/api/auth', authRoutes);
 app.use('/api/devotee-auth', devoteeAuthRoutes);
+// A devotee's own leads and follow-ups. Devotees only; each sees only the leads they added.
+app.use('/api/devotee', devoteeLeadsRoutes);
 // A caller may open People and Donations to look a donor up, and may not
 // change anything there. Enforced here, ahead of the routers, rather than on
 // each handler: a guard you have to remember to add to the next endpoint is a
@@ -243,6 +250,8 @@ app.use('/api/seva-wall', sevaWallRoutes);
 app.use('/api/seva-catalog', sevaCatalogRoutes);
 // The donor-facing brick page and its picture. No login: protected by an unguessable token.
 app.use(sevaWallPublic);
+// A devotee's receipt, opened by the donor from the WhatsApp link. No login: an unguessable token.
+app.use(receiptLinkRoutes);
 app.use('/api/events', denyRole('caller'), eventsRoutes);
 app.use('/api/triggers', denyRole('caller'), triggersRoutes);
 app.use('/api/reports', denyRole('caller'), reportsRoutes);
@@ -411,6 +420,7 @@ async function start(): Promise<void> {
   scheduleWhatsAppThanks();
   schedulePhoneCallLinks();
   scheduleSubscriptionRefresh();
+  scheduleDevoteeReminders();
 
   // Bind explicitly to 0.0.0.0 - Railway's proxy connects to the container over
   // its own network interface, not loopback, so binding to the default host can

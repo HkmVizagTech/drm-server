@@ -177,23 +177,23 @@ export default function DevoteeAddRecordPage() {
   return (
     <div className="mx-auto max-w-5xl">
       <h1 className="mb-1 text-xl font-semibold text-ink">Add record</h1>
-      <p className="mb-5 text-sm text-ink-muted">The honoree name is printed on the brick.</p>
+      <p className="mb-5 text-sm text-ink-muted">The name to print is what appears on the brick.</p>
 
       {added && <Alert tone="good">Added: {added}. You can add another below.</Alert>}
       {error && <Alert tone="danger">{error}</Alert>}
 
       <div className="mt-4 grid gap-4 rounded-panel border border-line-soft bg-surface p-5 shadow-raised sm:grid-cols-2">
-        <Field label="Honoree name" required hint="Printed on the brick" error={shown && missing.honoree_name ? "Enter the honoree's name." : undefined}>
-          <Input value={f.honoree_name} onChange={(e) => set({ honoree_name: e.target.value })} invalid={shown && missing.honoree_name} />
-        </Field>
-        <Field label="Donation receipt no." required error={shown && missing.receipt_number ? "Enter the receipt number." : undefined}>
-          <Input value={f.receipt_number} onChange={(e) => set({ receipt_number: e.target.value })} invalid={shown && missing.receipt_number} />
-        </Field>
         <Field label="Donor name" required error={shown && missing.donor_name ? "Enter the donor name." : undefined}>
           <Input value={f.donor_name} onChange={(e) => set({ donor_name: e.target.value })} invalid={shown && missing.donor_name} />
         </Field>
         <Field label="Donor phone number" required error={shown && missing.phone ? "Enter the 10-digit number." : undefined}>
           <Input inputMode="numeric" value={f.phone} onChange={(e) => set({ phone: e.target.value })} invalid={shown && missing.phone} />
+        </Field>
+        <Field label="Name to print" required hint="Exactly as it should appear on the brick" error={shown && missing.honoree_name ? "Enter the name to print on the brick." : undefined}>
+          <Input value={f.honoree_name} onChange={(e) => set({ honoree_name: e.target.value })} invalid={shown && missing.honoree_name} />
+        </Field>
+        <Field label="Donation receipt no." required error={shown && missing.receipt_number ? "Enter the receipt number." : undefined}>
+          <Input value={f.receipt_number} onChange={(e) => set({ receipt_number: e.target.value })} invalid={shown && missing.receipt_number} />
         </Field>
         <Field label="Amount donated" required error={shown && missing.amount ? "Enter 1500 or more." : undefined}>
           <Input inputMode="numeric" value={f.amount} onChange={(e) => set({ amount: e.target.value })} invalid={shown && missing.amount} />
@@ -208,8 +208,10 @@ export default function DevoteeAddRecordPage() {
         <Field label="Donation date" hint="Optional">
           <Input type="date" value={f.donated_on} onChange={(e) => set({ donated_on: e.target.value })} />
         </Field>
-        <div className="flex items-end sm:justify-end">
-          <Button size="lg" block loading={busy} onClick={() => void save()}>
+        {/* Its own row under the fields: full width on a phone, a normal button at the right on a
+            wider screen - never squeezed beside a field whose hint makes it taller. */}
+        <div className="flex justify-end border-t border-line-soft pt-4 sm:col-span-2">
+          <Button size="lg" icon="plus" loading={busy} onClick={() => void save()} className="w-full sm:w-auto sm:min-w-48">
             {busy ? "Adding…" : "Add record"}
           </Button>
         </div>
@@ -234,9 +236,9 @@ export default function DevoteeAddRecordPage() {
       <TableShell>
         <Thead>
           <Th>Picture</Th>
-          <Th>Honoree name</Th>
           <Th>Donor</Th>
           <Th>Donor number</Th>
+          <Th>Name to print</Th>
           <Th>Seva</Th>
           <Th align="right">Amount</Th>
           <Th>Receipt no.</Th>
@@ -269,9 +271,9 @@ export default function DevoteeAddRecordPage() {
               return (
                 <tr key={r.ref}>
                   <Td>{r.has_image ? <Thumb row={r} /> : <span className="text-ink-faint">-</span>}</Td>
-                  <Td>{r.honoree_name || <span className="text-ink-faint">-</span>}</Td>
                   <Td>{r.donor_name || "-"}</Td>
                   <Td className="tabular-nums">{r.phone || "-"}</Td>
+                  <Td>{r.honoree_name || <span className="text-ink-faint">-</span>}</Td>
                   <Td>{KIND_WORDS[r.kind]}</Td>
                   <Td align="right">{currency(r.amount)}</Td>
                   <Td>{r.receipt_number || "-"}</Td>

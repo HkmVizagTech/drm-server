@@ -7,6 +7,7 @@ import { notify } from '../services/notifications';
 import { thanksTick } from '../services/waThanks';
 import { linkPhoneCalls } from '../services/phoneCalls';
 import { refreshSubscriptions } from '../services/subscriptionRefresh';
+import { devoteeReminderTick } from '../services/devoteeReminders';
 import type { AbandonedDonation, PatronRequest, SiteKey } from '../services/hkmvClient';
 
 // WHAT WAS WRONG WITH THIS JOB, because it ran wrong for a long time and the
@@ -121,6 +122,20 @@ export function scheduleSubscriptionRefresh() {
   const run = () => void refreshSubscriptions().catch((e) => console.error('[CRON] subscription refresh:', (e as Error).message));
   cron.schedule('30 3 * * *', run, { timezone: APP_TIMEZONE });
   setTimeout(run, 2 * 60_000);
+}
+
+/**
+ * Devotees' follow-up reminders, pushed to their phones as each one comes due. Every minute;
+ * does nothing until the Web Push keys are set. See services/devoteeReminders.ts.
+ */
+export function scheduleDevoteeReminders() {
+  cron.schedule('* * * * *', () => {
+    void devoteeReminderTick()
+      .then((r) => {
+        if (r.claimed) console.log('[devotee-reminders]', JSON.stringify(r));
+      })
+      .catch((e) => console.error('[CRON] devotee reminders:', (e as Error).message));
+  }, { timezone: APP_TIMEZONE });
 }
 
 export function scheduleNotifications(

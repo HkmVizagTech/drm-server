@@ -29,7 +29,8 @@ export type IconName =
   | "edit" | "trash" | "copy" | "file" | "fileText" | "sheet" | "receipt"
   | "qr" | "rupee" | "chart" | "home" | "list" | "inbox" | "link" | "tag"
   | "star" | "sparkle" | "shield" | "box" | "target" | "trendUp" | "eye"
-  | "mic" | "play" | "pause" | "phoneIncoming" | "phoneMissed";
+  | "mic" | "play" | "pause" | "phoneIncoming" | "phoneMissed"
+  | "mapPin" | "route" | "locate";
 
 // Paths only - the wrapper supplies viewBox, stroke and sizing, so a new icon
 // cannot arrive with a different weight than the rest.
@@ -63,6 +64,9 @@ const PATHS: Record<IconName, string> = {
   phone: "M7 3h3l1.5 4-2 1.5a12 12 0 0 0 6 6L17 12.5l4 1.5v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 5.2 2 2 0 0 1 5 3h2Z",
   phoneIncoming: "M7 3h3l1.5 4-2 1.5a12 12 0 0 0 6 6L17 12.5l4 1.5v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 5.2 2 2 0 0 1 5 3h2ZM21 3l-5 5m0 0V4m0 4h4",
   phoneMissed: "M7 3h3l1.5 4-2 1.5a12 12 0 0 0 6 6L17 12.5l4 1.5v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 5.2 2 2 0 0 1 5 3h2ZM16 3l5 5m0-5-5 5",
+  mapPin: "M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21Zm0-9a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z",
+  route: "M6 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm12-10a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM8 17h7.5a3.5 3.5 0 0 0 0-7h-7a3.5 3.5 0 0 1 0-7H16",
+  locate: "M12 19a7 7 0 1 0 0-14 7 7 0 0 0 0 14Zm0-4a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm0-13v3m0 14v3M2 12h3m14 0h3",
   mic: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm7 9a7 7 0 0 1-14 0m7 7v3",
   play: "M8 5.5v13a.5.5 0 0 0 .77.42l10-6.5a.5.5 0 0 0 0-.84l-10-6.5A.5.5 0 0 0 8 5.5Z",
   pause: "M8 5v14M16 5v14",

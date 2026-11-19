@@ -92,9 +92,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     if (isPrinter) router.replace("/seva-wall/print");
   }, [isPrinter, router]);
 
-  // A devotee has one screen too: Add record.
+  // A devotee has their own app: their leads, follow-ups and Add record.
   useEffect(() => {
-    if (isDevotee) router.replace("/seva-wall/devotee");
+    if (isDevotee) router.replace("/devotee/home");
   }, [isDevotee, router]);
 
   // Close on navigation. Without this, tapping a link on a phone leaves the

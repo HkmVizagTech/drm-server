@@ -35,11 +35,21 @@ const flaxxaSender: OtpSender = async (phone10, code) => {
   }
 };
 
-let sender: OtpSender = flaxxaSender;
+// Running locally without a Flaxxa token: print the code in the server log instead of sending
+// it, so a developer can sign in as a devotee. Never in production, where a missing token must
+// fail loudly rather than quietly let anyone read codes from a log.
+const consoleSender: OtpSender = async (phone10, code) => {
+  console.log(`[devotee OTP] ${phone10}: ${code}  (development only - FLAXXA_TOKEN is not set, so nothing was sent)`);
+};
+
+const defaultSender = (): OtpSender =>
+  !process.env.FLAXXA_TOKEN && process.env.NODE_ENV !== 'production' ? consoleSender : flaxxaSender;
+
+let sender: OtpSender | null = null;
 
 /** Tests swap this so no real message is ever sent. */
 export function setOtpSender(fn: OtpSender | null) {
-  sender = fn ?? flaxxaSender;
+  sender = fn;
 }
 
-export const sendOtp: OtpSender = (phone10, code) => sender(phone10, code);
+export const sendOtp: OtpSender = (phone10, code) => (sender ?? defaultSender())(phone10, code);

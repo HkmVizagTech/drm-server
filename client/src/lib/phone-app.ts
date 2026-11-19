@@ -63,6 +63,8 @@ interface DrmPhonePlugin {
   openAppSettings(): Promise<void>;
   /** Added in app 1.0.4. */
   keepScreenOn?(o: { on: boolean }): Promise<void>;
+  /** Added in app 1.0.6: WhatsApp on this number's chat with a file attached, for the user to send. */
+  shareToWhatsApp?(o: { phone: string; text: string; fileName: string; base64: string }): Promise<{ opened: string }>;
 }
 
 interface CapacitorGlobal {
@@ -70,6 +72,7 @@ interface CapacitorGlobal {
   getPlatform?: () => string;
   Plugins?: Record<string, unknown>;
   registerPlugin?: (name: string) => unknown;
+  isPluginAvailable?: (name: string) => boolean;
 }
 
 function capacitor(): CapacitorGlobal | null {
@@ -100,6 +103,17 @@ export function phone(): DrmPhonePlugin | null {
   return ((c.Plugins?.DrmPhone as DrmPhonePlugin | undefined) ??
     (c.registerPlugin?.("DrmPhone") as DrmPhonePlugin | undefined) ??
     null) as DrmPhonePlugin | null;
+}
+
+/**
+ * Another native plugin by name, or null in a browser - and null in an app built before that
+ * plugin was added, so a page can offer the feature only where the installed app has it.
+ */
+export function appPlugin<T>(name: string): T | null {
+  if (!inApp()) return null;
+  const c = capacitor()!;
+  if (c.isPluginAvailable && !c.isPluginAvailable(name)) return null;
+  return ((c.Plugins?.[name] as T | undefined) ?? (c.registerPlugin?.(name) as T | undefined) ?? null) as T | null;
 }
 
 /**

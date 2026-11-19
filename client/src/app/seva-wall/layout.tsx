@@ -2,6 +2,7 @@
 
 import { ReactNode } from "react";
 import DashboardLayout from "@/components/dashboard-layout";
+import { DevoteeShell } from "@/components/devotee/shell";
 import { BrandMark } from "@/components/brand-mark";
 import { Icon } from "@/components/icons";
 import { Toaster } from "@/components/toast";
@@ -48,7 +49,7 @@ export default function SevaWallLayout({ children }: LayoutProps<"/seva-wall">) 
   // calling endpoints the moment it mounts, which a printer's token is refused.
   if (!ready || !user) return null;
   if (user.role === "brick_printer") return <PrinterShell>{children}</PrinterShell>;
-  // A devotee gets the same bare page: one screen, Add record.
-  if (user.role === "devotee") return <PrinterShell subtitle="Add record">{children}</PrinterShell>;
+  // A devotee gets their own app's shell, with Add record as its Bricks tab.
+  if (user.role === "devotee") return <DevoteeShell>{children}</DevoteeShell>;
   return <DashboardLayout>{children}</DashboardLayout>;
 }

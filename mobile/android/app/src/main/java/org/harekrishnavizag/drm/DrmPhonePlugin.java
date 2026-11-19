@@ -188,6 +188,66 @@ public class DrmPhonePlugin extends Plugin {
         call.resolve(r);
     }
 
+    /**
+     * Open WhatsApp on the donor's own chat with the receipt PDF attached and the message as its
+     * caption, for the devotee to press Send (added in app 1.0.6):
+     * { phone, text, fileName, base64 }. Tries WhatsApp, then WhatsApp Business; with neither,
+     * the phone's share sheet. Nothing is sent without the devotee pressing Send.
+     */
+    @PluginMethod
+    public void shareToWhatsApp(PluginCall call) {
+        String phone = CallSync.phone10(call.getString("phone"));
+        String base64 = call.getString("base64");
+        String name = call.getString("fileName", "receipt.pdf").replaceAll("[^A-Za-z0-9._-]", "-");
+        if (phone.length() != 10 || base64 == null || base64.isEmpty()) {
+            call.reject("A 10-digit number and the receipt are needed.");
+            return;
+        }
+        try {
+            java.io.File dir = new java.io.File(getContext().getCacheDir(), "receipts");
+            if (!dir.exists() && !dir.mkdirs()) throw new java.io.IOException("No room for the receipt.");
+            java.io.File file = new java.io.File(dir, name);
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(file)) {
+                out.write(android.util.Base64.decode(base64, android.util.Base64.DEFAULT));
+            }
+            Uri uri = androidx.core.content.FileProvider.getUriForFile(
+                getContext(), getContext().getPackageName() + ".fileprovider", file);
+            String text = call.getString("text", "");
+            for (String pkg : new String[] { "com.whatsapp", "com.whatsapp.w4b" }) {
+                Intent i = new Intent(Intent.ACTION_SEND);
+                i.setType("application/pdf");
+                i.setPackage(pkg);
+                i.putExtra(Intent.EXTRA_STREAM, uri);
+                i.putExtra(Intent.EXTRA_TEXT, text);
+                // WhatsApp opens this contact's chat directly instead of asking who to send to.
+                i.putExtra("jid", "91" + phone + "@s.whatsapp.net");
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                try {
+                    getContext().startActivity(i);
+                    JSObject r = new JSObject();
+                    r.put("opened", pkg);
+                    call.resolve(r);
+                    return;
+                } catch (ActivityNotFoundException ignored) {
+                    // Not installed: try the next one.
+                }
+            }
+            Intent share = new Intent(Intent.ACTION_SEND);
+            share.setType("application/pdf");
+            share.putExtra(Intent.EXTRA_STREAM, uri);
+            share.putExtra(Intent.EXTRA_TEXT, text);
+            share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            Intent chooser = Intent.createChooser(share, "Send receipt");
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(chooser);
+            JSObject r = new JSObject();
+            r.put("opened", "chooser");
+            call.resolve(r);
+        } catch (Exception e) {
+            call.reject("Could not open WhatsApp: " + e.getMessage());
+        }
+    }
+
     /** Report calls and send recordings now. Resolves when done, with any error. */
     @PluginMethod
     public void syncNow(PluginCall call) {

@@ -30,6 +30,13 @@ import {
   recordingKey,
   type ReportedCall,
 } from '../services/phoneCalls';
+import {
+  devoteeNumbers,
+  devoteeRinging,
+  markNoDevoteeRecording,
+  recordDevoteeCalls,
+  saveDevoteeRecording,
+} from '../services/devoteeCalls';
 
 const router = Router();
 
@@ -44,8 +51,15 @@ const str = (v: unknown, max: number) => {
 const isUuid = (s: string) => /^[0-9a-f-]{36}$/i.test(s);
 
 interface DeviceReq extends Request {
-  device?: { id: string; user_id: string };
+  device?: { id: string; user_id: string; role: string };
 }
+
+/**
+ * A phone linked to a devotee. Its calls are the devotee's own business: they go to
+ * services/devoteeCalls.ts (their leads only, heard by them only), never to DRM's call log,
+ * the recordings list, Team activity or caller ID on the laptop.
+ */
+const isDevotee = (req: DeviceReq) => req.device!.role === 'devotee';
 
 /** The app's background calls: signed with the phone's own key. */
 async function deviceAuth(req: DeviceReq, res: Response, next: NextFunction) {
@@ -53,7 +67,7 @@ async function deviceAuth(req: DeviceReq, res: Response, next: NextFunction) {
   if (key.length < 32) return res.status(401).json({ error: 'This phone is not linked.' });
   try {
     const r = await pool.query(
-      `SELECT d.id, d.user_id FROM app_devices d JOIN users u ON u.id = d.user_id
+      `SELECT d.id, d.user_id, u.role FROM app_devices d JOIN users u ON u.id = d.user_id
         WHERE d.key_hash = $1 AND d.revoked_at IS NULL AND u.active`,
       [sha256(key)]
     );
@@ -140,7 +154,7 @@ router.post('/sign-out', deviceAuth, async (req: DeviceReq, res) => {
 /** GET /api/app/numbers - the numbers this phone should report calls for. */
 router.get('/numbers', deviceAuth, async (req: DeviceReq, res) => {
   try {
-    const numbers = await numbersFor(req.device!.user_id);
+    const numbers = isDevotee(req) ? await devoteeNumbers(req.device!.user_id) : await numbersFor(req.device!.user_id);
     res.json({ numbers });
   } catch (err) {
     console.error('phoneApp.numbers error:', err);
@@ -178,7 +192,7 @@ router.post('/status', deviceAuth, async (req: DeviceReq, res) => {
 router.post('/calls', deviceAuth, async (req: DeviceReq, res) => {
   const calls = Array.isArray(req.body?.calls) ? (req.body.calls as ReportedCall[]).slice(0, 200) : [];
   try {
-    const results = await recordCalls(req.device!, calls);
+    const results = isDevotee(req) ? await recordDevoteeCalls(req.device!, calls) : await recordCalls(req.device!, calls);
     await pool.query(`UPDATE app_devices SET last_sync_at = NOW() WHERE id = $1`, [req.device!.id]);
     res.json({ results });
   } catch (err) {
@@ -200,6 +214,21 @@ router.post(
     const body = req.body as Buffer;
     if (!Buffer.isBuffer(body) || body.length < 512) return res.status(400).json({ error: 'The file is empty.' });
     if (!storage.isConfigured()) return res.status(503).json({ error: 'Recording storage is not set up yet.' });
+    if (isDevotee(req)) {
+      try {
+        const r = await saveDevoteeRecording(
+          req.device!,
+          String(req.params.id),
+          body,
+          str(decodeURIComponent(String(req.headers['x-file-name'] ?? '')), 200),
+          str(String(req.headers['content-type'] ?? ''), 80)
+        );
+        return res.status(r.status).json(r.body);
+      } catch (err) {
+        console.error('phoneApp.upload (devotee) error:', err);
+        return res.status(500).json({ error: 'Could not save the recording.' });
+      }
+    }
     try {
       const c = await pool.query(
         `SELECT id, started_at, recording_status, activity_id FROM phone_calls WHERE id = $1 AND device_id = $2`,
@@ -242,6 +271,10 @@ router.post(
 router.post('/calls/:id/no-recording', deviceAuth, async (req: DeviceReq, res) => {
   if (!isUuid(String(req.params.id))) return res.status(404).json({ error: 'Not found.' });
   try {
+    if (isDevotee(req)) {
+      await markNoDevoteeRecording(req.device!, String(req.params.id));
+      return res.json({ ok: true });
+    }
     await pool.query(
       `UPDATE phone_calls SET recording_status = 'none' WHERE id = $1 AND device_id = $2 AND recording_status = 'waiting'`,
       [String(req.params.id), req.device!.id]
@@ -469,7 +502,7 @@ router.get('/devices', authenticate, authorize('admin', 'volunteer_coordinator')
               COALESCE(s.no_recording, 0) AS no_recording, COALESCE(s.waiting, 0) AS waiting,
               COALESCE(s.no_outcome, 0) AS no_outcome
          FROM app_devices d
-         JOIN users u ON u.id = d.user_id
+         JOIN users u ON u.id = d.user_id AND u.role <> 'devotee'
          LEFT JOIN LATERAL (
            SELECT COUNT(*) FILTER (WHERE pc.direction = 'outbound')::int AS outbound,
                   COUNT(*) FILTER (WHERE pc.direction = 'outbound' AND pc.duration_seconds > 0)::int AS answered_out,
@@ -584,6 +617,14 @@ router.post('/ringing', deviceAuth, async (req: DeviceReq, res) => {
     return res.status(400).json({ error: 'Bad ring.' });
   }
   const { id: deviceId, user_id: userId } = req.device!;
+  if (isDevotee(req)) {
+    try {
+      return res.json(state === 'ringing' ? await devoteeRinging(userId, phone) : { ok: true, known: false });
+    } catch (err) {
+      console.error('phoneApp.ringing (devotee) error:', err);
+      return res.status(500).json({ error: 'Could not save that.' });
+    }
+  }
   try {
     let ring = (
       await pool.query(

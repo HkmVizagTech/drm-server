@@ -16,6 +16,8 @@
     "test:credits": "tsx scripts/test-credits.ts",
     "test:recurring": "tsx scripts/test-recurring-active.ts",
     "test:devotee": "tsx scripts/test-devotee-login.ts",
+    "test:devoteeleads": "tsx scripts/test-devotee-leads.ts",
+    "test:devoteereceipts": "tsx scripts/test-devotee-receipts.ts",
     "import:devotees": "tsx scripts/import-devotees.ts",
     "test:attemptreminders": "tsx scripts/test-attempt-closes-reminders.ts",
     "test:receiptaccess": "tsx scripts/test-receipt-access.ts",
@@ -80,8 +82,11 @@
     "music-metadata": "^7.14.0",
     "next": "16.3.4",
     "node-cron": "^4.6.0",
+    "number-to-words": "^1.2.4",
+    "pdf-lib": "^1.17.1",
     "pg": "^8.23.0",
-    "uuid": "^14.0.2"
+    "uuid": "^14.0.2",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
@@ -89,8 +94,10 @@
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.5.0",
+    "@types/number-to-words": "^1.2.3",
     "@types/pg": "^8.23.1",
     "@types/uuid": "^10.0.0",
+    "@types/web-push": "^3.6.4",
     "nodemon": "^3.1.14",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"

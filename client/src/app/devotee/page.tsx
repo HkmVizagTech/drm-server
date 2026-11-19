@@ -2,7 +2,7 @@
 
 // Devotee sign-in: the WhatsApp number, then the code sent to it on WhatsApp. No password. A number
 // that is not on the devotee list gets a warning instead of a code. On success the devotee lands on
-// Add record - the only screen they have.
+// their home: their own leads and follow-ups, and Add record for bricks.
 
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -67,8 +67,8 @@ export default function DevoteeLoginPage() {
     try {
       const r = await apiClient.post<{ token: string }>("/api/devotee-auth/verify", { phone: digits, otp: otp.trim() });
       localStorage.setItem("token", r.token);
-      // A full load, so the app signs in afresh and opens Add record.
-      window.location.assign("/seva-wall/devotee");
+      // A full load, so the app signs in afresh and opens the devotee's home.
+      window.location.assign(homeFor("devotee"));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not sign in. Try again.");
       setBusy(false);

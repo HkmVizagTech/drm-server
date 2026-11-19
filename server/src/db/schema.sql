@@ -3279,3 +3279,190 @@ UPDATE donations d SET link_site = x.site
      ORDER BY d2.id, u.at DESC
   ) x
  WHERE d.id = x.id AND x.site IS NOT NULL;
+
+
+/* ---------------------------------------------------------------------------
+   DEVOTEE LEADS: a devotee's own list of people to follow up for donations.
+
+   PRIVATE TO THE DEVOTEE WHO ADDED THEM. Nothing here joins people, donations, leads or
+   anything synced from the HKM / Annadan sites, and no DRM screen reads these tables: the
+   only router that touches them (routes/devoteeLeads.ts) is open to the 'devotee' role
+   alone and scopes every query by owner_id. Two devotees may each have the same phone
+   number as a lead without either seeing the other's.
+
+   status is where the lead stands now; devotee_lead_activities is how it got there.
+   next_follow_up_at is when the devotee asked to be reminded; reminder_sent_at is set once
+   that reminder has gone out, and cleared whenever the follow-up time changes. */
+CREATE TABLE IF NOT EXISTS devotee_leads (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name VARCHAR(160) NOT NULL,
+  phone VARCHAR(10) NOT NULL,
+  alt_phone VARCHAR(15),
+  email VARCHAR(160),
+  occupation VARCHAR(120),
+  organisation VARCHAR(160),
+  interest VARCHAR(40),
+  source VARCHAR(40),
+  referred_by VARCHAR(160),
+  priority VARCHAR(10) NOT NULL DEFAULT 'warm' CHECK (priority IN ('hot', 'warm', 'cold')),
+  expected_amount NUMERIC(12, 2),
+  date_of_birth DATE,
+  anniversary_date DATE,
+  address_line TEXT,
+  area VARCHAR(160),
+  city VARCHAR(120),
+  pincode VARCHAR(6),
+  landmark VARCHAR(160),
+  latitude DOUBLE PRECISION,
+  longitude DOUBLE PRECISION,
+  notes TEXT,
+  status VARCHAR(20) NOT NULL DEFAULT 'new' CHECK (status IN
+    ('new', 'interested', 'call_later', 'not_answered', 'invalid_number', 'not_interested', 'donated')),
+  next_follow_up_at TIMESTAMPTZ,
+  reminder_sent_at TIMESTAMPTZ,
+  last_contacted_at TIMESTAMPTZ,
+  unanswered_count INTEGER NOT NULL DEFAULT 0,
+  total_donated NUMERIC(12, 2) NOT NULL DEFAULT 0,
+  last_donated_on DATE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (owner_id, phone)
+);
+CREATE INDEX IF NOT EXISTS idx_devotee_leads_owner_status ON devotee_leads (owner_id, status);
+CREATE INDEX IF NOT EXISTS idx_devotee_leads_owner_next ON devotee_leads (owner_id, next_follow_up_at)
+  WHERE next_follow_up_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_devotee_leads_owner_updated ON devotee_leads (owner_id, updated_at DESC);
+-- The reminder job's scan: follow-ups whose reminder has not gone yet.
+CREATE INDEX IF NOT EXISTS idx_devotee_leads_reminder_due ON devotee_leads (next_follow_up_at)
+  WHERE next_follow_up_at IS NOT NULL AND reminder_sent_at IS NULL;
+
+/* Each follow-up the devotee logged against a lead: how they reached the person (channel),
+   what happened (outcome; NULL for a plain note), what they said, and when to try next.
+   A 'donated' outcome carries the gift: amount, date, mode and reference. */
+CREATE TABLE IF NOT EXISTS devotee_lead_activities (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  lead_id UUID NOT NULL REFERENCES devotee_leads(id) ON DELETE CASCADE,
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  channel VARCHAR(12) CHECK (channel IN ('call', 'whatsapp', 'visit', 'other')),
+  outcome VARCHAR(20) CHECK (outcome IN
+    ('interested', 'call_later', 'not_answered', 'invalid_number', 'not_interested', 'donated')),
+  note TEXT,
+  next_follow_up_at TIMESTAMPTZ,
+  amount NUMERIC(12, 2),
+  donated_on DATE,
+  payment_mode VARCHAR(20),
+  purpose VARCHAR(120),
+  reference VARCHAR(80),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_devotee_lead_activities_lead ON devotee_lead_activities (lead_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_devotee_lead_activities_owner ON devotee_lead_activities (owner_id, created_at DESC);
+
+/* Browser push subscriptions (Web Push), so a follow-up reminder reaches the phone when the
+   page is closed. One row per browser; a subscription the push service says is gone is deleted. */
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL UNIQUE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  user_agent TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_used_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions (user_id);
+/* Calls a devotee's phone saw with their own leads, and the phone's recording of each.
+   Reported by the DRM Android app when the phone is linked to a devotee. PRIVATE TO THAT
+   DEVOTEE: only routes/devoteeLeads.ts reads it, scoped by owner_id - no admin, coordinator
+   or caller screen lists or plays these, and they are not in phone_calls. Calls to numbers
+   that are not the devotee's leads are never reported by the phone, and refused here if they
+   were. recording_status: waiting (the phone should upload it), uploaded, none (the phone
+   looked and found none), not_needed (nobody spoke). */
+CREATE TABLE IF NOT EXISTS devotee_calls (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id UUID NOT NULL REFERENCES app_devices(id) ON DELETE CASCADE,
+  call_key VARCHAR(80) NOT NULL,
+  lead_id UUID NOT NULL REFERENCES devotee_leads(id) ON DELETE CASCADE,
+  direction VARCHAR(10) NOT NULL CHECK (direction IN ('outbound', 'inbound', 'missed')),
+  phone VARCHAR(10) NOT NULL,
+  started_at TIMESTAMPTZ NOT NULL,
+  duration_seconds INTEGER NOT NULL DEFAULT 0,
+  sim VARCHAR(60),
+  from_app BOOLEAN NOT NULL DEFAULT FALSE,
+  recording_status VARCHAR(12) NOT NULL DEFAULT 'waiting'
+    CHECK (recording_status IN ('waiting', 'uploaded', 'none', 'not_needed')),
+  recording_key TEXT,
+  recording_type VARCHAR(80),
+  recording_bytes INTEGER,
+  recording_name VARCHAR(200),
+  recording_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (device_id, call_key)
+);
+CREATE INDEX IF NOT EXISTS idx_devotee_calls_lead ON devotee_calls (lead_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_devotee_calls_owner ON devotee_calls (owner_id, started_at DESC);
+
+/* Receipts a devotee raised (cash, UPI, cheque, bank) through the HKM Vizag site, HKMI or TSC
+   account. The receipt itself is the temple's: it is issued by the site and the donation is in
+   DRM's donations like any other hand-raised receipt. This row is the devotee's own list of what
+   they raised - only routes/devoteeLeads.ts reads it, scoped by owner_id - and ties the receipt to
+   the devotee's lead for that donor. */
+CREATE TABLE IF NOT EXISTS devotee_receipts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  lead_id UUID REFERENCES devotee_leads(id) ON DELETE SET NULL,
+  account VARCHAR(4) NOT NULL DEFAULT 'HKMI' CHECK (account IN ('HKMI', 'TSC')),
+  seva_catalog_id UUID,
+  seva_name VARCHAR(200),
+  donor_name VARCHAR(160) NOT NULL,
+  donor_mobile VARCHAR(10) NOT NULL,
+  on_name_of VARCHAR(160),
+  amount NUMERIC(12, 2) NOT NULL,
+  payment_mode VARCHAR(10) NOT NULL,
+  reference VARCHAR(80),
+  paid_on DATE,
+  receipt_number VARCHAR(80),
+  external_id VARCHAR(80),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_devotee_receipts_owner ON devotee_receipts (owner_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_devotee_receipts_lead ON devotee_receipts (lead_id);
+
+-- The receipt link a devotee shares with the donor on WhatsApp (/api/receipt-link/<token>): an
+-- unguessable token, so the donor opens their own receipt PDF without signing in, and nobody can
+-- walk the list. Two random UUIDs' worth of hex.
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS share_token VARCHAR(64)
+  DEFAULT replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+UPDATE devotee_receipts SET share_token = replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '') WHERE share_token IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_devotee_receipts_share ON devotee_receipts (share_token);
+
+/* Devotee receipts go straight to DCC (services/devoteeDcc.ts), not through the HKM site, and DRM
+   draws the PDF - so the row keeps everything the receipt prints and what DCC answered.
+   status: pending (being sent), issued (DCC numbered it), failed (DCC refused or did not answer;
+   the devotee can retry - DCC recognises transaction_id and never issues twice). */
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS status VARCHAR(10) NOT NULL DEFAULT 'issued';
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS transaction_id VARCHAR(80);
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS donor_email VARCHAR(160);
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS pan VARCHAR(12);
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS address TEXT;
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS city VARCHAR(120);
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS state VARCHAR(80);
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS pincode VARCHAR(6);
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS dcc_seva_category INTEGER;
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS dcc_seva_sub_category INTEGER;
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS dcc_seva_sub_category_code VARCHAR(40);
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS enrolled_by_id INTEGER;
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS enrolled_by_code VARCHAR(20);
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS donor_number VARCHAR(40);
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS dcc_error TEXT;
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS dcc_payload JSONB;
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS dcc_response JSONB;
+ALTER TABLE devotee_receipts ADD COLUMN IF NOT EXISTS issued_at TIMESTAMPTZ;
+-- One receipt per payment: a UTR or cheque number cannot be receipted twice from the portal.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_devotee_receipts_txn ON devotee_receipts (transaction_id) WHERE transaction_id IS NOT NULL;
+
+-- The devotee's own DCC id (the "Id" column of the devotee list), sent to DCC as "Enrolled by" on
+-- receipts they raise in the devotee portal. Null: the temple's default is used.
+ALTER TABLE devotees ADD COLUMN IF NOT EXISTS dcc_id INTEGER;
