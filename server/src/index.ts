@@ -190,7 +190,7 @@ app.use('/api', confineRole('brick_printer', ['/seva-wall', '/auth/me', '/auth/c
 // in the app, so it can save calls with their leads. (Signing in is public: see devoteeAuth.)
 // The app's background requests carry the phone's key, not a login, and phoneApp.ts sends a
 // devotee's phone to their own private call log.
-app.use('/api', confineRole('devotee', ['/seva-wall/devotee-record', '/seva-wall/mine', '/devotee', '/app/devices', '/seva-catalog', '/auth/me']));
+app.use('/api', confineRole('devotee', ['/seva-wall/devotee-record', '/seva-wall/mine', '/devotee', '/app/devices', '/app/dialer', '/app/dial', '/app/dial-next', '/seva-catalog', '/auth/me']));
 app.use('/api/auth', authRoutes);
 app.use('/api/devotee-auth', devoteeAuthRoutes);
 // A devotee's own leads and follow-ups. Devotees only; each sees only the leads they added.

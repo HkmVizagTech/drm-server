@@ -114,8 +114,16 @@ router.post('/dial', authenticate, async (req, res) => {
         WHERE user_id = $1 AND picked_at IS NULL AND done_at IS NULL`,
       [me]
     );
-    // Who it is, for the phone's screen ("Calling Ramesh").
-    const who = await pool.query(
+    // Who it is, for the phone's screen ("Calling Ramesh"). A devotee's from their own leads only -
+    // never DRM's - and with no DRM lead to point at.
+    const who = req.user!.role === 'devotee'
+      ? await pool.query(
+          `SELECT NULL::uuid AS id, name FROM devotee_leads
+            WHERE owner_id = $1 AND (phone = $2 OR right(regexp_replace(COALESCE(alt_phone, ''), '\\D', '', 'g'), 10) = $2)
+            ORDER BY updated_at DESC LIMIT 1`,
+          [me, phone]
+        )
+      : await pool.query(
       `SELECT id, name FROM leads
         WHERE ($1::uuid IS NOT NULL AND id = $1::uuid)
            OR ($1::uuid IS NULL AND (right(regexp_replace(phone, '\\D', '', 'g'), 10) = $2

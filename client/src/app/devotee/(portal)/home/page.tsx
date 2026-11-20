@@ -15,6 +15,7 @@ import { LeadRow } from "@/components/devotee/lead-bits";
 import { LogFollowUpDialog } from "@/components/devotee/log-follow-up";
 import { ReminderCard } from "@/components/devotee/reminder-card";
 import { CallRecordingCard } from "@/components/devotee/phone-recording";
+import { useInApp } from "@/lib/phone-app";
 
 interface Summary {
   total: number;
@@ -42,6 +43,7 @@ export default function DevoteeHomePage() {
   const [s, setS] = useState<Summary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [logging, setLogging] = useState<DevoteeLead | null>(null);
+  const app = useInApp();
 
   const load = useCallback(() => {
     apiClient
@@ -84,6 +86,19 @@ export default function DevoteeHomePage() {
 
       <ReminderCard />
       <CallRecordingCard />
+      {app && (
+        <Alert
+          tone="info"
+          title="Calling from a laptop?"
+          action={
+            <LinkButton href="/devotee/dialer" size="sm" icon="phone">
+              Laptop dialer
+            </LinkButton>
+          }
+        >
+          Open the Laptop dialer here and leave it open. Then Call in DRM on the laptop rings from this phone.
+        </Alert>
+      )}
       {error && <Alert tone="danger">{error}</Alert>}
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">

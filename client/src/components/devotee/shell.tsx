@@ -15,6 +15,7 @@ import { Toaster } from "@/components/toast";
 import { homeFor, useAuth } from "@/lib/auth-context";
 import { DevoteeProvider, useDevotee } from "@/lib/devotee-context";
 import { DevoteePhoneBridge } from "./phone-recording";
+import { DialerChip, PhoneDialerBridge } from "@/components/phone-dialer-bridge";
 
 interface Tab {
   href: string;
@@ -81,6 +82,9 @@ function Chrome({ children }: { children: ReactNode }) {
               );
             })}
           </nav>
+          <div className="flex items-center gap-2">
+          {/* On a laptop: "Phone ready" when the devotee's phone is on its Laptop dialer screen. */}
+          <DialerChip />
           <button
             type="button"
             onClick={logout}
@@ -89,6 +93,7 @@ function Chrome({ children }: { children: ReactNode }) {
             <Icon name="logout" size={16} />
             <span className="hidden sm:inline">Sign out</span>
           </button>
+          </div>
         </div>
       </header>
 
@@ -117,6 +122,8 @@ function Chrome({ children }: { children: ReactNode }) {
         })}
       </nav>
       <DevoteePhoneBridge />
+      {/* On a laptop: Call clicks ring from the devotee's phone when it is on the Laptop dialer. */}
+      <PhoneDialerBridge />
       <Toaster />
     </div>
   );
