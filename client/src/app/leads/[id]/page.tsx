@@ -41,6 +41,7 @@ import { RecordingPlayer } from "@/components/calls/recording-player";
 import { toast } from "@/components/toast";
 import { ContactEditor } from "@/components/calling/contact-editor";
 import { LinkDonationDialog } from "@/components/calling/link-donation";
+import { DonationHistoryDialog } from "@/components/calling/donation-history";
 import { callHref, callsHref, formatPhone, telHref } from "@/lib/calling";
 import { ALERT_OPTIONS, DEFAULT_ALERTS, alertSummary, cleanAlerts } from "@/lib/reminders";
 
@@ -142,6 +143,8 @@ export default function LeadDetailPage() {
   // "They gave from another number": a failed payment finished on a son's
   // phone lands on a stranger unless somebody links it to this person.
   const [linkOpen, setLinkOpen] = useState(false);
+  // Every gift, gift by gift.
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const [lead, setLead] = useState<Lead | null>(null);
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -613,7 +616,17 @@ export default function LeadDetailPage() {
                 ))}
               </ul>
             )}
+            {donations.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setHistoryOpen(true)}
+                className="mt-2 text-sm font-medium text-brand-700 hover:underline"
+              >
+                See all {donations.length} donation{donations.length === 1 ? "" : "s"} - date, amount, receipt
+              </button>
+            )}
           </Card>
+          {historyOpen && <DonationHistoryDialog name={lead.name ?? "Donor"} donations={donations} onClose={() => setHistoryOpen(false)} />}
 
           {/* ------------------------------------------- what they have given */}
           <Card>

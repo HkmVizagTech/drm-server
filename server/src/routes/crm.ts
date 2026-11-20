@@ -1875,8 +1875,12 @@ router.get('/leads/:id', async (req, res) => {
       ),
       lead.rows[0].person_id
         ? pool.query(
-            `SELECT id, amount, purpose, source_page, source_site, receipt_number, created_at
-               FROM donations WHERE person_id = $1 ORDER BY created_at DESC LIMIT 25`,
+            // Every gift, not the last few: "4 donations" on the call screen opens this list, and
+            // a caller asked "when did I give, and how much?" needs all of it. Payment mode and
+            // reference added for that list; the fields that were here are unchanged.
+            `SELECT id, amount, purpose, source_page, source_site, receipt_number, created_at,
+                    payment_mode, payment_ref, sevak_name, given_name, source
+               FROM donations WHERE person_id = $1 ORDER BY created_at DESC LIMIT 500`,
             [lead.rows[0].person_id]
           )
         : Promise.resolve({ rows: [] as Record<string, unknown>[] }),

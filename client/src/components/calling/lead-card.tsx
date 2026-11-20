@@ -17,6 +17,7 @@ import { useState, type ReactNode } from "react";
 import Link from "next/link";
 import { clockTime, currency, dueLabel, istYear, relativeDate, shortDate } from "@/lib/format";
 import { Alert, Badge, Card, Icon, IconButton, LinkButton } from "@/components/ui";
+import { DonationHistoryDialog } from "./donation-history";
 import {
   callsHref,
   convertedViaLabel,
@@ -104,6 +105,8 @@ export function LeadCard({
 }) {
   const [copied, setCopied] = useState(false);
   const [allHistory, setAllHistory] = useState(false);
+  // Every gift, opened from "4 donations" under Given.
+  const [giving, setGiving] = useState(false);
 
   async function copy() {
     try {
@@ -310,7 +313,16 @@ export function LeadCard({
               {currency(Number(lead.total_donated ?? 0))}
               <span className="text-ink-muted">
                 {" "}
-                · {lead.donation_count}× · last {relativeDate(lead.last_donation_at).toLowerCase()}
+                ·{" "}
+                <button
+                  type="button"
+                  onClick={() => setGiving(true)}
+                  className="font-medium text-brand-700 underline decoration-brand-300 underline-offset-2 hover:decoration-brand-700"
+                  title="See each donation: date, amount, seva and receipt"
+                >
+                  {lead.donation_count} donation{Number(lead.donation_count) === 1 ? "" : "s"}
+                </button>{" "}
+                · last {relativeDate(lead.last_donation_at).toLowerCase()}
               </span>
             </>
           ) : (
@@ -452,6 +464,7 @@ export function LeadCard({
           </Link>
         </p>
       )}
+    {giving && <DonationHistoryDialog leadId={lead.id} name={lead.name ?? "Donor"} onClose={() => setGiving(false)} />}
     </Card>
   );
 }
