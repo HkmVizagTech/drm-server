@@ -4,7 +4,7 @@
 // The lists here mirror server/src/services/devoteeLeads.ts. A value the server does not know is
 // refused there, so a list changed in one place and not the other fails loudly rather than quietly.
 
-import { IST, istDayPlus, istInstant, istToday } from "./format";
+import { IST, currency, currencyCompact, istDayPlus, istInstant, istToday } from "./format";
 import type { IconName } from "@/components/icons";
 
 export type LeadStatus = "new" | "interested" | "call_later" | "not_answered" | "invalid_number" | "not_interested" | "donated";
@@ -140,6 +140,9 @@ export const PAYMENT_MODES: { value: string; label: string }[] = [
   { value: "online", label: "Online (website)" },
   { value: "other", label: "Other" },
 ];
+
+/** A total for a stat tile: exact up to ₹99,999, then "₹1.3L" so it fits a phone (the exact figure goes underneath). */
+export const tileMoney = (n: number) => (Math.abs(n) >= 1_00_000 ? currencyCompact(n) : currency(n));
 
 export const labelOf = (list: { value: string; label: string }[], v: string | null | undefined) =>
   list.find((x) => x.value === v)?.label ?? "";

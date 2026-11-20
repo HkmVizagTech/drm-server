@@ -8,7 +8,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiClient } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { currency, relativeDate } from "@/lib/format";
-import { LEADS_CHANGED, STATUS, STATUS_ORDER, type DevoteeLead, type LeadActivity, type LeadStatus } from "@/lib/devotee";
+import { LEADS_CHANGED, STATUS, STATUS_ORDER, tileMoney, type DevoteeLead, type LeadActivity, type LeadStatus } from "@/lib/devotee";
 import { Alert, Card, EmptyState, LinkButton, Skeleton, StatTile } from "@/components/ui";
 import { Icon } from "@/components/icons";
 import { LeadRow } from "@/components/devotee/lead-bits";
@@ -68,15 +68,16 @@ export default function DevoteeHomePage() {
           <p className="text-sm text-ink-muted">{greeting()}, Hare Krishna</p>
           <h1 className="text-2xl font-semibold tracking-tight text-ink">{user?.name?.split(" ")[0] ?? "Prabhu"}</h1>
         </div>
-        <div className="flex gap-2">
-          <LinkButton href="/seva-wall/devotee" variant="secondary" icon="box">
-            Add brick record
-          </LinkButton>
-          <LinkButton href="/devotee/receipts" variant="secondary" icon="receipt">
-            Receipts
-          </LinkButton>
-          <LinkButton href="/devotee/leads/new" variant="primary" icon="userPlus">
+        {/* A phone: Add lead across the top, the other two side by side under it - never wider than the screen. */}
+        <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">
+          <LinkButton href="/devotee/leads/new" variant="primary" icon="userPlus" className="col-span-2 justify-center sm:order-last">
             Add lead
+          </LinkButton>
+          <LinkButton href="/seva-wall/devotee" variant="secondary" icon="box" className="justify-center">
+            Brick record
+          </LinkButton>
+          <LinkButton href="/devotee/receipts" variant="secondary" icon="receipt" className="justify-center">
+            Receipts
           </LinkButton>
         </div>
       </div>
@@ -88,7 +89,7 @@ export default function DevoteeHomePage() {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatTile label="Follow-ups due" value={dueNow} sub={s ? `${s.overdue} overdue · ${s.upcoming_week} this week` : undefined} accent={s?.overdue ? "danger" : "brand"} icon="bell" loading={!s} href="/devotee/follow-ups" />
         <StatTile label="My leads" value={s?.total ?? 0} sub={s ? `${s.added_today} added today` : undefined} icon="users" loading={!s} href="/devotee/leads" />
-        <StatTile label="Raised this month" value={currency(s?.donated_this_month ?? 0)} sub={s ? `${s.gifts_this_month} gift${s.gifts_this_month === 1 ? "" : "s"}` : undefined} accent="good" icon="rupee" loading={!s} />
+        <StatTile label="Raised this month" value={tileMoney(s?.donated_this_month ?? 0)} sub={s ? `${currency(s.donated_this_month)} · ${s.gifts_this_month} gift${s.gifts_this_month === 1 ? "" : "s"}` : undefined} accent="good" icon="rupee" loading={!s} />
         <StatTile label="Donors" value={s?.donors ?? 0} sub={s ? `${currency(s.donated_total)} in all` : undefined} icon="star" loading={!s} href="/devotee/leads?status=donated" />
       </div>
 

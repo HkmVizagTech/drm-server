@@ -12,7 +12,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiClient } from "@/lib/api";
 import { currency, shortDate } from "@/lib/format";
-import { LEADS_CHANGED, leadsChanged } from "@/lib/devotee";
+import { LEADS_CHANGED, leadsChanged, tileMoney } from "@/lib/devotee";
 import { toast } from "@/components/toast";
 import { Alert, Badge, Button, Card, EmptyState, SearchInput, SegmentedControl, Skeleton, StatTile, TableShell, Tbody, Td, Th, Thead } from "@/components/ui";
 import { ReceiptActions } from "@/components/devotee/receipt-share";
@@ -96,7 +96,7 @@ function ReceiptCard({ r }: { r: Receipt }) {
         </div>
         <div className="text-right">
           <p className="text-base font-semibold tabular-nums text-ink">{currency(r.amount)}</p>
-          <p className="font-mono text-xs text-brand-700">{r.receipt_number ?? "No. coming"}</p>
+          {r.receipt_number && <p className="font-mono text-xs text-brand-700">{r.receipt_number}</p>}
         </div>
       </div>
       <div className="mt-3 border-t border-line-soft pt-3">
@@ -191,8 +191,8 @@ function MyReceipts({ onRaise }: { onRaise: () => void }) {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <StatTile label="Raised this month" value={currency(data?.this_month ?? 0)} accent="good" icon="rupee" loading={!data} />
-        <StatTile label="All receipts" value={data?.count ?? 0} sub={data ? currency(data.amount) : undefined} icon="receipt" loading={!data} />
+        <StatTile label="Raised this month" value={tileMoney(data?.this_month ?? 0)} sub={data ? currency(data.this_month) : undefined} accent="good" icon="rupee" loading={!data} />
+        <StatTile label="Receipts" value={data?.count ?? 0} sub={data ? `${currency(data.amount)} in all` : undefined} icon="receipt" loading={!data} />
       </div>
       {data && data.not_issued > 0 && (
         <Alert tone="warn">

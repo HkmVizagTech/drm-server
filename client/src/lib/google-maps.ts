@@ -6,6 +6,8 @@
 // as every Maps JavaScript key is. It needs "Maps JavaScript API", and "Geocoding API" for
 // "Find address on map".
 //
+import { inApp } from "./phone-app";
+
 // The types below are the small part of the Maps API these screens use, so there is no
 // @types/google.maps to keep in step.
 
@@ -259,8 +261,12 @@ export function currentPosition(): Promise<LatLngLiteral> {
         reject(
           new Error(
             e.code === e.PERMISSION_DENIED
-              ? "Location is blocked for this site. Allow it in the browser settings and try again."
-              : "Could not find your location. Try again outside or with GPS on."
+              ? inApp()
+                ? "Location is not allowed for DRM. Open Settings > Apps > DRM > Permissions > Location, choose Allow, and try again."
+                : "Location is blocked for this site. Allow it in the browser settings and try again."
+              : e.code === e.POSITION_UNAVAILABLE
+                ? "Your phone's location (GPS) is off. Turn on Location in quick settings and try again."
+                : "Could not find your location in time. Try again outside or with GPS on."
           )
         ),
       { enableHighAccuracy: true, timeout: 15_000, maximumAge: 60_000 }

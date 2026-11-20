@@ -91,7 +91,8 @@ export function LeadRow({ lead, onLog, distance }: { lead: DevoteeLead; onLog?: 
   const place = [lead.area, lead.city].filter(Boolean).join(", ") || addressLine(lead);
   return (
     <li className="relative rounded-card border border-line-soft bg-surface p-3.5 shadow-card transition-shadow hover:shadow-raised sm:p-4">
-      <div className="flex items-start gap-3">
+      {/* On a phone the details get the full width and the actions sit underneath; side by side from sm. */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <Link href={`/devotee/leads/${lead.id}`} className="truncate text-sm font-semibold text-ink after:absolute after:inset-0 after:content-['']">
@@ -113,7 +114,7 @@ export function LeadRow({ lead, onLog, distance }: { lead: DevoteeLead; onLog?: 
             {lead.total_donated > 0 && <span className="text-xs font-medium text-good">{currency(lead.total_donated)} given</span>}
           </div>
         </div>
-        <div className="relative z-10 flex flex-col items-end gap-2">
+        <div className="relative z-10 flex items-center justify-between gap-2 border-t border-line-soft pt-3 sm:flex-col sm:items-end sm:justify-start sm:border-0 sm:pt-0">
           <ContactActions lead={lead} />
           {onLog && (
             <button
