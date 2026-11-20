@@ -9,10 +9,11 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { apiClient, isAbort } from "@/lib/api";
 import { useSessionState } from "@/lib/session-state";
 import { LEADS_CHANGED, STATUS, STATUS_ORDER, type DevoteeLead, type LeadStatus } from "@/lib/devotee";
-import { Alert, Card, EmptyState, LinkButton, Pagination, SearchInput, Select, Skeleton } from "@/components/ui";
+import { Alert, Button, Card, EmptyState, LinkButton, Pagination, SearchInput, Select, Skeleton } from "@/components/ui";
 import { Icon } from "@/components/icons";
 import { LeadRow } from "@/components/devotee/lead-bits";
 import { LogFollowUpDialog } from "@/components/devotee/log-follow-up";
+import { LeadUploadDialog } from "@/components/devotee/lead-upload";
 
 interface ListResult {
   rows: DevoteeLead[];
@@ -51,6 +52,7 @@ function LeadsScreen() {
   const [result, setResult] = useState<{ key: string; data: ListResult } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [logging, setLogging] = useState<DevoteeLead | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -107,11 +109,14 @@ function LeadsScreen() {
           <h1 className="text-2xl font-semibold tracking-tight text-ink">My leads</h1>
           <p className="text-sm text-ink-muted">Only you can see these.</p>
         </div>
-        <div className="hidden gap-2 sm:flex">
-          <LinkButton href="/devotee/map" variant="secondary" icon="mapPin">
+        <div className="flex gap-2">
+          <Button variant="secondary" icon="upload" onClick={() => setUploading(true)}>
+            Upload
+          </Button>
+          <LinkButton href="/devotee/map" variant="secondary" icon="mapPin" className="hidden sm:inline-flex">
             Map
           </LinkButton>
-          <LinkButton href="/devotee/leads/new" icon="userPlus">
+          <LinkButton href="/devotee/leads/new" icon="userPlus" className="hidden sm:inline-flex">
             Add lead
           </LinkButton>
         </div>
@@ -154,7 +159,14 @@ function LeadsScreen() {
             icon="users"
             title={filtered ? "No leads match" : "No leads yet"}
             message={filtered ? "Try another search or filter." : "Add the people you meet. You can follow them up, plan visits on the map and record what they give."}
-            action={filtered ? undefined : <LinkButton href="/devotee/leads/new" icon="userPlus">Add your first lead</LinkButton>}
+            action={
+              filtered ? undefined : (
+                <div className="flex flex-wrap justify-center gap-2">
+                  <LinkButton href="/devotee/leads/new" icon="userPlus">Add your first lead</LinkButton>
+                  <Button variant="secondary" icon="upload" onClick={() => setUploading(true)}>Upload a file</Button>
+                </div>
+              )
+            }
           />
         </Card>
       ) : (
@@ -197,6 +209,7 @@ function LeadsScreen() {
       </Link>
 
       {logging && <LogFollowUpDialog lead={logging} onClose={() => setLogging(null)} />}
+      {uploading && <LeadUploadDialog onClose={() => setUploading(false)} />}
     </div>
   );
 }

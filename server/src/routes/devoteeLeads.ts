@@ -12,6 +12,7 @@
 //   GET    /leads/map                 every lead with a map pin
 //   GET    /leads/:id                 one lead and its history
 //   POST   /leads                     add
+//   POST   /leads/import              many from an Excel or CSV file: check first, then add
 //   PATCH  /leads/:id                 edit (only the fields sent)
 //   DELETE /leads/:id                 remove, with its history
 //   POST   /leads/:id/activities      log a follow-up; moves the status and the next follow-up
@@ -30,6 +31,7 @@ import pool from '../db/pool';
 import { authenticate } from '../middleware/auth';
 import { APP_TIMEZONE } from '../bootTimezone';
 import { STATUSES, logActivity, parseActivity, parseLead } from '../services/devoteeLeads';
+import { atTemple, readLeadFile } from '../services/devoteeImport';
 import { pushPublicKey, removeSubscription, saveSubscription } from '../services/webPush';
 import { deleteRecordingsForLead } from '../services/devoteeCalls';
 import * as storage from '../services/storage';
@@ -311,6 +313,70 @@ router.post(
       }
       throw err;
     }
+  })
+);
+
+/**
+ * Upload many leads from an Excel or CSV file: { filename, base64, apply }. Without apply it only
+ * checks and reports (ready, already in your leads, problems by row); with apply it adds the rows
+ * that are ready. Nothing already there is changed.
+ */
+router.post(
+  '/leads/import',
+  handle('import', async (req, res, owner) => {
+    const filename = String(req.body?.filename ?? 'leads.csv').slice(0, 255);
+    const base64 = String(req.body?.base64 ?? '');
+    if (!base64) return res.status(400).json({ error: 'No file received.' });
+    const existing = new Set<string>(
+      (await pool.query(`SELECT phone FROM devotee_leads WHERE owner_id = $1`, [owner])).rows.map((r) => r.phone as string)
+    );
+    let report;
+    try {
+      report = await readLeadFile(Buffer.from(base64, 'base64'), filename, existing);
+    } catch (err) {
+      const e = err as Error & { status?: number };
+      return res.status(e.status ?? 400).json({ error: e.message || 'Could not read this file.' });
+    }
+    const summary = {
+      sheet: report.sheet,
+      columns: report.columns,
+      total: report.total,
+      ready: report.ready.length,
+      problems: report.problems,
+      duplicates: report.duplicates,
+      preview: report.ready.slice(0, 8).map((r) => ({
+        row: r.row,
+        name: r.fields.name,
+        phone: r.fields.phone,
+        area: r.fields.area ?? r.fields.city ?? null,
+        follow_up: r.fields.next_follow_up_at ? atTemple((r.fields.next_follow_up_at as Date).toISOString()) : null,
+      })),
+    };
+    if (req.body?.apply !== true) return res.json({ ...summary, added: 0 });
+
+    // All or nothing, so a fault part-way never leaves half a file in.
+    const client = await pool.connect();
+    let added = 0;
+    try {
+      await client.query('BEGIN');
+      for (const r of report.ready) {
+        const cols = Object.keys(r.fields);
+        const ins = await client.query(
+          `INSERT INTO devotee_leads (owner_id, ${cols.join(', ')})
+           VALUES ($1, ${cols.map((_, i) => `$${i + 2}`).join(', ')})
+           ON CONFLICT (owner_id, phone) DO NOTHING`,
+          [owner, ...Object.values(r.fields)]
+        );
+        added += ins.rowCount ?? 0;
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+    res.json({ ...summary, added });
   })
 );
 

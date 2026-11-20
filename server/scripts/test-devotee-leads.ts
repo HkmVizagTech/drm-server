@@ -258,6 +258,41 @@ async function main() {
   await devoteeReminderTick();
   check('a subscription the push service has dropped is forgotten', (await pool.query(`SELECT COUNT(*)::int n FROM push_subscriptions WHERE user_id = $1`, [A])).rows[0].n === 0);
 
+  console.log('\n--- bulk upload from a file ---');
+  const csv = [
+    'Full Name,WhatsApp Number,Area,City,Priority,Interest,Birthday,Next follow-up,Notes',
+    'Upload One,98490 11111,MVP Colony,Visakhapatnam,High,Annadanam,14-05-1980,25-12-2026 5:30 pm,From the stall',
+    'Upload Two,+91 9849022222,Siripuram,,low,Temple Construction,,,',
+    'No Number,,Gajuwaka,,,,,,',
+    'Bad Date,9849033333,,,,,31/02/19xx,,',
+    'Upload One Again,9849011111,,,,,,,',
+    `Already Mine,${'9123456780'},,,,,,,`,
+    ',,,,,,,,',
+  ].join('\n');
+  const b64 = Buffer.from(csv).toString('base64');
+  r = await call('POST', '/api/devotee/leads/import', { filename: 'mine.csv', base64: b64 }, tA);
+  check('checking a file writes nothing and reports it', r.status === 200 && r.body.added === 0 && r.body.total === 6 && r.body.ready === 2, r.body);
+  check('headings are matched loosely', r.body.columns.name === 'Full Name' && r.body.columns.phone === 'WhatsApp Number', r.body.columns);
+  check('a row without a number, and one with a bad date, are named with the reason', r.body.problems.length === 2 && r.body.problems.some((p: any) => p.row === 4 && /mobile/i.test(p.reason)) && r.body.problems.some((p: any) => p.row === 5 && /Birthday/.test(p.reason)), r.body.problems);
+  check('a number repeated in the file, and one already a lead, are left out', r.body.duplicates.length === 2 && r.body.duplicates.some((d: any) => /row 2/.test(d.reason)) && r.body.duplicates.some((d: any) => /Already/.test(d.reason)), r.body.duplicates);
+  check('nothing was saved by checking', (await pool.query(`SELECT COUNT(*)::int n FROM devotee_leads WHERE phone LIKE '984901111%'`)).rows[0].n === 0);
+  r = await call('POST', '/api/devotee/leads/import', { filename: 'mine.csv', base64: b64, apply: true }, tA);
+  check('adding saves exactly the ready rows', r.status === 200 && r.body.added === 2, r.body);
+  const up = (await pool.query(`SELECT name, priority, interest, area, date_of_birth, next_follow_up_at, notes FROM devotee_leads WHERE owner_id = $1 AND phone = '9849011111'`, [A])).rows[0];
+  check('with every column read: priority, interest, birthday, follow-up time (IST), notes',
+    up?.priority === 'hot' && up.interest === 'annadanam' && up.area === 'MVP Colony' && up.date_of_birth === '1980-05-14' &&
+      new Date(up.next_follow_up_at).toISOString() === '2026-12-25T12:00:00.000Z' && up.notes === 'From the stall', up);
+  check('"low" and "Temple Construction" are understood', (await pool.query(`SELECT priority, interest FROM devotee_leads WHERE phone = '9849022222'`)).rows[0]?.interest === 'temple_construction');
+  check("the existing lead was not touched", (await pool.query(`SELECT name FROM devotee_leads WHERE id = $1`, [lakshmi])).rows[0].name === 'Lakshmi');
+  r = await call('POST', '/api/devotee/leads/import', { filename: 'mine.csv', base64: b64, apply: true }, tA);
+  check('uploading the same file again adds nothing', r.body.added === 0 && r.body.ready === 0, r.body);
+  check("another devotee's leads are untouched", (await pool.query(`SELECT COUNT(*)::int n FROM devotee_leads WHERE owner_id = $1`, [B])).rows[0].n === 1);
+  r = await call('POST', '/api/devotee/leads/import', { filename: 'x.csv', base64: Buffer.from('Area,City\nMVP,Vizag').toString('base64') }, tA);
+  check('a file without Name and Mobile columns is refused with what it found', r.status === 400 && /Name column and a Mobile column/.test(r.body.error), r.body);
+  r = await call('POST', '/api/devotee/leads/import', { filename: 'mine.csv', base64: b64 }, tAdmin);
+  check('an admin cannot upload into a devotee portal', r.status === 403, r);
+  await pool.query(`DELETE FROM devotee_leads WHERE phone IN ('9849011111', '9849022222')`);
+
   console.log('\n--- call recording on a devotee\'s phone ---');
   r = await call('POST', '/api/app/devices', { install_id: 'install-devotee-a', model: 'Test' }, tA);
   check('a devotee can link their phone', r.status === 200 && !!r.body.device_key, r);
