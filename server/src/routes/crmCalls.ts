@@ -66,6 +66,8 @@ function buildCallFilters(q: Record<string, unknown>, user?: { userId?: string; 
   } else {
     conds.push(`a.user_id = ${p(user?.userId ?? null)}::uuid`);
   }
+  // Never a devotee's: they are not DRM callers, and the team's log is not theirs to show.
+  conds.push(`NOT EXISTS (SELECT 1 FROM users du WHERE du.id = a.user_id AND du.role = 'devotee')`);
 
   // Indian calendar days; the session runs on IST, so ::date is IST midnight.
   const from = DATE_RE.test(String(q.from ?? '')) ? String(q.from) : null;

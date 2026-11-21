@@ -30,7 +30,9 @@
 const SAME_CALL = (pc: string, at: string) => `${at} BETWEEN ${pc}.started_at - INTERVAL '10 minutes'
   AND ${pc}.started_at + make_interval(secs => ${pc}.duration_seconds) + INTERVAL '60 minutes'`;
 
-export const CALL_EVENTS = `(
+// Devotees are not DRM callers: their calls live in their own portal (services/devoteeCalls.ts)
+// and never count here, whatever a phone once sent.
+export const CALL_EVENTS = `(SELECT ev.* FROM (
   SELECT a.user_id, a.lead_id, a.occurred_at,
          COALESCE(a.direction, 'outbound')::text AS direction,
          COALESCE(a.connected, FALSE) AS connected,
@@ -69,7 +71,8 @@ export const CALL_EVENTS = `(
          NULL::int, 'manual'::text, NULL::text,
          'Sankalpam call'::text, NULL::text, 'sankalpam'::text
     FROM sankalpam_calls sc
-)`;
+) ev
+ WHERE NOT EXISTS (SELECT 1 FROM users du WHERE du.id = ev.user_id AND du.role = 'devotee'))`;
 
 /**
  * The breakdown that goes beside a total, over CALL_EVENTS rows aliased `a`:

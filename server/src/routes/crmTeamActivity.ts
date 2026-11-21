@@ -94,8 +94,9 @@ async function scorecards(day: string): Promise<{ rows: Scorecard[] }> {
     pool.query(
       `SELECT u.id, u.name, u.role, u.last_login_at
          FROM users u
-        WHERE (u.role = 'caller' AND u.active)
-           OR u.id IN (SELECT a.user_id FROM lead_activities a WHERE ${OUTBOUND_CALL} AND ${IN_DAY})
+        WHERE u.role <> 'devotee'
+          AND ((u.role = 'caller' AND u.active)
+           OR u.id IN (SELECT a.user_id FROM lead_activities a WHERE ${OUTBOUND_CALL} AND ${IN_DAY}))
         ORDER BY u.name`,
       [day]
     ),

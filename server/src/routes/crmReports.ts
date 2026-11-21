@@ -421,7 +421,8 @@ router.get('/dashboard', async (req, res) => {
                 COUNT(*) FILTER (WHERE recording_status = 'none')::int AS no_recording
            FROM phone_calls
           WHERE ${WINDOW('started_at', 1, 2)}
-            AND ($3::uuid IS NULL OR user_id = $3::uuid)`,
+            AND ($3::uuid IS NULL OR user_id = $3::uuid)
+            AND NOT EXISTS (SELECT 1 FROM users du WHERE du.id = phone_calls.user_id AND du.role = 'devotee')`,
         [from, to, me]
       ),
       // CALLS BY TYPE, per caller: what kind of work each call was. One kind per call, in this order:
@@ -1056,9 +1057,10 @@ const CALLER_REPORT_SQL = `WITH calls AS (
         -- claimed QR payments has conversions of zero and would have dropped
         -- off the report entirely - showing a supervisor nothing at all for
         -- somebody who raised real money.
-        WHERE COALESCE(c.calls,0) > 0
+        WHERE u.role <> 'devotee'
+          AND (COALESCE(c.calls,0) > 0
            OR COALESCE(v.conversions,0) > 0
-           OR COALESCE(w.credits,0) > 0
+           OR COALESCE(w.credits,0) > 0)
 
         UNION ALL
 

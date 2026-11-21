@@ -244,7 +244,7 @@ router.get('/users', authenticate, authorize('admin'), async (_req, res) => {
         `SELECT id, name, email, role, created_at,
                 TRUE AS active, NULL::timestamptz AS last_login_at,
                 0 AS assigned_leads, 0 AS open_leads, 0 AS calls_7d
-           FROM users ORDER BY name`
+           FROM users WHERE role <> 'devotee' ORDER BY name`
       );
       return res.json({
         users: rows.rows,
@@ -270,6 +270,7 @@ router.get('/users', authenticate, authorize('admin'), async (_req, res) => {
            SELECT COUNT(*)::int AS calls_7d FROM ${CALL_EVENTS} a
             WHERE a.user_id = u.id AND a.occurred_at > NOW() - INTERVAL '7 days'
          ) c ON TRUE
+        WHERE u.role <> 'devotee'
         ORDER BY u.active DESC, u.name`
     );
     res.json({ users: rows.rows });

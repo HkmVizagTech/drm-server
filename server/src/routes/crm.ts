@@ -246,7 +246,9 @@ router.get('/config', async (_req, res) => {
       pool.query(`SELECT * FROM crm_statuses WHERE active ORDER BY sort_order, label`),
       pool.query(`SELECT * FROM crm_dispositions WHERE active ORDER BY sort_order, label`),
       pool.query(`SELECT key, value FROM crm_settings`),
-      pool.query(`SELECT id, name, email, role FROM users ORDER BY name`),
+      // DRM's own people only. Devotees work in their own portal: they are nobody's caller,
+      // nobody assigns them leads, and their names stay out of DRM's dropdowns.
+      pool.query(`SELECT id, name, email, role FROM users WHERE role <> 'devotee' ORDER BY name`),
       // The sheets, for anywhere a screen wants to narrow to one of them.
       // Only those that actually produced leads: a draft nobody committed is
       // an entry in the upload history, not something to filter a board by.

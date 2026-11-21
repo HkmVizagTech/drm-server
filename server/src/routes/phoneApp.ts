@@ -323,7 +323,8 @@ router.get('/calls', authenticate, authorize(...LIST_ROLES), async (req, res) =>
     values.push(v);
     return `$${values.length}`;
   };
-  const conds: string[] = [];
+  // Never a devotee's: their calls are theirs alone (services/devoteeCalls.ts).
+  const conds: string[] = [`NOT EXISTS (SELECT 1 FROM users du WHERE du.id = pc.user_id AND du.role = 'devotee')`];
   if (!reviewer) conds.push(`pc.user_id = ${p(req.user!.userId)}::uuid`);
   else if (q.user_id && q.user_id !== 'all' && isUuid(q.user_id)) conds.push(`pc.user_id = ${p(q.user_id)}::uuid`);
   if (q.from && DATE_RE.test(q.from)) conds.push(`pc.started_at >= ${p(q.from)}::date`);
