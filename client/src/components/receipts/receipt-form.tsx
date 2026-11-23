@@ -73,6 +73,7 @@ export function DonorFields({
   lookupHint,
   showAccount = true,
   listForAnnadan = false,
+  askAddress = false,
 }: {
   v: ReceiptValues;
   set: (patch: Partial<ReceiptValues>) => void;
@@ -85,6 +86,8 @@ export function DonorFields({
   showMyDonor: boolean;
   myDonorLocked?: string | null;
   lookupHint?: string | null;
+  /** Always ask for the address (the devotee's form), needed only for 80G or Prasadam. */
+  askAddress?: boolean;
 }) {
   // HKM Vizag receipts pick the seva from the list; if the list could not be loaded
   // (or is empty) the typed seva is used instead, so nobody is stopped.
@@ -170,8 +173,8 @@ export function DonorFields({
             />
           </Field>
         )}
-        {(v.want80G || v.wantPrasadam) && (
-          <Field label="Address" htmlFor="r-address" required>
+        {(askAddress || v.want80G || v.wantPrasadam) && (
+          <Field label="Address" htmlFor="r-address" required={v.want80G || v.wantPrasadam}>
             <Textarea id="r-address" rows={2} value={v.address} onChange={(e) => set({ address: e.target.value })} />
           </Field>
         )}

@@ -82,7 +82,7 @@ export function DevoteeReceiptDialog({
         sevak_name: v.onNameOf.trim() || undefined,
         want_certificate: v.want80G,
         pan_number: v.want80G ? v.pan.trim().toUpperCase() : undefined,
-        prasadam_address: v.want80G ? v.address.trim() : undefined,
+        address: v.address.trim() || undefined,
       });
       setDone({
         id: r.id ?? "",
@@ -183,7 +183,7 @@ export function DevoteeReceiptDialog({
           </Field>
         )}
 
-        <DonorFields v={v} set={set} showPrasadam={false} showSite={false} showMyDonor={false} />
+        <DonorFields v={v} set={set} showPrasadam={false} showSite={false} showMyDonor={false} askAddress />
       </div>
     </Modal>
   );

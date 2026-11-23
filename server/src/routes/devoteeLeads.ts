@@ -696,7 +696,7 @@ router.post(
           [
             owner, await leadForReceipt(owner, b.lead_id, mobile), dccAccountTypeOf(seva) === 5 ? 'TSC' : 'HKMI', seva.id,
             seva.name.slice(0, 200), dcc.category, dcc.subCategory, String(dcc.subCategoryCode).slice(0, 40),
-            name.slice(0, 160), mobile, email || null, want80G ? pan : null, want80G ? address : null, want80G ? pin : null,
+            name.slice(0, 160), mobile, email || null, want80G ? pan : null, address.slice(0, 500) || null, pin,
             String(b.sevak_name ?? '').trim().slice(0, 160) || null, amount, mode, ref.slice(0, 80) || null, txn, paidOn,
             enrolled.id, enrolled.code,
           ]
