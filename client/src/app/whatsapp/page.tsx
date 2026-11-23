@@ -12,7 +12,6 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSessionState } from "@/lib/session-state";
-import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { apiClient, apiUrl } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -21,6 +20,7 @@ import { Alert, Avatar, Badge, Button, EmptyState, Input, SearchInput, Skeleton,
 import { Icon } from "@/components/icons";
 import { toast } from "@/components/toast";
 import { WA_PREFILL_KEY } from "@/components/seva-wall/wall-table";
+import { WhatsAppDonorProfile } from "@/components/whatsapp/donor-profile";
 
 interface Conv {
   id: string;
@@ -348,6 +348,7 @@ function ChatInner() {
   const [now, setNow] = useState(() => Date.now());
   const [extra, setExtra] = useState<Conv | null>(null); // a chat just started, not in the list yet
   const [wallRef, setWallRef] = useState<string | null>(null); // a Seva wall brick being sent from here
+  const [profileOpen, setProfileOpen] = useState(false); // the donor profile, opened on the name
   const cursor = useRef<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -770,14 +771,21 @@ function ChatInner() {
           <>
             <header className="flex items-center gap-3 border-b border-line-soft bg-surface px-4 py-3">
               <button className="-ml-1 grid h-8 w-8 place-items-center rounded-full hover:bg-sunken md:hidden" onClick={() => setActiveId(null)} aria-label="Back to chats"><Icon name="arrowLeft" size={18} /></button>
-              <Avatar name={current.name || current.phone} size="lg" />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-[15px] font-semibold leading-tight text-ink">{current.name || shownPhone(current.phone)}</p>
-                <p className="mt-0.5 truncate text-xs text-ink-muted">
-                  {shownPhone(current.phone)}
-                  {current.person_id && <> · <Link className="font-medium text-brand-700 hover:underline" href={`/people/${current.person_id}`}>Open donor</Link></>}
-                </p>
-              </div>
+              <button
+                type="button"
+                onClick={() => setProfileOpen(true)}
+                className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left hover:opacity-80"
+                aria-label="Open donor profile"
+                title="Donor profile and donations"
+              >
+                <Avatar name={current.name || current.phone} size="lg" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[15px] font-semibold leading-tight text-ink">{current.name || shownPhone(current.phone)}</span>
+                  <span className="mt-0.5 block truncate text-xs text-ink-muted">
+                    {shownPhone(current.phone)} · <span className="font-medium text-brand-700">Donor profile</span>
+                  </span>
+                </span>
+              </button>
               <div className="hidden items-center gap-2 sm:flex">
                 {current.opted_out ? <Badge tone="danger">Said STOP</Badge> : replied ? <Badge tone="good" dot>Replied · {leftLabel(windowMs)} left to chat freely</Badge> : null}
               </div>
@@ -794,6 +802,14 @@ function ChatInner() {
                 <span className="text-xs text-ink-faint">{current.assigned_name}</span>
               )}
             </header>
+            {profileOpen && (
+              <WhatsAppDonorProfile
+                conversationId={current.id}
+                name={current.name || shownPhone(current.phone)}
+                phone={shownPhone(current.phone)}
+                onClose={() => setProfileOpen(false)}
+              />
+            )}
 
             <div ref={scroller}
               onScroll={(e) => { const el = e.currentTarget; const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80; stick.current = near; if (near) setAway(0); }}
