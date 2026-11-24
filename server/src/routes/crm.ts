@@ -46,7 +46,7 @@ import {
 // counts as callable changes the queue and every list's count together.
 import { CALLABLE, DUE_NOW, FOLLOW_UP_LISTED, FROM_DONATIONS_PAGE, LIST_MATCH, NOT_CLAIMED_BY_OTHERS, listPredicate, loadList, maxAttempts } from './crmLists';
 import { GIVEN } from '../services/leadGiven';
-import { creditRecentLinkSends, creditUtmLinks, tidyLinkCredits } from '../services/linkCredits';
+import { creditRecentLinkSends, creditUtmLinks, refreshShortLinkCodes, tidyLinkCredits } from '../services/linkCredits';
 
 const router = Router();
 router.use(authenticate);
@@ -138,6 +138,11 @@ async function reconcileConversions(force = false): Promise<number> {
   // nobody has claimed.
   await tidyLinkCredits().catch((e) =>
     console.error('crm.reconcileConversions tidy link credits failed:', (e as Error).message)
+  );
+  // Short links first checked against the website, so a link holding a code the website never sends
+  // is corrected before the payments waiting for it are matched.
+  await refreshShortLinkCodes().catch((e) =>
+    console.error('crm.reconcileConversions short link codes failed:', (e as Error).message)
   );
   // Then payments carrying the UTM of a caller's own link (My links).
   await creditUtmLinks().catch((e) =>

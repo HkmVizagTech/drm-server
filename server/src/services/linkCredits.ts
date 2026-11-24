@@ -29,6 +29,7 @@ import type { PoolClient } from 'pg';
 import pool from '../db/pool';
 import { recordCredit } from './credits';
 import { QR_DONATION_MATCH } from './qrDonationDate';
+import { resolveShortLink, ShortLinkLookupError } from './hkmvClient';
 
 /** How long after a link is sent a payment from that donor still counts for the sender. */
 export const LINK_CREDIT_DAYS = 7;
@@ -168,6 +169,87 @@ export function utmOf(url: string): { source: string | null; medium: string | nu
   } catch {
     return { source: null, medium: null, campaign: null };
   }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Short links: harekrishnavizag.org/go/<code>                             */
+/* ---------------------------------------------------------------------- */
+//
+// A short link made in the website's UTM Builder is redirected to the address stored with it, and the query
+// on the short address is thrown away. So a code DRM adds to the short address never reaches a donation: the
+// donation carries the campaign the short link was made with. Callers' links used to be given a code of DRM's
+// own ("manas-square-foot-seva-manas") that nothing ever sent, and every gift through them - ₹23,100 on
+// Square Foot Seva among them - matched no link and credited nobody. A short link's code is READ from the
+// website instead, and kept in step with it.
+
+/** The code in harekrishnavizag.org/go/<code>, or null when this is not a short link. */
+export function shortLinkCode(url: string): string | null {
+  try {
+    const u = new URL(url);
+    if (!/^(www\.)?harekrishnavizag\.org$/i.test(u.hostname)) return null;
+    return /^\/go\/([a-z0-9_-]{1,40})\/?$/i.exec(u.pathname)?.[1].toLowerCase() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export type ShortLinkUtm = { source: string | null; medium: string | null; campaign: string | null };
+
+/**
+ * The UTM values a short link really carries. `undefined`: not a short link. `null`: no such short link.
+ * Throws ShortLinkLookupError when the website cannot be asked (`notConnected` on a machine with no website).
+ */
+export async function shortLinkUtm(url: string): Promise<ShortLinkUtm | null | undefined> {
+  const code = shortLinkCode(url);
+  if (!code) return undefined;
+  const path = await resolveShortLink(code);
+  return path === null ? null : utmOf(`https://site.invalid${path}`);
+}
+
+let lastShortLinkRefresh = 0;
+/** How often the saved short links are checked against the website. */
+const SHORT_LINK_REFRESH_MS = 30 * 60 * 1000;
+
+/**
+ * Keep every caller's short links carrying the code their short link really sends.
+ *
+ * Fixes the links saved before DRM read short links (they hold a code the website never sends), and keeps up
+ * when somebody edits a short link's campaign in the UTM Builder afterwards. A link is left as it is when the
+ * website cannot be reached, or when the code it carries is also another link's - those credit nobody.
+ * Run before the credits above, so a gift that was waiting for its link is credited in the same pass.
+ * Returns how many links were corrected.
+ */
+export async function refreshShortLinkCodes(db: Db = pool, force = false): Promise<number> {
+  if (!force && Date.now() - lastShortLinkRefresh < SHORT_LINK_REFRESH_MS) return 0;
+  lastShortLinkRefresh = Date.now();
+  const r = await db.query(
+    `SELECT id, url, owner_user_id, utm_source, utm_medium, utm_campaign
+       FROM crm_links
+      WHERE owner_user_id IS NOT NULL AND url ~* '^https?://(www\\.)?harekrishnavizag\\.org/go/'`
+  );
+  let fixed = 0;
+  for (const link of r.rows) {
+    try {
+      const real = await shortLinkUtm(String(link.url));
+      if (!real) continue;
+      if (real.source === link.utm_source && real.medium === link.utm_medium && real.campaign === link.utm_campaign) continue;
+      if (real.campaign && (await codeTakenBy(db, real.campaign, link.owner_user_id, link.id))) {
+        console.error(`linkCredits.refreshShortLinkCodes: ${link.url} carries ${real.campaign}, which another link uses too - left as it is`);
+        continue;
+      }
+      await db.query(`UPDATE crm_links SET utm_source = $2, utm_medium = $3, utm_campaign = $4, updated_at = NOW() WHERE id = $1`, [
+        link.id,
+        real.source,
+        real.medium,
+        real.campaign,
+      ]);
+      fixed++;
+    } catch (e) {
+      if (e instanceof ShortLinkLookupError) break; // the website is not answering: try again at the next pass
+      console.error('linkCredits.refreshShortLinkCodes failed for one link:', (e as Error).message);
+    }
+  }
+  return fixed;
 }
 
 /** The URL with its utm_campaign set (or the URL unchanged if it cannot be read). */

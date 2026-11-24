@@ -441,6 +441,7 @@ function LinkForm({
         />
         <p className="mt-1 text-xs text-ink-muted">
           Share it anywhere. Payments with its utm_campaign count for you. Leave utm_campaign out and DRM adds your own.
+          A short link from the website (harekrishnavizag.org/go/...) already carries its own code, which DRM reads for you.
         </p>
       </Field>
 

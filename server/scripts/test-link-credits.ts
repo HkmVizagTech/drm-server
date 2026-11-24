@@ -13,7 +13,7 @@ import crmLinksRoutes from '../src/routes/crmLinks';
 import crmReportsRoutes from '../src/routes/crmReports';
 import { upsertDonorSnapshot } from '../src/services/hkmvSync';
 import { recordCredit } from '../src/services/credits';
-import { creditRecentLinkSends, creditUtmLinks, tidyLinkCredits } from '../src/services/linkCredits';
+import { creditRecentLinkSends, creditUtmLinks, refreshShortLinkCodes, tidyLinkCredits } from '../src/services/linkCredits';
 
 const dbName = (process.env.DATABASE_URL ?? '').split('/').pop()?.split('?')[0] ?? '';
 if (!/_test$/.test(dbName)) {
@@ -238,6 +238,62 @@ async function main() {
   const wrong = (await pool.query(`SELECT status, reversed_reason FROM caller_credits WHERE donation_id = $1`, [counter])).rows[0];
   check('reversed, with the reason', wrong.status === 'reversed' && /entered by hand/.test(wrong.reversed_reason), wrong);
   check('online link payments are left alone', (await credits(ANA)).some((x: any) => x.amount === 251));
+
+  console.log('\n13. website short links: the code to track is the one the short link really sends');
+  // A stand-in for the website. A short link is redirected to the address stored with it and the query on the
+  // short address is thrown away, so that stored campaign is what a donation arrives with.
+  const site = http.createServer((q, r) => {
+    const code = /\/short-links\/resolve\/([^/?]+)/.exec(q.url ?? '')?.[1];
+    const paths: Record<string, string> = {
+      'ana-sqft': '/sqft-seva-campaign?utm_source=call&utm_medium=whatsapp&utm_campaign=ana-sqft-2',
+      'ana-old': '/gau-seva?utm_source=call&utm_medium=whatsapp&utm_campaign=ana-old-2',
+    };
+    if (code === 'ana-down') { r.statusCode = 500; return r.end('{}'); }
+    if (!code || !paths[code]) { r.statusCode = 404; return r.end('{}'); }
+    r.setHeader('content-type', 'application/json');
+    r.end(JSON.stringify({ path: paths[code] }));
+  });
+  await new Promise((r) => site.listen(0, '127.0.0.1', () => r(null)));
+  process.env.HKMV_API_URL = `http://127.0.0.1:${(site.address() as any).port}`;
+
+  const short = await req('POST', '/api/crm/links', as(ANA), {
+    label: 'Square Foot Seva Ana', url: 'https://www.harekrishnavizag.org/go/ana-sqft?utm_campaign=ana-square-foot-seva-ana', shared: false,
+  });
+  check("a short link is saved with the code the website sends, not one DRM makes up", short.status === 201 && short.utm_campaign === 'ana-sqft-2' && short.utm_source === 'call' && short.utm_medium === 'whatsapp', short);
+  await pay('9000000010', 23100, 'ana-sqft-2', 'Big Donor');
+  check('so a gift through it counts for Ana', (await credits(ANA)).some((x: any) => x.amount === 23100), await credits(ANA));
+
+  const gone = await req('POST', '/api/crm/links', as(ANA), { label: 'Nothing', url: 'https://www.harekrishnavizag.org/go/ana-gone', shared: false });
+  check('a short link that does not exist is refused', gone.status === 409 && /does not exist/.test(gone.error), gone);
+  const down = await req('POST', '/api/crm/links', as(ANA), { label: 'Down', url: 'https://www.harekrishnavizag.org/go/ana-down', shared: false });
+  check('and when the website cannot be asked it is not saved with a guess', down.status === 409 && /Try again/.test(down.error), down);
+  check('nothing was saved for either', (await pool.query(`SELECT COUNT(*)::int AS n FROM crm_links WHERE label IN ('Nothing', 'Down')`)).rows[0].n === 0);
+
+  console.log('\n14. a link saved with a made-up code (as before) is corrected, and the gift waiting for it counts');
+  const oldLink = (await pool.query(
+    `INSERT INTO crm_links (label, url, owner_user_id, created_by, utm_campaign)
+     VALUES ('Gau Seva Ana', 'https://www.harekrishnavizag.org/go/ana-old?utm_campaign=ana-gau-seva-ana', $1, $1, 'ana-gau-seva-ana') RETURNING id`, [ANA])).rows[0].id;
+  await pay('9000000011', 5000, 'ana-old-2', 'Waiting Donor');
+  check('the gift matches nothing while the link holds the wrong code', !(await credits(ANA)).some((x: any) => x.amount === 5000), await credits(ANA));
+  check('the check corrects the link', (await refreshShortLinkCodes(pool, true)) >= 1);
+  const healed = (await pool.query(`SELECT utm_source, utm_medium, utm_campaign FROM crm_links WHERE id = $1`, [oldLink])).rows[0];
+  check('to what the short link sends', healed.utm_campaign === 'ana-old-2' && healed.utm_source === 'call' && healed.utm_medium === 'whatsapp', healed);
+  await creditUtmLinks();
+  const waiting = (await credits(ANA)).filter((x: any) => x.amount === 5000);
+  check('and the waiting gift is credited to Ana, once', waiting.length === 1 && waiting[0].kind === 'link', waiting);
+  await creditUtmLinks();
+  check('a second pass does not double it', (await credits(ANA)).filter((x: any) => x.amount === 5000).length === 1);
+  check('a link already right is left alone', (await refreshShortLinkCodes(pool, true)) === 0);
+
+  console.log('\n15. "Add my code" and copying keep the short link\'s own code');
+  await pool.query(`UPDATE crm_links SET utm_campaign = NULL WHERE id = $1`, [oldLink]);
+  const tracked = await req('POST', `/api/crm/links/${oldLink}/track`, as(ANA));
+  check('Add my code reads the code from the website', tracked.status === 200 && tracked.utm_campaign === 'ana-old-2', tracked);
+  const copy = await req('POST', `/api/crm/links/${short.id}/copy`, as(BHAVIN));
+  check("a copy of Ana's short link carries no code of its own: it is the same link, so payments could not be told apart", copy.status === 201 && copy.utm_campaign === null, copy);
+  await pay('9000000012', 777, 'ana-sqft-2', 'Another Donor');
+  check('and its payments still count for Ana, not Bhavin', (await credits(ANA)).some((x: any) => x.amount === 777) && (await credits(BHAVIN)).every((x: any) => x.amount !== 777));
+  site.close();
 
   server.close();
   await pool.end();

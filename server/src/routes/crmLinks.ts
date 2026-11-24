@@ -43,7 +43,8 @@ import { randomBytes } from 'crypto';
 import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import { greetName } from '../utils/greetName';
-import { codeTakenBy, mintSendToken, personalCode, utmOf, withCampaign } from '../services/linkCredits';
+import { codeTakenBy, mintSendToken, personalCode, shortLinkUtm, utmOf, withCampaign } from '../services/linkCredits';
+import { ShortLinkLookupError } from '../services/hkmvClient';
 
 const router = Router();
 router.use(authenticate);
@@ -70,6 +71,28 @@ function fill(template: string, vars: Record<string, string>): string {
 /* ------------------------------------------------------------------- links */
 
 /**
+ * What a website short link really carries. `undefined`: this is not a short link. An error to show when the
+ * link does not exist or the website cannot be asked. On a machine with no website connected (a test, a dev
+ * machine) there is nothing to read, so the link is kept as it is with no code rather than one made up.
+ */
+async function shortLinkOrError(
+  url: string
+): Promise<undefined | { error: string } | { utm: ReturnType<typeof utmOf> }> {
+  try {
+    const real = await shortLinkUtm(url);
+    if (real === undefined) return undefined;
+    if (real === null) return { error: 'That short link does not exist on the website. Check the address, or make it again in the UTM Builder.' };
+    return { utm: real };
+  } catch (e) {
+    if (e instanceof ShortLinkLookupError) {
+      if (e.notConnected) return { utm: { source: null, medium: null, campaign: null } };
+      return { error: 'Could not read that short link from the website just now, so its tracking code is unknown. Try again in a moment.' };
+    }
+    throw e;
+  }
+}
+
+/**
  * A link's URL as it is saved, and its UTM values.
  *
  * A caller's OWN link (My links) is how payments find their way to that caller
@@ -88,6 +111,23 @@ async function prepareUrl(
 ): Promise<{ url: string; utm: ReturnType<typeof utmOf> } | { error: string }> {
   let utm = utmOf(url);
   if (!ownerId) return { url, utm };
+
+  // A website short link (harekrishnavizag.org/go/...) carries the campaign it was made with, whatever is
+  // added to its address, so that is the code to track - read from the website, never made up here.
+  const short = await shortLinkOrError(url);
+  if (short !== undefined) {
+    if ('error' in short) return short;
+    if (short.utm.campaign) {
+      const taken = await codeTakenBy(pool, short.utm.campaign, ownerId, linkId);
+      if (taken) {
+        return {
+          error: `This short link sends utm_campaign=${short.utm.campaign}, which is also used by ${taken}, so payments through it could not be told apart. Make a short link of your own in the website's UTM Builder.`,
+        };
+      }
+    }
+    return { url, utm: short.utm };
+  }
+
   if (!utm.campaign) {
     const code = await personalCode(pool, ownerId, label, linkId);
     url = withCampaign(url, code);
@@ -585,9 +625,14 @@ router.post('/links/:id/track', async (req, res) => {
     if (!me || cur.rows[0].owner_user_id !== me) {
       return res.status(403).json({ error: 'Only your own links can carry your tracking code.' });
     }
-    const code = await personalCode(pool, me, String(cur.rows[0].label), req.params.id);
-    const url = withCampaign(String(cur.rows[0].url), code);
-    const utm = utmOf(url);
+    // A short link already sends its own code: that is the one to track (see prepareUrl).
+    const short = await shortLinkOrError(String(cur.rows[0].url));
+    if (short && 'error' in short) return res.status(409).json({ error: short.error });
+    if (short && short.utm.campaign && (await codeTakenBy(pool, short.utm.campaign, me, req.params.id))) {
+      return res.status(409).json({ error: `This short link sends utm_campaign=${short.utm.campaign}, which another link uses too. Make a short link of your own in the website's UTM Builder.` });
+    }
+    const url = short ? String(cur.rows[0].url) : withCampaign(String(cur.rows[0].url), await personalCode(pool, me, String(cur.rows[0].label), req.params.id));
+    const utm = short ? short.utm : utmOf(url);
     const r = await pool.query(
       `UPDATE crm_links SET url = $2, utm_source = $3, utm_medium = $4, utm_campaign = $5, updated_at = NOW()
         WHERE id = $1 RETURNING *`,
@@ -618,9 +663,15 @@ router.post('/links/:id/copy', async (req, res) => {
     // The copy gets a utm_campaign of the caller's own, in place of the
     // temple link's, so payments through it count for them wherever they
     // share it (services/linkCredits.ts).
-    const code = me ? await personalCode(pool, me, String(src.rows[0].label)) : null;
+    // A copy of a short link sends the same code as the original, so it is the same link to the website:
+    // its own code is the short link's, or none when the original's code is also somebody else's.
+    const short = me ? await shortLinkOrError(String(src.rows[0].url)) : undefined;
+    if (short && 'error' in short) return res.status(409).json({ error: short.error });
+    const shortCode = short?.utm.campaign ?? null;
+    const shortTaken = shortCode && me ? await codeTakenBy(pool, shortCode, me) : null;
+    const code = me && !short ? await personalCode(pool, me, String(src.rows[0].label)) : null;
     const url = code ? withCampaign(String(src.rows[0].url), code) : String(src.rows[0].url);
-    const utm = utmOf(url);
+    const utm = short ? (shortTaken ? { source: null, medium: null, campaign: null } : short.utm) : utmOf(url);
     const result = await pool.query(
       // The credit columns are deliberately not among the ones copied. A
       // credit_token is unique and identifies ONE link, so duplicating it would

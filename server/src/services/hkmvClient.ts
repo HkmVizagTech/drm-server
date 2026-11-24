@@ -111,6 +111,40 @@ async function siteFetch(site: SiteConfig, path: string, init: RequestInit = {})
   });
 }
 
+/**
+ * Why a short link could not be read: no website is connected here (a test, a dev machine), or the
+ * website did not answer. Callers treat the first as "nothing to look up" and the second as "try again".
+ */
+export class ShortLinkLookupError extends Error {
+  constructor(message: string, readonly notConnected = false) {
+    super(message);
+  }
+}
+
+/**
+ * Where a short link (harekrishnavizag.org/go/<code>) really leads: "/page?utm_source=...&utm_campaign=...", or
+ * null when no such link exists.
+ *
+ * A short link is redirected by the website to the address stored with it - the query on the short address is
+ * thrown away - so the UTM values a donation arrives with are the stored ones, never anything added to the
+ * short address. DRM has to read them from here to know which campaign code a caller's short link carries.
+ * Public on the website, and sent without the visitor header so the lookup is not counted as a click.
+ */
+export async function resolveShortLink(code: string): Promise<string | null> {
+  const site = getSite('hkmv');
+  if (!site.baseUrl || blockedFromTests(site)) throw new ShortLinkLookupError(`${site.label} is not connected.`, true);
+  let res: Response;
+  try {
+    res = await fetch(`${site.baseUrl}/short-links/resolve/${encodeURIComponent(code)}`, { signal: AbortSignal.timeout(8000) });
+  } catch {
+    throw new ShortLinkLookupError(`${site.label} did not answer.`);
+  }
+  if (res.status === 404) return null;
+  if (!res.ok) throw new ShortLinkLookupError(`${site.label} could not look that link up.`);
+  const body = (await res.json().catch(() => ({}))) as { path?: unknown };
+  return typeof body.path === 'string' && body.path.startsWith('/') ? body.path : null;
+}
+
 /* ------------------------------------------------------------------- types */
 
 export interface HkmvPrasadam {
