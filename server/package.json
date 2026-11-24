@@ -79,6 +79,7 @@
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
+    "mongodb": "^6.22.0",
     "music-metadata": "^7.14.0",
     "next": "16.3.4",
     "node-cron": "^4.6.0",

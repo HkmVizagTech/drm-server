@@ -11,6 +11,7 @@ import pool from '../db/pool';
 import { authenticate, authorize } from '../middleware/auth';
 import { addClient, publish } from '../services/waEvents';
 import { searchContacts, syncContacts, syncStatus } from '../services/whatsappContacts';
+import { importHistory, importStatus } from '../services/waHistoryImport';
 import {
   Conversation,
   chatTemplates,
@@ -94,6 +95,18 @@ router.post('/contacts/sync', authorize('admin'), async (_req, res) => {
   const st = await syncStatus();
   if (st.status === 'running') return res.status(202).json({ started: false, running: true });
   void syncContacts();
+  res.status(202).json({ started: true });
+});
+
+// Old chats from the WhatsApp CRM's database: how far the copy has got, and start it. Admin only. It runs in the
+// background and can be run again; it only reads the CRM (services/waHistoryImport.ts).
+router.get('/history/import', authorize('admin'), async (_req, res) => {
+  res.json({ ...(await importStatus()), connected: Boolean(process.env.WA_CRM_MONGODB_URI) });
+});
+router.post('/history/import', authorize('admin'), async (_req, res) => {
+  if (!process.env.WA_CRM_MONGODB_URI) return res.status(503).json({ error: 'The WhatsApp CRM database is not connected to this server yet (WA_CRM_MONGODB_URI).' });
+  if ((await importStatus()).status === 'running') return res.status(202).json({ started: false, running: true });
+  void importHistory();
   res.status(202).json({ started: true });
 });
 

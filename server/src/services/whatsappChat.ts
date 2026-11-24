@@ -556,8 +556,8 @@ const preview = (p: Parsed) => {
   return ({ image: 'Photo', video: 'Video', audio: 'Voice message', document: 'Document', sticker: 'Sticker' } as Record<string, string>)[p.type] ?? '';
 };
 
-const STOP_WORDS = new Set(['stop', 'unsubscribe', 'stop all', 'opt out', 'optout']);
-const START_WORDS = new Set(['start', 'subscribe', 'unstop', 'opt in', 'optin']);
+export const STOP_WORDS = new Set(['stop', 'unsubscribe', 'stop all', 'opt out', 'optout']);
+export const START_WORDS = new Set(['start', 'subscribe', 'unstop', 'opt in', 'optin']);
 
 /**
  * Take in a webhook body. Safe to call twice with the same body: a message id is stored once and a

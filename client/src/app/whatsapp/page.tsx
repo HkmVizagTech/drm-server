@@ -235,8 +235,64 @@ function useChatStream(onEvent: (e: { t: string; c: string }) => void): boolean 
 interface Found { phone: string; name: string | null; in_drm: boolean; person_id: string | null }
 interface SyncState { status: string; page: number; pages: number; stored: number; error: string | null }
 
+interface ImportState { status: string; total: number; scanned: number; imported: number; conversations: number; error: string | null; connected: boolean }
+
+/** Admin: copy the old chats in from the WhatsApp CRM's database. It only reads the CRM, and can be run again. */
+function OldChatsImport({ onDone }: { onDone: () => void }) {
+  const [st, setSt] = useState<ImportState | null>(null);
+  const load = useCallback(() => apiClient.get<ImportState>("/api/wa-chat/history/import").then(setSt).catch(() => undefined), []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  const running = st?.status === "running";
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => void load(), 2000);
+    return () => clearInterval(t);
+  }, [running, load]);
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (running) wasRunning.current = true;
+    else if (wasRunning.current && st?.status === "done") {
+      wasRunning.current = false;
+      toast.success(`${st.imported.toLocaleString("en-IN")} old messages copied in`);
+      onDone();
+    }
+  }, [running, st, onDone]);
+
+  async function start() {
+    try {
+      await apiClient.post("/api/wa-chat/history/import", {});
+      void load();
+    } catch (e) {
+      toast((e as Error).message, { tone: "danger" });
+    }
+  }
+  if (!st) return null;
+  return (
+    <div className="flex items-center justify-between gap-2 border-t border-line-soft pt-2 text-2xs text-ink-muted">
+      <span>
+        {running
+          ? `Copying old chats… ${st.scanned.toLocaleString("en-IN")} of ${st.total.toLocaleString("en-IN")} messages`
+          : st.status === "failed"
+            ? `Copying old chats stopped: ${st.error}`
+            : st.status === "done"
+              ? `Old chats copied from the WhatsApp CRM: ${st.imported.toLocaleString("en-IN")} messages in ${st.conversations.toLocaleString("en-IN")} chats`
+              : st.connected
+                ? "Chats from before DRM was linked to WhatsApp are not here yet"
+                : "The WhatsApp CRM database is not connected to this server"}
+      </span>
+      {!running && st.connected && (
+        <Button size="xs" variant="secondary" icon="refresh" onClick={() => void start()}>
+          {st.status === "done" ? "Copy again" : "Import old chats"}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 /** Find anyone to message: donors in DRM and every contact in the temple's WhatsApp, or type a number. */
-function NewChatPanel({ isAdmin, onPick }: { isAdmin: boolean; onPick: (phone: string, personId: string | null) => void }) {
+function NewChatPanel({ isAdmin, onPick, onImported }: { isAdmin: boolean; onPick: (phone: string, personId: string | null) => void; onImported: () => void }) {
   const [q, setQ] = useState("");
   const [found, setFound] = useState<Found[]>([]);
   const [busy, setBusy] = useState(false);
@@ -316,6 +372,7 @@ function NewChatPanel({ isAdmin, onPick }: { isAdmin: boolean; onPick: (phone: s
         </span>
         {isAdmin && sync?.status !== "running" && <Button size="xs" variant="secondary" icon="refresh" onClick={() => void startSync()}>{sync && sync.stored > 0 ? "Sync again" : "Copy contacts"}</Button>}
       </div>
+      {isAdmin && <OldChatsImport onDone={onImported} />}
     </div>
   );
 }
@@ -712,7 +769,7 @@ function ChatInner() {
         </div>
         {newOpen ? (
           <div className="flex-1 overflow-y-auto border-t border-line-soft p-3">
-            <NewChatPanel isAdmin={user?.role === "admin"} onPick={(phone, personId) => void startChat(phone, personId)} />
+            <NewChatPanel isAdmin={user?.role === "admin"} onPick={(phone, personId) => void startChat(phone, personId)} onImported={() => void loadList()} />
           </div>
         ) : (
         <div className="flex-1 overflow-y-auto border-t border-line-soft">

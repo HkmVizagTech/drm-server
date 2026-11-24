@@ -3206,6 +3206,28 @@ CREATE TABLE IF NOT EXISTS wa_contact_sync (
 );
 INSERT INTO wa_contact_sync (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
+/* Old WhatsApp chats copied in from the WhatsApp CRM's database (services/waHistoryImport.ts). legacy_id is the
+   CRM's own id for the message, so running the copy again never doubles anything - the 45 messages the CRM
+   holds no WhatsApp message id for are the reason wamid alone cannot be the guard. */
+ALTER TABLE wa_messages ADD COLUMN IF NOT EXISTS legacy_id VARCHAR(40);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_wa_msg_legacy ON wa_messages (legacy_id) WHERE legacy_id IS NOT NULL;
+
+/* The state of the last old-chat copy: one row. */
+CREATE TABLE IF NOT EXISTS wa_history_import (
+  id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  status VARCHAR(12) NOT NULL DEFAULT 'idle',   -- idle running done failed
+  total INTEGER NOT NULL DEFAULT 0,             -- messages the CRM holds
+  scanned INTEGER NOT NULL DEFAULT 0,
+  imported INTEGER NOT NULL DEFAULT 0,
+  skipped INTEGER NOT NULL DEFAULT 0,           -- already in DRM (arrived live, or copied before)
+  drafts INTEGER NOT NULL DEFAULT 0,            -- drafts the CRM never sent: left out
+  conversations INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  started_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ
+);
+INSERT INTO wa_history_import (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
 /* "The service is temporarily unavailable" - the operator's message a caller hears when a number cannot be
    reached right now. Treated exactly like No answer / Busy / Switched off: the call is not a conversation,
    the lead comes back in two days, and it counts toward the five unanswered calls. Added as data, so it
