@@ -81,7 +81,15 @@ interface Batch {
   applied_at: string | null;
   uploaded_by_name: string | null;
   stored_rows?: number;
-  detail?: { counts?: Counts; headers?: string[]; mapping?: Record<string, number>; external_total?: number };
+  detail?: {
+    counts?: Counts;
+    headers?: string[];
+    mapping?: Record<string, number>;
+    external_total?: number;
+    shared_amount?: number;
+    unreachable_amount?: number;
+    preacher_codes?: string[];
+  };
   // The original workbook, when file storage kept one. Absent on uploads made
   // before storage was set up - their rows are all still here.
   file_key?: string | null;
@@ -119,6 +127,25 @@ const FIELD_LABELS: Record<string, string> = {
   remarks: "Remarks",
 };
 
+/** How long a file that was read but not added is still offered for review when the page is opened again. */
+const DRAFT_DAYS = 7;
+
+/**
+ * A draft kept on the server - read earlier, never added - as the review card needs it.
+ * Without this the card existed only in the page's memory right after the upload: refresh the page and
+ * the sheet sat in the list as "Not added" with nothing to press.
+ */
+const asDraft = (b: Batch): Batch => ({
+  ...b,
+  counts: b.detail?.counts,
+  headers: b.detail?.headers,
+  mapping: b.detail?.mapping,
+  external_total: b.detail?.external_total,
+  shared_amount: b.detail?.shared_amount,
+  unreachable_amount: b.detail?.unreachable_amount,
+  preacher_codes: b.detail?.preacher_codes,
+});
+
 export default function UploadsPage() {
   const [drafts, setDrafts] = useState<Batch[]>([]);
   const [history, setHistory] = useState<Batch[]>([]);
@@ -133,6 +160,17 @@ export default function UploadsPage() {
     try {
       const d = await apiClient.get<{ batches: Batch[] }>("/api/crm/import/batches");
       setHistory(d.batches);
+      // Drafts still waiting on the server come back as review cards, next to any just read in this visit.
+      const cutoff = Date.now() - DRAFT_DAYS * 86_400_000;
+      const waiting = d.batches
+        .filter((b) => b.status === "draft" && b.detail?.counts && new Date(b.created_at).getTime() > cutoff)
+        .map(asDraft);
+      setDrafts((cur) => {
+        const stillDrafts = new Set(d.batches.filter((b) => b.status === "draft").map((b) => b.id));
+        const kept = cur.filter((c) => c.error || stillDrafts.has(c.id));
+        const have = new Set(kept.map((c) => c.id));
+        return [...kept, ...waiting.filter((w) => !have.has(w.id))];
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load. Try again.");
     }
