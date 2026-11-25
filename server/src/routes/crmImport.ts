@@ -576,7 +576,9 @@ router.post('/import/batches/:id/apply', async (req, res) => {
           r.amount_total,
           r.amount_recent,
           r.last_donation_at,
-          `${batch.filename}${batch.sheet_name ? ` (${batch.sheet_name})` : ''}`,
+          // leads.external_source is 60 characters. A file called "subhojanam donors Sep 2025 (not in DRM yet).xlsx"
+          // with a sheet of its own came to 81, and the database refused the whole add - nothing was saved.
+          `${batch.filename}${batch.sheet_name ? ` (${batch.sheet_name})` : ''}`.slice(0, 60),
           r.account_type,
           r.account_count,
         ]
