@@ -44,7 +44,18 @@ import {
   Thead,
   buttonSecondary,
 } from "@/components/ui";
-import { downloadFromApi, SPREADSHEET_ACCEPT, toBase64 } from "@/lib/spreadsheet";
+import { downloadFromApi, downloadSample, SPREADSHEET_ACCEPT, toBase64 } from "@/lib/spreadsheet";
+
+/**
+ * The sample file: the headings this upload recognises, with three example rows. Only Mobile Number is needed.
+ * (Dates are written 2026-05-14: a date typed 14-05-2026 is not read as one.)
+ */
+export const UPLOAD_SAMPLE: string[][] = [
+  ["Donor Number", "Donor Name", "Mobile Number", "Enrolled By", "Account Type", "Last Donation Date", "Total Amount Donated", "Remarks"],
+  ["D1001", "Ravi Kumar", "9876543210", "", "HKMI", "2026-05-14", "5000", "Gave for Annadanam last year"],
+  ["", "Lakshmi Devi", "9123456780", "", "", "", "", "Met at the Janmashtami stall"],
+  ["", "Suresh Reddy", "9988776655", "", "", "", "", ""],
+];
 
 interface Counts {
   new: number;
@@ -234,6 +245,20 @@ export default function UploadsPage() {
           <p className="text-sm font-medium text-ink">
             {busy ? "Reading file…" : "Drop an Excel or CSV file here, or tap to pick one"}
           </p>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 text-xs text-ink-muted">
+          <span>
+            Only <strong className="text-ink">Mobile Number</strong> is needed. Also read: Donor Name, Donor Number, Enrolled By, Account Type, Last
+            Donation Date, Total Amount Donated and Remarks. Anything else in the file is kept but not used.
+          </span>
+          <button
+            type="button"
+            onClick={() => downloadSample("leads-upload-sample.csv", UPLOAD_SAMPLE)}
+            className="inline-flex items-center gap-1.5 font-semibold text-brand-700 hover:underline"
+          >
+            <Icon name="download" size={15} />
+            Download sample format
+          </button>
         </div>
       </Card>
 
