@@ -16,6 +16,7 @@ import { toast } from "@/components/toast";
 import { Alert, Button, Card, DropdownMenu, EmptyState, Icon, SegmentedControl, Skeleton } from "@/components/ui";
 import { SourceChip } from "./source-chip";
 import { CallBackDialog } from "./call-tools";
+import { useDonorProfile } from "./donor-profile-context";
 
 type Need = "days" | "gotram" | "check";
 type Counts = { need_days: number; need_gotram: number; need_check?: number };
@@ -29,6 +30,7 @@ export function NeedDetailsView({
   onEdit: (id: string) => void;
   onChanged: () => void;
 }) {
+  const openProfile = useDonorProfile();
   const [need, setNeed] = useState<Need>("days");
   const [data, setData] = useState<{ donors: SankalpDonor[]; total: number; counts?: Counts } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -123,7 +125,7 @@ export function NeedDetailsView({
                 <li key={d.id} className={`flex flex-wrap items-start gap-x-4 gap-y-2.5 px-4 py-3.5 sm:px-5 ${dueNow ? "bg-amber-50/60" : ""}`}>
                   <div className="min-w-0 flex-[1_1_14rem] basis-60">
                     <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <button type="button" onClick={() => onEdit(d.id)} className="font-medium text-ink hover:text-brand-700 hover:underline">
+                      <button type="button" onClick={() => openProfile({ id: d.id, name: d.donor_name, phone: d.phone })} className="font-medium text-ink hover:text-brand-700 hover:underline">
                         {d.donor_name}
                       </button>
                       <SourceChip source={d.source} />

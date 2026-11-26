@@ -7,6 +7,7 @@ import { clockTime, relativeDate } from "@/lib/format";
 import { KIND, MONTHS, dayKind, sameName, type Occurrence, type SankalpStatus } from "@/lib/sankalpam";
 import { Badge, Button, DropdownMenu, Icon } from "@/components/ui";
 import { SourceChip } from "./source-chip";
+import { useDonorProfile } from "./donor-profile-context";
 
 export function DateTile({ day, month, kind }: { day: number; month: number; kind: ReturnType<typeof dayKind> }) {
   return (
@@ -43,6 +44,7 @@ export function SankalpRow({
   const kind = dayKind(o.occasion);
   const done = o.status === "sent" || o.status === "skipped";
   const tel = o.phone ? `tel:+91${o.phone}` : null;
+  const openProfile = useDonorProfile();
 
   return (
     <li
@@ -72,7 +74,7 @@ export function SankalpRow({
           {lateBy && <Badge tone="danger">{lateBy}</Badge>}
         </div>
         <p className="mt-0.5 text-sm text-ink-soft">
-          <button type="button" onClick={() => onEdit(o.donor_id)} className="font-medium text-ink hover:text-brand-700 hover:underline">
+          <button type="button" onClick={() => openProfile({ id: o.donor_id, name: o.donor_name, phone: o.phone })} className="font-medium text-ink hover:text-brand-700 hover:underline">
             {o.donor_name}
           </button>
           {!sameName(o.sevak_name, o.donor_name) && <span className="text-ink-muted"> · on the name of {o.sevak_name}</span>}

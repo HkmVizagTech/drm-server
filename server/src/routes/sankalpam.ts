@@ -18,6 +18,7 @@ import { authenticate, authorize } from '../middleware/auth';
 import { parseWorkbook, detectColumns, cellText, normalizePhone, isDialable, buildWorkbook } from '../utils/spreadsheet';
 import { sendExport } from '../utils/export';
 import { refreshSankalpFromPerson } from '../services/sankalpDays';
+import { buildDonorProfile, findDonorPerson } from '../services/donorProfile';
 
 const router = Router();
 router.use(authenticate, authorize('admin', 'caller'));
@@ -411,6 +412,24 @@ router.get('/donors', async (req, res) => {
   } catch (err) {
     console.error('sankalpam.donors error:', err);
     res.status(500).json({ error: 'Could not load.' });
+  }
+});
+
+/**
+ * GET /sankalpam/donors/:id/profile - the giving profile of a Sankalpam donor, the same one a
+ * WhatsApp chat shows: totals, year by year, what for, every gift, their lead. The donor is the
+ * DRM person the entry is linked to, else the one with its mobile number (or the other number).
+ */
+router.get('/donors/:id/profile', async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) return res.status(404).json({ error: 'Donor not found' });
+  try {
+    const d = (await pool.query(`SELECT person_id, phone, alt_phone FROM sankalpam_donors WHERE id = $1`, [req.params.id])).rows[0];
+    if (!d) return res.status(404).json({ error: 'Donor not found' });
+    const person = (await findDonorPerson(d.person_id, d.phone)) ?? (d.alt_phone ? await findDonorPerson(null, d.alt_phone) : null);
+    res.json(await buildDonorProfile(person));
+  } catch (err) {
+    console.error('sankalpam.profile error:', err);
+    res.status(500).json({ error: 'Could not load this donor.' });
   }
 });
 

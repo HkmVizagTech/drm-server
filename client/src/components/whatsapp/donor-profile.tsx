@@ -1,6 +1,7 @@
 "use client";
 
-// Who you are chatting with, as a donor. Opens on the name or picture at the top of a WhatsApp chat:
+// Who somebody is, as a donor. Opens on the name or picture at the top of a WhatsApp chat, and on a
+// donor's name in Sankalpam:
 // what they have given in all (how many times, the average, the largest, this year), year by year,
 // what for, the latest gifts - with every gift one tap away - and their lead in DRM.
 //
@@ -32,6 +33,7 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
   );
 }
 
+/** The profile of whoever the chat is with. */
 export function WhatsAppDonorProfile({
   conversationId,
   name,
@@ -43,6 +45,11 @@ export function WhatsAppDonorProfile({
   phone: string;
   onClose: () => void;
 }) {
+  return <DonorProfileDialog url={`/api/wa-chat/conversations/${conversationId}/donor`} name={name} phone={phone} onClose={onClose} />;
+}
+
+/** The same profile for anyone: `url` is whichever endpoint answers with the donor's profile. */
+export function DonorProfileDialog({ url, name, phone, onClose }: { url: string; name: string; phone: string; onClose: () => void }) {
   const [data, setData] = useState<DonorProfile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [allOpen, setAllOpen] = useState(false);
@@ -50,13 +57,13 @@ export function WhatsAppDonorProfile({
   useEffect(() => {
     let live = true;
     apiClient
-      .get<DonorProfile>(`/api/wa-chat/conversations/${conversationId}/donor`)
+      .get<DonorProfile>(url)
       .then((r) => live && setData(r))
       .catch((e: Error) => live && setError(e.message));
     return () => {
       live = false;
     };
-  }, [conversationId]);
+  }, [url]);
 
   const s = data?.stats;
   const gifts = data?.donations ?? [];

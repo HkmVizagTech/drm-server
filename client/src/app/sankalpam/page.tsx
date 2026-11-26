@@ -36,6 +36,7 @@ import { toast } from "@/components/toast";
 import { ExportButton } from "@/components/export-button";
 import { SankalpRow } from "@/components/sankalpam/sankalp-row";
 import { DonorDialog } from "@/components/sankalpam/donor-dialog";
+import { DonorProfileProvider } from "@/components/sankalpam/donor-profile-context";
 import { UploadDialog } from "@/components/sankalpam/upload-dialog";
 import { SourceChip } from "@/components/sankalpam/source-chip";
 import { NeedDetailsView } from "@/components/sankalpam/need-details";
@@ -61,7 +62,9 @@ const key = (o: { date_id: string; year: number }) => `${o.date_id}:${o.year}`;
 export default function SankalpamPage() {
   return (
     <Suspense fallback={null}>
-      <Sankalpam />
+      <DonorProfileProvider>
+        <Sankalpam />
+      </DonorProfileProvider>
     </Suspense>
   );
 }

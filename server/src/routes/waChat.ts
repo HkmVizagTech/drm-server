@@ -12,6 +12,7 @@ import { authenticate, authorize } from '../middleware/auth';
 import { addClient, publish } from '../services/waEvents';
 import { searchContacts, syncContacts, syncStatus } from '../services/whatsappContacts';
 import { importHistory, importStatus } from '../services/waHistoryImport';
+import { buildDonorProfile, findDonorPerson } from '../services/donorProfile';
 import {
   Conversation,
   chatTemplates,
@@ -198,69 +199,7 @@ router.get('/conversations/:id/donor', async (req, res) => {
   const c = await getConv(req.params.id);
   if (!c) return res.status(404).json({ error: 'Conversation not found' });
   try {
-    const person = (
-      c.person_id
-        ? await pool.query(`SELECT id, name, phone, email, COALESCE(address_city, address_area) AS city, created_at FROM people WHERE id = $1`, [c.person_id])
-        : await pool.query(
-            `SELECT id, name, phone, email, COALESCE(address_city, address_area) AS city, created_at FROM people
-              WHERE RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) = RIGHT($1, 10) AND LENGTH($1) = 10
-              ORDER BY created_at LIMIT 1`,
-            [c.phone]
-          )
-    ).rows[0];
-    if (!person) return res.json({ person: null });
-
-    const [totals, years, purposes, donations, lead] = await Promise.all([
-      pool.query(
-        `SELECT COUNT(*)::int AS count, COALESCE(SUM(amount), 0)::numeric AS total,
-                COALESCE(MAX(amount), 0)::numeric AS largest, MIN(created_at) AS first_at, MAX(created_at) AS last_at,
-                COALESCE(SUM(amount) FILTER (WHERE created_at >= date_trunc('year', NOW())), 0)::numeric AS this_year
-           FROM donations WHERE person_id = $1`,
-        [person.id]
-      ),
-      pool.query(
-        `SELECT EXTRACT(YEAR FROM created_at)::int AS year, COUNT(*)::int AS count, SUM(amount)::numeric AS total
-           FROM donations WHERE person_id = $1 GROUP BY 1 ORDER BY 1 DESC LIMIT 10`,
-        [person.id]
-      ),
-      pool.query(
-        `SELECT COALESCE(NULLIF(TRIM(purpose), ''), 'Donation') AS purpose, COUNT(*)::int AS count, SUM(amount)::numeric AS total
-           FROM donations WHERE person_id = $1 GROUP BY 1 ORDER BY 3 DESC LIMIT 5`,
-        [person.id]
-      ),
-      pool.query(
-        `SELECT id, amount, purpose, source_page, source_site, receipt_number, created_at,
-                payment_mode, payment_ref, sevak_name, source
-           FROM donations WHERE person_id = $1 ORDER BY created_at DESC LIMIT 500`,
-        [person.id]
-      ),
-      pool.query(
-        `SELECT l.id, st.label AS status_label, u.name AS caller_name, l.next_follow_up_at
-           FROM leads l
-           LEFT JOIN crm_statuses st ON st.slug = l.status
-           LEFT JOIN users u ON u.id = l.assigned_to
-          WHERE l.person_id = $1
-          ORDER BY l.updated_at DESC LIMIT 1`,
-        [person.id]
-      ),
-    ]);
-    const t = totals.rows[0];
-    res.json({
-      person,
-      stats: {
-        count: t.count,
-        total: Number(t.total),
-        average: t.count ? Number(t.total) / t.count : 0,
-        largest: Number(t.largest),
-        this_year: Number(t.this_year),
-        first_at: t.first_at,
-        last_at: t.last_at,
-      },
-      by_year: years.rows.map((y) => ({ year: y.year, count: y.count, total: Number(y.total) })),
-      by_purpose: purposes.rows.map((p) => ({ purpose: p.purpose, count: p.count, total: Number(p.total) })),
-      donations: donations.rows,
-      lead: lead.rows[0] ?? null,
-    });
+    res.json(await buildDonorProfile(await findDonorPerson(c.person_id, c.phone)));
   } catch (err) {
     console.error('waChat.donor error:', err);
     res.status(500).json({ error: 'Could not load this donor.' });

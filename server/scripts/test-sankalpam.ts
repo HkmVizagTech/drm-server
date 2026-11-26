@@ -227,6 +227,20 @@ async function main() {
   r = await req('GET', `/api/sankalpam/donors?month=${md(today).month}`, ana);
   check('and by month', r.body.donors?.some((d: any) => d.id === mahesh.id), r.body.donors?.length);
 
+  // the giving profile that opens on a donor's name
+  const pp = (await pool.query(`INSERT INTO people (name, phone) VALUES ('Ravi Teja', '9848011111') RETURNING id`)).rows[0];
+  await pool.query(`INSERT INTO donations (person_id, amount, purpose, payment_mode) VALUES ($1, 1500, 'Annadan', 'upi')`, [pp.id]);
+  r = await req('GET', `/api/sankalpam/donors/${id}/profile`, ana);
+  check("a donor's name opens their giving profile: found by number, 1500 in 1 gift", r.status === 200 && r.body.person?.id === pp.id && r.body.stats?.total === 1500 && r.body.stats?.count === 1, r.body);
+  r = await req('GET', `/api/sankalpam/donors/${mahesh.id}/profile`, ana);
+  check('someone who has not given from that number is "not a donor yet", not an error', r.status === 200 && r.body.person === null, r.body);
+  r = await req('GET', '/api/sankalpam/donors/not-an-id/profile', ana);
+  check('a bad id is not found', r.status === 404, r.body);
+  r = await req('GET', `/api/sankalpam/donors/${id}/profile`, acc);
+  check('an accountant cannot open it', r.status === 403, r.status);
+  await pool.query(`DELETE FROM donations WHERE person_id = $1`, [pp.id]);
+  await pool.query(`DELETE FROM people WHERE id = $1`, [pp.id]);
+
   console.log('\n7. who can');
   r = await req('GET', '/api/sankalpam/board', acc);
   check('an accountant cannot', r.status === 403);

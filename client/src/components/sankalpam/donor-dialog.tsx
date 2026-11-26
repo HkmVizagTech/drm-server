@@ -13,6 +13,7 @@ import { toast } from "@/components/toast";
 import { DAYS_IN, MONTHS_LONG, OCCASIONS, type SankalpDate, type SankalpDonor } from "@/lib/sankalpam";
 import { Alert, Button, Field, Icon, Input, Modal, Select, Skeleton, Textarea, Toggle } from "@/components/ui";
 import { SankalpCallPanel } from "./call-tools";
+import { useDonorProfile } from "./donor-profile-context";
 
 interface Form {
   donor_name: string;
@@ -56,6 +57,7 @@ export function DonorDialog({
   onSaved: () => void | Promise<void>;
 }) {
   const { user } = useAuth();
+  const openProfile = useDonorProfile();
   const [id, setId] = useState<string | null>(donorId);
   const [f, setF] = useState<Form>(empty);
   const [loading, setLoading] = useState(!!donorId);
@@ -233,6 +235,11 @@ export function DonorDialog({
       ) : (
         <div className="space-y-5">
           {/* Anyone on the list can be rung - to ask, update or check. */}
+          {id && (
+            <Button variant="secondary" size="sm" icon="user" onClick={() => openProfile({ id, name: f.donor_name, phone: f.phone || f.alt_phone || null })}>
+              Giving profile
+            </Button>
+          )}
           {id && (
             <SankalpCallPanel
               donorId={id}
