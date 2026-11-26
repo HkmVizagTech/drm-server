@@ -641,6 +641,10 @@ export default function WallTable({ view }: { view: WallView }) {
   // A picture chosen but not yet sent: shown for checking first.
   const [pending, setPending] = useState<{ row: Row; file: File; url: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // The same, but straight from the phone's camera.
+  const cameraRef = useRef<HTMLInputElement>(null);
+  // Upload was tapped: asking whether to take a photo or pick one from the gallery.
+  const [choosing, setChoosing] = useState(false);
   const target = useRef<string | null>(null);
   const targetRow = useRef<Row | null>(null);
 
@@ -728,13 +732,14 @@ export default function WallTable({ view }: { view: WallView }) {
   function pickFile(row: Row) {
     target.current = row.ref;
     targetRow.current = row;
-    fileRef.current?.click();
+    setChoosing(true);
   }
 
   /** A file was chosen: check it, then show it for a look before anything is sent. */
   async function onFile(picked: File | undefined) {
     const row = targetRow.current;
     if (fileRef.current) fileRef.current.value = "";
+    if (cameraRef.current) cameraRef.current.value = "";
     if (!picked || !row) return;
     if (!/^image\/(jpeg|png|webp)$/.test(picked.type)) return toast.error("Use a JPG, PNG or WebP picture.");
     // Shrunk first, so the preview shows exactly what will be stored and sent.
@@ -821,6 +826,41 @@ export default function WallTable({ view }: { view: WallView }) {
         className="hidden"
         onChange={(e) => void onFile(e.target.files?.[0])}
       />
+      <input
+        ref={cameraRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={(e) => void onFile(e.target.files?.[0])}
+      />
+      {choosing && (
+        <Modal title="Add the picture" onClose={() => setChoosing(false)}>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Button
+              icon="camera"
+              className="h-14"
+              onClick={() => {
+                setChoosing(false);
+                cameraRef.current?.click();
+              }}
+            >
+              Take a photo
+            </Button>
+            <Button
+              variant="secondary"
+              icon="image"
+              className="h-14"
+              onClick={() => {
+                setChoosing(false);
+                fileRef.current?.click();
+              }}
+            >
+              Choose from gallery
+            </Button>
+          </div>
+        </Modal>
+      )}
 
       {view === "print" && data && stage === "" && (
         <div className="mb-4 flex flex-wrap gap-2">

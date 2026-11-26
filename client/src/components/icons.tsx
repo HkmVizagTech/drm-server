@@ -26,7 +26,7 @@ export type IconName =
   | "check" | "checkCircle" | "x" | "xCircle" | "alert" | "info" | "help"
   | "phone" | "phoneOutgoing" | "message" | "mail" | "bell" | "calendar" | "clock"
   | "user" | "users" | "userPlus" | "logout" | "menu" | "more"
-  | "edit" | "trash" | "copy" | "file" | "fileText" | "sheet" | "receipt"
+  | "edit" | "trash" | "copy" | "file" | "camera" | "image" | "fileText" | "sheet" | "receipt"
   | "qr" | "rupee" | "chart" | "home" | "list" | "inbox" | "link" | "tag"
   | "star" | "sparkle" | "shield" | "box" | "target" | "trendUp" | "eye"
   | "mic" | "play" | "pause" | "phoneIncoming" | "phoneMissed"
@@ -85,6 +85,8 @@ const PATHS: Record<IconName, string> = {
   edit: "M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17v3ZM15 6l3 3",
   trash: "M4 7h16M10 11v6m4-6v6M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2",
   copy: "M9 9a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2V9Zm-4 6H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v0",
+  camera: "M4 8a2 2 0 0 1 2-2h1.5l1.2-2h6.6l1.2 2H18a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8Zm8 9a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z",
+  image: "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm0 14 4.5-5.5 3.5 4 2.5-3L19 18M8.5 9.5h.01",
   file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Zm0 0v5h5",
   fileText: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Zm0 0v5h5M9 13h6m-6 4h4",
   sheet: "M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6Zm0 4.5h16M4 15h16M10 4.5v15",
