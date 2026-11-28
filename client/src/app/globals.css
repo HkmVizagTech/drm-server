@@ -56,8 +56,8 @@
   --brand-900: #163b1d;
 
   /* ---- surfaces -------------------------------------------------------- */
-  --page: #eef5f7;
-  --sidebar: #f3fbe6;
+  --page: #f4f7f9;
+  --sidebar: #ffffff;
   --surface: #ffffff;
   /* One step back from --surface, for table headers, toolbars and the inside
      of a well. Having a named second surface is what stops six files each

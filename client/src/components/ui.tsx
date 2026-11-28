@@ -158,7 +158,9 @@ export function PageHeader({
     <div className="mb-6 flex flex-wrap items-start justify-between gap-4 border-b border-line-soft pb-5">
       <div className="min-w-0">
         {eyebrow && (
-          <p className="mb-1 text-2xs font-semibold uppercase tracking-[0.08em] text-brand-600">
+          // On a laptop the breadcrumb in the top bar already names the section; this line is for the phone,
+          // where the breadcrumb is hidden.
+          <p className="mb-1 text-2xs font-semibold uppercase tracking-[0.08em] text-brand-600 lg:hidden">
             {eyebrow}
           </p>
         )}

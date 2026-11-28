@@ -49,8 +49,12 @@ function Breadcrumb() {
 
   return (
     <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-sm">
-      <span className="hidden text-ink-faint sm:inline">{here.group}</span>
-      <Icon name="chevronRight" size={13} className="hidden text-ink-faint/70 sm:inline" />
+      {!here.pinned && (
+        <>
+          <span className="hidden text-ink-faint sm:inline">{here.group}</span>
+          <Icon name="chevronRight" size={13} className="hidden text-ink-faint/70 sm:inline" />
+        </>
+      )}
       {isDetail ? (
         <>
           <Link
