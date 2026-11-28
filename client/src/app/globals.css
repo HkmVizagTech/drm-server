@@ -67,8 +67,8 @@
 
   /* ---- lines ----------------------------------------------------------- */
   --line: #acbac4;
-  --line-soft: rgba(140, 160, 173, 0.32);
-  --line-strong: rgba(118, 139, 153, 0.62);
+  --line-soft: #e2e8ed;
+  --line-strong: #c3ced8;
 
   /* ---- accent aliases, kept so existing markup does not break ----------- */
   --accent: var(--brand-600);
@@ -339,12 +339,12 @@ input[type="time"]:hover::-webkit-calendar-picker-indicator {
   background: transparent;
 }
 
-/* The sidebar sits on pale green, where the soft green thumb would vanish. */
+/* The sidebar is white, so its scrollbar is a quiet grey rather than the green used on the page. */
 aside {
-  scrollbar-color: #8fc47a transparent;
+  scrollbar-color: #cbd5dc transparent;
 }
 aside::-webkit-scrollbar-thumb {
-  background: #8fc47a;
+  background: #cbd5dc;
   background-clip: content-box;
 }
 

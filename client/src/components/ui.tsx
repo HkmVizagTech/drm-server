@@ -155,7 +155,7 @@ export function PageHeader({
   eyebrow?: string;
 }) {
   return (
-    <div className="mb-6 flex flex-wrap items-start justify-between gap-4 border-b border-line-soft pb-5">
+    <div className="mb-5 flex flex-wrap items-start justify-between gap-x-4 gap-y-3 pb-1">
       <div className="min-w-0">
         {eyebrow && (
           // On a laptop the breadcrumb in the top bar already names the section; this line is for the phone,
@@ -164,7 +164,7 @@ export function PageHeader({
             {eyebrow}
           </p>
         )}
-        <h1 className="text-2xl font-semibold tracking-tight text-ink">{title}</h1>
+        <h1 className="text-[1.65rem] font-semibold leading-tight tracking-tight text-ink">{title}</h1>
         {subtitle && <p className="mt-1.5 max-w-2xl text-sm text-ink-muted">{subtitle}</p>}
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
