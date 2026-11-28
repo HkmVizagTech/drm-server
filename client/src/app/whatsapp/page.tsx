@@ -10,7 +10,7 @@
 // The rules WhatsApp enforces are shown, not hidden: free text and files only within 24 hours of the
 // donor's last message, an approved template after that, and nothing at all to a donor who wrote STOP.
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useSessionState } from "@/lib/session-state";
 import { useSearchParams } from "next/navigation";
 import { apiClient, apiUrl } from "@/lib/api";
@@ -409,6 +409,7 @@ function ChatInner() {
   const cursor = useRef<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  const loadingEarlier = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const tplFileInput = useRef<HTMLInputElement>(null);
   const activeRef = useRef<string | null>(null);
@@ -549,10 +550,29 @@ function ChatInner() {
     }
   }, []);
 
+  // After earlier messages are added above, keep the reader where they were: the same message stays under
+  // their eye. Done as the messages are drawn, not a frame later, so it cannot lose to the browser.
+  const restoreFrom = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    if (restoreFrom.current !== null) {
+      el.scrollTop = el.scrollHeight - restoreFrom.current;
+      restoreFrom.current = null;
+    } else if (stick.current) el.scrollTop = el.scrollHeight;
+  }, [msgs, activeId]);
+
+  // The thread keeps its end in view when its height changes - the phone's keyboard opening or closing,
+  // the message box growing a line - instead of being left wherever the browser happened to put it.
   useEffect(() => {
     const el = scroller.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [msgs, activeId]);
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      if (stick.current) el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [activeId]);
 
   function toBottom() {
     const el = scroller.current;
@@ -562,17 +582,20 @@ function ChatInner() {
   }
 
   async function loadEarlier() {
-    if (!activeId || !msgs.length) return;
+    if (!activeId || !msgs.length || loadingEarlier.current) return;
+    loadingEarlier.current = true;
     const el = scroller.current;
     const prevHeight = el?.scrollHeight ?? 0;
     try {
       const r = await apiClient.get<{ messages: Msg[]; more: boolean }>(`/api/wa-chat/conversations/${activeId}/messages?before=${encodeURIComponent(msgs[0].created_at)}`);
       stick.current = false;
+      restoreFrom.current = r.messages.length ? prevHeight : null;
       merge(r.messages);
       setMore(r.more);
-      requestAnimationFrame(() => el && (el.scrollTop = el.scrollHeight - prevHeight));
     } catch (e) {
       toast((e as Error).message, { tone: "danger" });
+    } finally {
+      loadingEarlier.current = false;
     }
   }
 
@@ -869,7 +892,14 @@ function ChatInner() {
             )}
 
             <div ref={scroller}
-              onScroll={(e) => { const el = e.currentTarget; const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80; stick.current = near; if (near) setAway(0); }}
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+                stick.current = near;
+                if (near) setAway(0);
+                // Scrolled up to the top: bring in the earlier messages by themselves, as WhatsApp does.
+                if (el.scrollTop < 160 && more && !loadingThread) void loadEarlier();
+              }}
               className="relative flex-1 overflow-y-auto bg-[#f2eee6] px-3 py-4 sm:px-6"
             >
               {more && <div className="pb-3 text-center"><Button size="xs" variant="secondary" onClick={() => void loadEarlier()}>Load earlier messages</Button></div>}
@@ -960,6 +990,8 @@ function ChatInner() {
                       value={draft}
                       maxLength={file ? 1024 : 4096}
                       onChange={(e) => setDraft(e.target.value)}
+                      // The keyboard is opening: keep the newest message in view above the box.
+                      onFocus={() => { stick.current = true; window.setTimeout(() => { const el = scroller.current; if (el) el.scrollTop = el.scrollHeight; }, 300); }}
                       onPaste={(e) => { const f = Array.from(e.clipboardData.files).find((x) => x.type.startsWith("image/")); if (f) { e.preventDefault(); pickFile(f); } }}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {

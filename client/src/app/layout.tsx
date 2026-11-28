@@ -21,6 +21,9 @@ export const metadata: Metadata = {
 // screens frames them in the temple's green rather than default grey.
 export const viewport: Viewport = {
   themeColor: "#2b6e2f",
+  // When the phone's keyboard opens, shrink the page instead of letting the browser scroll it. Without
+  // this the WhatsApp chat is pushed up out of view the moment you tap the message box.
+  interactiveWidget: "resizes-content",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
